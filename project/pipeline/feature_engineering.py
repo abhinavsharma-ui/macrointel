@@ -40,6 +40,11 @@ SENTIMENT_FEATURE_COLUMNS = [
     "media_sentiment",
     "official_sentiment",
     "filing_sentiment",
+    "filing_change_score",
+    "filing_fresh_language_score",
+    "new_risk_factors",
+    "earnings_tone_signal",
+    "earnings_call_count",
     "article_count",
     "media_article_count",
     "official_article_count",
@@ -282,6 +287,9 @@ class FeaturePipeline:
         feat["vol_regime_stressed"] = (
             feat["realized_vol_21d"] > feat["realized_vol_21d"].rolling(63).mean()
         ).astype(float)
+        feat["vol_regime_ratio"] = (
+            feat["realized_vol_21d"] / feat["realized_vol_21d"].rolling(30, min_periods=10).mean().replace(0, np.nan)
+        ).replace([np.inf, -np.inf], np.nan).fillna(1.0).clip(0.1, 5.0)
 
         vol_ma20 = volume.rolling(20).mean()
         feat["vol_ratio_20"] = volume / vol_ma20.replace(0, np.nan)
@@ -351,6 +359,10 @@ class FeaturePipeline:
             (feat["compound_score"] - sent_mean) / sent_std
         ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         feat["sentiment_velocity"] = feat["compound_score"].diff(3).fillna(0.0)
+        feat["earnings_tone_velocity"] = (
+            feat["earnings_tone_signal"]
+            - feat["earnings_tone_signal"].rolling(63, min_periods=5).mean().shift(1)
+        ).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.5, 1.5)
         weighted_sent_mean = feat["weighted_compound_score"].rolling(20, min_periods=5).mean()
         weighted_sent_std = feat["weighted_compound_score"].rolling(20, min_periods=5).std().replace(0, np.nan)
         feat["weighted_sentiment_zscore"] = (
@@ -374,6 +386,9 @@ class FeaturePipeline:
         ).clip(-1, 1)
         feat["filing_event_signal"] = (
             0.60 * feat["filing_sentiment"].clip(-1, 1)
+            + 0.18 * feat["filing_change_score"].clip(-1, 1)
+            + 0.12 * feat["filing_fresh_language_score"].clip(-1, 1)
+            - 0.08 * feat["new_risk_factors"].clip(0, 1)
             + 0.30 * feat["filing_event_hit"].clip(0, 1)
             + 0.10 * feat["source_quality_signal"]
         ).clip(-1, 1)
@@ -420,12 +435,26 @@ class FeaturePipeline:
             0.60 * feat["earnings_propagation_signal"]
             + 0.40 * feat["close_reversal_signal"]
         ).fillna(0.0).clip(-1, 1)
+        feat["adaptive_horizon_multiplier"] = np.where(
+            feat["vol_regime_ratio"] > 1.5,
+            0.60,
+            1.0,
+        )
+        event_extension_mask = (
+            feat["official_event_hit"].clip(0, 1) > 0
+        ) | (feat["filing_event_hit"].clip(0, 1) > 0)
+        feat.loc[event_extension_mask, "adaptive_horizon_multiplier"] = np.maximum(
+            feat.loc[event_extension_mask, "adaptive_horizon_multiplier"],
+            3.0,
+        )
         feat["alpha_signal"] = (
             0.45 * feat["momentum_composite"]
             + 0.15 * sent_norm
             + 0.18 * feat["event_alpha_signal"]
             + 0.10 * feat["official_event_signal"]
-            + 0.07 * feat["filing_event_signal"]
+            + 0.05 * feat["filing_event_signal"]
+            + 0.04 * feat["earnings_tone_velocity"].clip(-1, 1)
+            + 0.03 * feat["filing_change_score"].clip(-1, 1)
             + 0.05 * feat["travel_activity_change"].clip(-1, 1)
         ).fillna(0.0).clip(-1, 1)
 
@@ -484,6 +513,7 @@ class FeaturePipeline:
             "zscore_vs_60d",
             "realized_vol_21d",
             "vol_regime_stressed",
+            "vol_regime_ratio",
             "vol_ratio_20",
             "obv",
             "obv_slope",
@@ -508,6 +538,11 @@ class FeaturePipeline:
             "media_sentiment",
             "official_sentiment",
             "filing_sentiment",
+            "filing_change_score",
+            "filing_fresh_language_score",
+            "new_risk_factors",
+            "earnings_tone_signal",
+            "earnings_call_count",
             "article_count",
             "media_article_count",
             "official_article_count",
@@ -518,6 +553,7 @@ class FeaturePipeline:
             "source_quality_score",
             "sentiment_zscore",
             "sentiment_velocity",
+            "earnings_tone_velocity",
             "weighted_sentiment_zscore",
             "news_volume_spike",
             "source_quality_signal",
@@ -538,5 +574,6 @@ class FeaturePipeline:
             "travel_activity_level",
             "travel_activity_change",
             "event_alpha_signal",
+            "adaptive_horizon_multiplier",
             "alpha_signal",
         ]

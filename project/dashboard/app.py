@@ -1318,6 +1318,7 @@ body.theme-light{background:
 .quoteGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;}
 .quoteCard{background:linear-gradient(180deg, rgba(56,189,248,.08), rgba(167,139,250,.06));border:1px solid rgba(56,189,248,.16);border-radius:14px;padding:12px;cursor:pointer;transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease;box-shadow:inset 0 0 0 1px rgba(255,255,255,.02);}
 .quoteCard:hover{transform:translateY(-2px);box-shadow:0 14px 30px var(--accent-glow);border-color:rgba(56,189,248,.28);}
+.quoteCard.active{border-color:rgba(37,99,235,.42);box-shadow:0 16px 30px rgba(37,99,235,.12), inset 0 0 0 1px rgba(37,99,235,.16);}
 .quoteTop{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px;}
 .quoteSym{font-family:var(--sans);font-weight:700;font-size:15px;}
 .quoteLane{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;}
@@ -1695,7 +1696,20 @@ body.theme-light{background:
 const SOCKET_AVAILABLE = typeof window.io === 'function';
 const CHART_AVAILABLE = typeof window.Chart !== 'undefined';
 const io_sock = SOCKET_AVAILABLE ? io({transports:['websocket','polling']}) : { on(){}, emit(){} };
-const LEADER_SYMBOLS = ['AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','AMD','NFLX','QCOM','SPY','QQQ'];
+const MARKET_BOARD_LIMIT = 24;
+const LEADER_SYMBOLS = ['AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','AMD','NFLX','QCOM','AVGO','JPM','WMT','XOM','SPY','QQQ','DIA','IWM','RELIANCE.NS','TCS.NS','INFY.NS'];
+const TV_AMEX_SYMBOLS = new Set(['SPY','DIA','IWM','GLD','SLV','TLT','HYG','VTI','XLF','XLE','XLK','XLY','XLI','XLV','XLP','XLB','XLU']);
+const TV_NYSE_SYMBOLS = new Set(['JPM','BAC','WMT','DIS','KO','JNJ','XOM','CVX','UNH','HD','MCD','NKE','BA','CAT','GS','V','MA','PG','IBM','GE','F','GM','T','VZ','PFE','MRK','ABBV','CRM','ORCL','UBER','SNOW']);
+const TV_INDEX_SYMBOLS = {
+  '^VIX': 'TVC:VIX',
+  '^GSPC': 'SP:SPX',
+  '^SPX': 'SP:SPX',
+  '^DJI': 'DJ:DJI',
+  '^IXIC': 'NASDAQ:IXIC',
+  '^NDX': 'NASDAQ:NDX',
+  '^NSEI': 'NSE:NIFTY',
+  '^NSEBANK': 'NSE:NIFTYBANK',
+};
 const SORT_MODES = ['conviction', 'rank', 'symbol'];
 const SORT_LABELS = {
   conviction: 'sort: conviction',
@@ -1713,6 +1727,7 @@ const SIGNAL_LANES = ['normal', 'day', 'crypto'];
 let signals = {}, sel = null, eq = [100000], chart = null, sd = 'conviction', activeLane = 'all', activePage = 'overview', reportData = null, livePrices = {};
 let healthSnapshot = {};
 let tvState = { src: '', symbol: '', theme: '', interval: '' };
+let chartSelection = { symbol: '', signalKey: '', lane: 'normal', market: '', source: 'auto', laneLabel: '' };
 
 function setConnectionState(label, color){
   const dot = document.getElementById('cdot');
@@ -1751,7 +1766,7 @@ function applyTheme(theme, persist=true){
     try{ localStorage.setItem('macrointel-theme', nextTheme); }catch(_err){}
   }
   updateChart();
-  if(sel && signals[sel]) renderTradingViewChart(signals[sel]);
+  syncChartSelection(false);
 }
 
 function initTheme(){
@@ -1792,15 +1807,6 @@ function fmtQty(value){
   return num.toLocaleString(undefined, {maximumFractionDigits: digits}).replace(/\.?0+$/, '');
 }
 
-function tradingViewSymbol(symbol){
-  const clean = String(symbol || '').trim().toUpperCase();
-  if(!clean) return '';
-  if(clean.endsWith('.NS')) return `NSE:${clean.replace('.NS', '')}`;
-  if(clean.endsWith('USDT') || clean.endsWith('USDC') || clean.endsWith('BUSD')) return `BINANCE:${clean}`;
-  if(['SPY','DIA','IWM','GLD','SLV','TLT','HYG','VTI'].includes(clean)) return `AMEX:${clean}`;
-  return `NASDAQ:${clean}`;
-}
-
 function toggleMenu(forceOpen){
   const drawer = document.getElementById('menuDrawer');
   if(!drawer) return;
@@ -1825,7 +1831,7 @@ function setPage(page){
   }
   if(nextPage === 'overview'){
     renderMarketBoard();
-    if(sel && signals[sel]) renderTradingViewChart(signals[sel]);
+    syncChartSelection(true);
   }else if(nextPage === 'signals'){
     renderSidebar();
     if(sel && signals[sel]) renderDetail(signals[sel]);
@@ -1852,6 +1858,181 @@ function selectedBySymbol(){
   return Object.values(grouped).map(rows => preferredSignal(rows)).filter(Boolean).sort(compareSignals);
 }
 
+function marketHintForSymbol(symbol){
+  const clean = String(symbol || '').trim().toUpperCase();
+  return String((livePrices[clean] || {}).market || '');
+}
+
+function mergeSignalWithLivePrice(signal){
+  if(!signal || !signal.symbol) return null;
+  const payload = livePrices[String(signal.symbol).toUpperCase()] || {};
+  const merged = {...signal};
+  if(payload.price != null){
+    merged.last_price = payload.price;
+    merged.current_price = payload.price;
+  }
+  if(payload.change_pct != null){
+    merged.price_change_pct = payload.change_pct;
+  }
+  if(payload.market && !merged.market){
+    merged.market = payload.market;
+  }
+  return merged;
+}
+
+function buildLiveFallbackSignal(symbol, overrides={}){
+  const clean = String(symbol || '').trim().toUpperCase();
+  if(!clean) return null;
+  const payload = livePrices[clean] || {};
+  const payloadChange = Number(payload.change_pct);
+  const overrideChange = Number(overrides.price_change_pct);
+  return {
+    symbol: clean,
+    lane: overrides.lane || 'normal',
+    lane_label: overrides.lane_label || overrides.laneLabel || 'Live price',
+    signal: overrides.signal || 'neutral',
+    last_price: overrides.last_price ?? overrides.current_price ?? payload.price,
+    current_price: overrides.current_price ?? overrides.last_price ?? payload.price,
+    price_change_pct: Number.isFinite(overrideChange) ? overrideChange : (Number.isFinite(payloadChange) ? payloadChange : null),
+    take_probability: Number(overrides.take_probability || 0),
+    conviction_score: Number(overrides.conviction_score || 0),
+    signal_key: overrides.signal_key || `${clean}::price`,
+    market: overrides.market || payload.market || '',
+    trade_eligible: !!overrides.trade_eligible,
+  };
+}
+
+function buildPriceLeaders(limit=MARKET_BOARD_LIMIT){
+  const rows = [];
+  const seen = new Set();
+  LEADER_SYMBOLS.forEach(symbol => {
+    const payload = livePrices[symbol];
+    if(!payload || seen.has(symbol) || rows.length >= limit) return;
+    rows.push(buildLiveFallbackSignal(symbol, {market: payload.market}));
+    seen.add(symbol);
+  });
+  Object.keys(livePrices)
+    .sort((a, b) => {
+      const delta = Math.abs(Number(livePrices[b]?.change_pct || 0)) - Math.abs(Number(livePrices[a]?.change_pct || 0));
+      return delta || a.localeCompare(b);
+    })
+    .forEach(symbol => {
+      if(seen.has(symbol) || rows.length >= limit) return;
+      rows.push(buildLiveFallbackSignal(symbol, {market: livePrices[symbol]?.market}));
+      seen.add(symbol);
+    });
+  return rows.filter(Boolean).slice(0, limit);
+}
+
+function buildMarketBoardRows(limit=MARKET_BOARD_LIMIT){
+  const rows = [];
+  const seen = new Set();
+  selectedBySymbol().map(mergeSignalWithLivePrice).filter(Boolean).forEach(signal => {
+    if(rows.length >= limit || seen.has(signal.symbol)) return;
+    rows.push(signal);
+    seen.add(signal.symbol);
+  });
+  buildPriceLeaders(limit).forEach(signal => {
+    if(rows.length >= limit || seen.has(signal.symbol)) return;
+    rows.push(signal);
+    seen.add(signal.symbol);
+  });
+  return rows;
+}
+
+function tradingViewSymbol(symbol, marketHint=''){
+  const clean = String(symbol || '').trim().toUpperCase();
+  if(!clean) return '';
+  if(clean.includes(':')) return clean;
+  if(TV_INDEX_SYMBOLS[clean]) return TV_INDEX_SYMBOLS[clean];
+  if(clean.endsWith('.NS')) return `NSE:${clean.replace('.NS', '')}`;
+  if(clean.endsWith('.BO')) return `BSE:${clean.replace('.BO', '')}`;
+  if(clean.endsWith('USDT') || clean.endsWith('USDC') || clean.endsWith('BUSD')) return `BINANCE:${clean}`;
+  const market = String(marketHint || '').trim().toUpperCase();
+  if(market.includes('NSE')) return `NSE:${clean}`;
+  if(market.includes('BSE')) return `BSE:${clean}`;
+  if(market.includes('BINANCE') || market.includes('CRYPTO')) return `BINANCE:${clean}`;
+  if(market.includes('NYSE')) return `NYSE:${clean}`;
+  if(market.includes('AMEX') || market.includes('ARCA') || TV_AMEX_SYMBOLS.has(clean)) return `AMEX:${clean}`;
+  if(market.includes('NASDAQ')) return `NASDAQ:${clean}`;
+  if(TV_NYSE_SYMBOLS.has(clean)) return `NYSE:${clean}`;
+  if(TV_AMEX_SYMBOLS.has(clean)) return `AMEX:${clean}`;
+  return clean;
+}
+
+function currentChartSignal(){
+  if(chartSelection.signalKey && signals[chartSelection.signalKey]){
+    return mergeSignalWithLivePrice(signals[chartSelection.signalKey]);
+  }
+  if(chartSelection.symbol){
+    const liveMatch = preferredSignal(Object.values(signals).filter(s => s.symbol === chartSelection.symbol));
+    if(liveMatch){
+      chartSelection.signalKey = liveMatch.signal_key || '';
+      chartSelection.lane = liveMatch.lane || chartSelection.lane;
+      chartSelection.laneLabel = liveMatch.lane_label || chartSelection.laneLabel;
+      if(liveMatch.market) chartSelection.market = liveMatch.market;
+      return mergeSignalWithLivePrice(liveMatch);
+    }
+    return buildLiveFallbackSignal(chartSelection.symbol, {
+      lane: chartSelection.lane || 'normal',
+      lane_label: chartSelection.laneLabel || 'Live price',
+      market: chartSelection.market || marketHintForSymbol(chartSelection.symbol),
+      signal_key: chartSelection.signalKey || `${chartSelection.symbol}::price`,
+    });
+  }
+  return null;
+}
+
+function defaultChartSignal(){
+  const preferred = selectedBySymbol().map(mergeSignalWithLivePrice).filter(Boolean)[0];
+  if(preferred) return preferred;
+  return buildPriceLeaders(1)[0] || null;
+}
+
+function setChartSelection(signal, source='manual'){
+  const merged = mergeSignalWithLivePrice(signal) || buildLiveFallbackSignal(signal && signal.symbol, signal || {});
+  if(!merged || !merged.symbol) return null;
+  chartSelection = {
+    symbol: merged.symbol,
+    signalKey: signals[merged.signal_key] ? merged.signal_key : '',
+    lane: merged.lane || 'normal',
+    market: merged.market || marketHintForSymbol(merged.symbol),
+    source,
+    laneLabel: merged.lane_label || merged.laneLabel || '',
+  };
+  return merged;
+}
+
+function syncChartSelection(forceFallback=false){
+  let signal = currentChartSignal();
+  if(!signal && forceFallback){
+    const fallback = defaultChartSignal();
+    if(fallback) signal = setChartSelection(fallback, 'auto');
+  }
+  renderTradingViewChart(signal);
+}
+
+function isBoardCardActive(signal){
+  if(!signal) return false;
+  return (!!chartSelection.symbol && signal.symbol === chartSelection.symbol)
+    || (!!chartSelection.signalKey && !!signal.signal_key && signal.signal_key === chartSelection.signalKey);
+}
+
+function focusBoardSymbol(symbol, signalKey=''){
+  const matchedSignal = signalKey && signals[signalKey]
+    ? signals[signalKey]
+    : preferredSignal(Object.values(signals).filter(s => s.symbol === symbol));
+  const signal = matchedSignal || buildLiveFallbackSignal(symbol);
+  const selected = setChartSelection(signal, 'board');
+  if(matchedSignal){
+    sel = matchedSignal.signal_key;
+    renderSidebar();
+    if(SOCKET_AVAILABLE) io_sock.emit('subscribe_symbol', {symbol: matchedSignal.symbol});
+  }
+  renderMarketBoard();
+  renderTradingViewChart(selected);
+}
+
 function openSignal(signalKey){
   setPage('signals');
   selectSig(signalKey);
@@ -1867,7 +2048,13 @@ function renderTradingViewChart(signal){
     tvState = { src: '', symbol: '', theme: '', interval: '' };
     return;
   }
-  const symbol = tradingViewSymbol(signal.symbol);
+  const symbol = tradingViewSymbol(signal.symbol, signal.market || marketHintForSymbol(signal.symbol));
+  if(!symbol){
+    badge.textContent = String(signal.symbol || '').toUpperCase();
+    host.innerHTML = `<div class="tvEmpty">TradingView symbol mapping is not ready for ${badge.textContent}</div>`;
+    tvState = { src: '', symbol: '', theme: '', interval: '' };
+    return;
+  }
   const interval = signal.lane === 'day' || signal.lane === 'crypto' ? '15' : 'D';
   const tvTheme = document.body.classList.contains('theme-light') ? 'light' : 'dark';
   const toolbarBg = tvTheme === 'light' ? '%23f8fafc' : '%23091322';
@@ -1906,30 +2093,14 @@ function renderMarketBoard(){
   const grid = document.getElementById('qgrid');
   const meta = document.getElementById('qmeta');
   if(!grid) return;
-  const leaders = selectedBySymbol().slice(0, 8);
-  const priceFallback = LEADER_SYMBOLS.map(symbol => {
-    const payload = livePrices[symbol];
-    if(!payload) return null;
-    return {
-      symbol,
-      lane: 'normal',
-      lane_label: 'Live price',
-      signal: 'neutral',
-      last_price: payload.price,
-      current_price: payload.price,
-      price_change_pct: payload.change_pct,
-      take_probability: 0,
-      conviction_score: 0,
-      signal_key: `${symbol}::price`,
-    };
-  }).filter(Boolean).slice(0, 8);
-  const rows = leaders.length ? leaders : priceFallback;
+  const leaders = selectedBySymbol().slice(0, MARKET_BOARD_LIMIT);
+  const rows = buildMarketBoardRows(MARKET_BOARD_LIMIT);
   if(meta){
     const ready = leaders.filter(isTradeReady).length;
     meta.textContent = leaders.length
-      ? `${ready} trade-ready • ${leaders.length} leaders`
+      ? `${ready} trade-ready • ${rows.length} shown`
       : rows.length
-        ? `${rows.length} live leaders • signal engine warming up`
+        ? `${rows.length} live leaders • click to load chart`
         : 'watching leaders';
   }
   if(!rows.length){
@@ -1941,20 +2112,21 @@ function renderMarketBoard(){
     const change = Number(signal.price_change_pct);
     const changeColor = Number.isFinite(change) ? (change > 0 ? 'var(--green)' : change < 0 ? 'var(--red)' : 'var(--muted)') : 'var(--muted)';
     const take = Math.round(Number(signal.take_probability || (signal.meta_decision || {}).take_probability || 0) * 100);
-    const clickable = !!signals[signal.signal_key];
-    return `<div class="quoteCard" ${clickable ? `onclick="openSignal('${signal.signal_key}')"` : ''}>
+    const signalKey = signals[signal.signal_key] ? signal.signal_key : '';
+    const active = isBoardCardActive(signal);
+    return `<div class="quoteCard${active ? ' active' : ''}" onclick='focusBoardSymbol(${JSON.stringify(signal.symbol)}, ${JSON.stringify(signalKey)})'>
       <div class="quoteTop">
         <div>
           <div class="quoteSym">${signal.symbol}</div>
           <div class="quoteLane">${signal.lane_label || LANE_LABELS[signal.lane] || signal.lane || 'Signal'}</div>
         </div>
-        <div class="badge ${isTradeReady(signal) ? `b-${signal.signal}` : 'b-neutral'}">${isTradeReady(signal) ? (signal.signal || 'watch').toUpperCase() : (clickable ? 'WATCH' : 'LIVE')}</div>
+        <div class="badge ${isTradeReady(signal) ? `b-${signal.signal}` : 'b-neutral'}">${isTradeReady(signal) ? (signal.signal || 'watch').toUpperCase() : (signalKey ? 'WATCH' : 'LIVE')}</div>
       </div>
       <div class="quotePrice">${price != null && Number.isFinite(Number(price)) ? formatMoney(price) : '-'}</div>
       <div class="quoteMeta">
         <span style="color:${changeColor}">${Number.isFinite(change) ? formatSignedPct(change) : 'price pending'}</span>
-        <span>${clickable ? `conv ${(signal.conviction_score || 0).toFixed(1)}/10` : 'live tape'}</span>
-        <span>${clickable ? `take ${take}%` : 'awaiting signal'}</span>
+        <span>${signalKey ? `conv ${(signal.conviction_score || 0).toFixed(1)}/10` : 'live tape'}</span>
+        <span>${signalKey ? `take ${take}%` : 'awaiting signal'}</span>
       </div>
     </div>`;
   }).join('');
@@ -2094,7 +2266,19 @@ function applySignals(rows, replace=false){
     const preferred = preferredSignal(arr);
     sel = preferred ? preferred.signal_key : null;
   }
+  if(!chartSelection.symbol){
+    const preferred = preferredSignal(arr);
+    if(preferred) setChartSelection(preferred, 'auto');
+  }else if(chartSelection.signalKey && !signals[chartSelection.signalKey]){
+    const replacement = preferredSignal(arr.filter(s => s.symbol === chartSelection.symbol));
+    if(replacement){
+      setChartSelection(replacement, chartSelection.source || 'auto');
+    }else{
+      chartSelection.signalKey = '';
+    }
+  }
   if(sel && signals[sel]) renderDetail(signals[sel]);
+  syncChartSelection(!chartSelection.symbol);
 }
 
 function applyPortfolioSummary(d){
@@ -2126,12 +2310,11 @@ function refreshPricesSnapshot(){
   fetch('/api/prices').then(r => r.json()).then(d => {
     livePrices = d.prices || {};
     renderMarketBoard();
-    if((!sel || !signals[sel]) && !Object.keys(signals).length){
-      const preferred = LEADER_SYMBOLS.find(symbol => livePrices[symbol]);
-      if(preferred){
-        renderTradingViewChart({symbol: preferred, lane: 'normal'});
-      }
+    if(!chartSelection.symbol){
+      const preferred = defaultChartSignal();
+      if(preferred) setChartSelection(preferred, 'auto');
     }
+    syncChartSelection(!chartSelection.symbol);
   }).catch(() => {});
 }
 
@@ -2217,6 +2400,11 @@ if(SOCKET_AVAILABLE){
     });
     renderMarketBoard();
     if(sel && signals[sel]) updateSelectedPrice(signals[sel]);
+    if(!chartSelection.symbol){
+      const preferred = defaultChartSignal();
+      if(preferred) setChartSelection(preferred, 'auto');
+    }
+    syncChartSelection(!chartSelection.symbol);
   });
   io_sock.on('portfolio_update', d => {
     applyPortfolioSummary(d || {});
@@ -2336,7 +2524,10 @@ function selectSig(sym){
     layout.classList.remove('show-sidebar');
   }
   if(SOCKET_AVAILABLE && signal) io_sock.emit('subscribe_symbol', {symbol: signal.symbol});
-  if(signal) renderDetail(signal);
+  if(signal){
+    setChartSelection(signal, 'signal');
+    renderDetail(signal);
+  }
 }
 
 const FLABELS = {
@@ -2367,7 +2558,6 @@ function renderDetail(s){
   if(dsym) dsym.textContent = s.symbol;
   if(dtag) dtag.textContent = `• ${s.lane_label || LANE_LABELS[s.lane] || ''} • ${s.setup_id || s.signal_style || 'signal'}`;
   updateSelectedPrice(s);
-  renderTradingViewChart(s);
   const conv = s.conviction_score || 0;
   if(dconv){
     dconv.textContent = conv.toFixed(1);

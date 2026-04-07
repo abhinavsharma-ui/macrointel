@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,16 @@ class MacroIntelligenceSystem:
             900,
             int(os.getenv("MODEL_LEARNING_REFRESH_SECONDS", "21600")),
         )
+        self._drift_recent_window_hours = max(1, int(os.getenv("MODEL_DRIFT_WINDOW_HOURS", "4")))
+        self._drift_baseline_window_days = max(7, int(os.getenv("MODEL_DRIFT_BASELINE_DAYS", "30")))
+        self._drift_error_trigger_mult = max(1.1, float(os.getenv("MODEL_DRIFT_ERROR_TRIGGER_MULT", "1.5")))
+        self._lane_pause_win_rate_floor = min(0.90, max(0.10, float(os.getenv("LANE_PAUSE_WIN_RATE_FLOOR", "0.45"))))
+        self._lane_pause_trade_window = max(5, int(os.getenv("LANE_PAUSE_TRADE_WINDOW", "20")))
+        self._emergency_retrain_cooldown_seconds = max(
+            900,
+            int(os.getenv("EMERGENCY_RETRAIN_COOLDOWN_SECONDS", "3600")),
+        )
+        self._signal_halflife_exit_ratio = min(0.95, max(0.10, float(os.getenv("DAY_SIGNAL_HALFLIFE_EXIT_RATIO", "0.60"))))
         if (
             self._day_trading_mode
             and self._day_trade_force_daytrade_universe
@@ -244,6 +255,14 @@ class MacroIntelligenceSystem:
         self._execution_backtest_exit_score = float(os.getenv("EXECUTION_BACKTEST_EXIT_SCORE", "0.10"))
         self._execution_backtest_min_hold_days = max(1, int(os.getenv("EXECUTION_BACKTEST_MIN_HOLD_DAYS", "2")))
         self._execution_backtest_tx_cost_bps = max(0.0, float(os.getenv("EXECUTION_BACKTEST_TX_COST_BPS", "8")))
+        self._execution_backtest_monte_carlo_runs = max(
+            100,
+            int(os.getenv("EXECUTION_BACKTEST_MONTE_CARLO_RUNS", "500")),
+        )
+        self._execution_backtest_plateau_delta = max(
+            0.05,
+            float(os.getenv("EXECUTION_BACKTEST_PLATEAU_DELTA", "0.3")),
+        )
         self._broker_execution_mode = str(os.getenv("BROKER_EXECUTION_MODE", "paper") or "paper").strip().lower()
         if self._broker_execution_mode not in {"paper", "shadow"}:
             logger.warning(f"Unsupported BROKER_EXECUTION_MODE '{self._broker_execution_mode}', falling back to paper")
@@ -338,6 +357,30 @@ class MacroIntelligenceSystem:
             0.99,
             max(0.0, float(os.getenv("CRYPTO_SCALPER_MIN_TAKE_PROBABILITY", "0.50"))),
         )
+        self._crypto_obi_min_lifetime_ms = max(50.0, float(os.getenv("CRYPTO_OBI_MIN_LIFETIME_MS", "200")))
+        self._crypto_obi_max_updates_per_second = max(
+            0.5,
+            float(os.getenv("CRYPTO_OBI_MAX_UPDATES_PER_SECOND", "5.0")),
+        )
+        self._crypto_obi_min_inter_update_delay_ms = max(
+            0.0,
+            float(os.getenv("CRYPTO_OBI_MIN_INTER_UPDATE_DELAY_MS", "20.0")),
+        )
+        self._crypto_prime_start_hour_utc = int(os.getenv("CRYPTO_PRIME_WINDOW_START_UTC", "9"))
+        self._crypto_prime_end_hour_utc = int(os.getenv("CRYPTO_PRIME_WINDOW_END_UTC", "14"))
+        self._crypto_prime_conviction_bias = float(os.getenv("CRYPTO_PRIME_MIN_CONVICTION_BIAS", "-0.2"))
+        self._crypto_liquidity_hole_conviction_bias = float(os.getenv("CRYPTO_LIQUIDITY_HOLE_MIN_CONVICTION_BIAS", "0.3"))
+        self._crypto_taker_book_pressure_threshold = max(
+            0.0,
+            float(os.getenv("CRYPTO_TAKER_BOOK_PRESSURE_THRESHOLD", "0.65")),
+        )
+        self._crypto_taker_spread_velocity_threshold = float(
+            os.getenv("CRYPTO_TAKER_SPREAD_VELOCITY_THRESHOLD", "0.0")
+        )
+        self._crypto_inventory_skew_trigger = min(
+            1.0,
+            max(0.0, float(os.getenv("CRYPTO_INVENTORY_SKEW_TRIGGER", "0.60"))),
+        )
         self._lane_engine_config = {
             "normal": {
                 "top_k": max(1, int(os.getenv("NORMAL_LANE_TOP_K", "18"))),
@@ -397,11 +440,15 @@ class MacroIntelligenceSystem:
         self._intraday_state_lock = threading.RLock()
         self._intraday_subscription_attached = False
         self._last_model_learning_ts = 0.0
+        self._last_emergency_retrain_ts = 0.0
         self._model_learning_in_progress = False
         self._runtime_refresh_models = False
         self._components["learning_status"] = {}
         self._components["lane_allocator"] = {}
         self._components["governor"] = {}
+        self._components["drift_status"] = {}
+        self._components["signal_decay_library"] = {}
+        self._components["execution_overfit"] = {}
         self._components["latest_feature_rows"] = {}
         self._components["execution_reconciliation"] = self._execution_reconciliation
         self._components["feature_matrices"] = {}
@@ -912,6 +959,14 @@ class MacroIntelligenceSystem:
             "news_flag": bool(abs(float(intraday.get("news_boost", 0.0) or 0.0)) >= self._day_trade_news_boost_threshold),
             "action": action,
         }
+        for field in ("take_probability", "expected_edge_pct", "expected_drawdown_pct", "rank_score", "size_multiplier"):
+            value = payload.get(field)
+            if value in (None, ""):
+                continue
+            try:
+                metadata[field] = round(float(value), 6)
+            except Exception:
+                metadata[field] = value
         execution_reference_price = self._get_latest_close(symbol)
         if execution_reference_price is not None:
             metadata["execution_reference_price"] = round(float(execution_reference_price), 8)
@@ -1055,6 +1110,72 @@ class MacroIntelligenceSystem:
             payload["position_value"] = round(payload["position_value"], 2)
         return snapshot
 
+    def _detect_allocation_regime(self) -> Dict[str, object]:
+        target = self._components.get("allocation_regime")
+        if not isinstance(target, dict):
+            target = {}
+            self._components["allocation_regime"] = target
+
+        now = time.time()
+        last_refresh_ts = self._safe_number(target.get("updated_at_ts"), 0.0)
+        if target and (now - last_refresh_ts) < (4 * 3600):
+            return dict(target)
+
+        latest_feature_rows = self._components.get("latest_feature_rows", {})
+        vol_ratios = []
+        stressed_flags = []
+        vix_values = []
+        for row in latest_feature_rows.values():
+            if row is None:
+                continue
+            vol_ratio = self._safe_number(row.get("vol_regime_ratio", np.nan), np.nan)
+            if not np.isnan(vol_ratio):
+                vol_ratios.append(vol_ratio)
+            stressed_flags.append(self._safe_number(row.get("vol_regime_stressed", 0.0), 0.0))
+            vix_value = self._safe_number(row.get("macro_vix_level", row.get("vix_level", np.nan)), np.nan)
+            if not np.isnan(vix_value):
+                vix_values.append(vix_value)
+
+        mean_vol_ratio = float(np.nanmean(vol_ratios)) if vol_ratios else 1.0
+        stressed_share = float(np.nanmean(stressed_flags)) if stressed_flags else 0.0
+        avg_vix = float(np.nanmean(vix_values)) if vix_values else 18.0
+
+        crypto_rows = [
+            signal for signal in self._signal_store.values()
+            if isinstance(signal, dict) and str(signal.get("lane") or "").lower() == "crypto"
+        ]
+        crypto_stress = 0.0
+        if crypto_rows:
+            crypto_stress = float(np.mean([
+                abs(self._safe_number((signal.get("intraday_overlay") or {}).get("book_pressure"), 0.0))
+                + abs(self._safe_number((signal.get("intraday_overlay") or {}).get("spread_velocity"), 0.0)) * 1000.0
+                for signal in crypto_rows
+            ]))
+
+        regime = "trending_low_vol"
+        base_allocations = {"normal": 0.50, "day": 0.30, "crypto": 0.20}
+        if avg_vix >= 30 or stressed_share >= 0.60:
+            regime = "risk_off_crisis"
+            base_allocations = {"normal": 0.55, "day": 0.30, "crypto": 0.15}
+        elif mean_vol_ratio >= 1.25 or stressed_share >= 0.35 or crypto_stress >= 0.55:
+            regime = "high_vol_choppy"
+            base_allocations = {"normal": 0.25, "day": 0.45, "crypto": 0.30}
+
+        target.clear()
+        target.update(
+            {
+                "regime": regime,
+                "base_allocations": base_allocations,
+                "mean_vol_ratio": round(mean_vol_ratio, 4),
+                "stressed_share": round(stressed_share, 4),
+                "avg_vix": round(avg_vix, 3),
+                "crypto_stress": round(crypto_stress, 4),
+                "updated_at_ts": now,
+                "updated_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+            }
+        )
+        return dict(target)
+
     def _refresh_lane_allocator(self, broker, current_prices: Optional[Dict[str, float]] = None) -> Dict[str, Dict]:
         target = self._components.get("lane_allocator")
         if not isinstance(target, dict):
@@ -1064,11 +1185,14 @@ class MacroIntelligenceSystem:
             target.clear()
             return {}
 
-        base_weights = dict(self._lane_base_allocations)
+        regime_profile = self._detect_allocation_regime()
+        base_weights = dict(regime_profile.get("base_allocations") or self._lane_base_allocations)
         base_total = max(sum(base_weights.values()), 1e-9)
         normalized_base = {lane: weight / base_total for lane, weight in base_weights.items()}
         exposure = self._lane_position_snapshot(broker, current_prices=current_prices)
         closed_rows = self._recent_closed_trade_rows(broker, lookback_days=self._governor_lookback_days)
+        drift_status = self._refresh_drift_status(broker)
+        drift_lanes = drift_status.get("lanes", {}) if isinstance(drift_status, dict) else {}
         lane_rows: Dict[str, List[Dict]] = defaultdict(list)
         for trade in closed_rows:
             lane = str((trade.get("metadata") or {}).get("lane") or "normal").lower()
@@ -1138,6 +1262,7 @@ class MacroIntelligenceSystem:
                     if size_multiplier < 0.94
                     else "neutral"
                 ),
+                "allocation_regime": regime_profile.get("regime"),
                 **summaries.get(lane, {}),
             }
         return dict(target)
@@ -1210,6 +1335,10 @@ class MacroIntelligenceSystem:
             if len(rows) >= self._governor_min_setup_trades and lane_pf < self._governor_setup_review_pf and lane_pnl < 0:
                 lane_status = "review"
                 lane_throttle_multiplier = self._governor_lane_throttle_mult
+            lane_drift = drift_lanes.get(lane, {}) if isinstance(drift_lanes, dict) else {}
+            if lane_drift.get("paused"):
+                lane_status = "paused"
+                lane_throttle_multiplier = 0.0
 
             target[lane] = {
                 "lane": lane,
@@ -1221,6 +1350,7 @@ class MacroIntelligenceSystem:
                 "recent_pnl": round(lane_pnl, 2),
                 "disabled_setups": sorted(disabled_setups),
                 "time_bucket_actions": time_bucket_actions,
+                "drift": lane_drift,
             }
         return dict(target)
 
@@ -1230,6 +1360,8 @@ class MacroIntelligenceSystem:
         lane_state = target.get(lane, {}) if isinstance(target, dict) else {}
         setup_id = str(signal.get("setup_id") or "unclassified")
         time_bucket = str(signal.get("time_bucket") or "unknown")
+        if str(lane_state.get("status") or "").lower() == "paused":
+            return {"allow": False, "reason": "lane_paused", "size_multiplier": 0.0, "status": "paused"}
         if setup_id in set(lane_state.get("disabled_setups", []) or []):
             return {"allow": False, "reason": "setup_retired", "size_multiplier": 0.0, "status": lane_state.get("status", "active")}
         size_multiplier = self._safe_number(lane_state.get("lane_throttle_multiplier"), 1.0)
@@ -1255,6 +1387,8 @@ class MacroIntelligenceSystem:
         signal_age_seconds = max(depth_age_seconds, tick_age_seconds)
         book_pressure = abs(self._safe_number(intraday.get("book_pressure"), 0.0))
         depth_imbalance = abs(self._safe_number(intraday.get("book_imbalance"), 0.0))
+        spread_velocity = self._safe_number(intraday.get("spread_velocity"), 0.0)
+        flicker_filter_retention = self._safe_number(intraday.get("flicker_filter_retention"), 1.0)
         trade_window_active = bool(intraday.get("trade_window_active", True))
         if spread_pct > self._crypto_scalper_max_spread_pct:
             return {"allow": False, "reason": "crypto_wide_spread", "size_multiplier": 0.0}
@@ -1264,6 +1398,8 @@ class MacroIntelligenceSystem:
             return {"allow": False, "reason": "crypto_stale_tick", "size_multiplier": 0.0}
         if signal_age_seconds > self._crypto_scalper_max_signal_age_seconds:
             return {"allow": False, "reason": "crypto_stale_signal", "size_multiplier": 0.0}
+        if flicker_filter_retention < 0.10:
+            return {"allow": False, "reason": "crypto_flickering_liquidity", "size_multiplier": 0.0}
         if book_pressure < self._crypto_scalper_min_book_pressure:
             return {"allow": False, "reason": "crypto_weak_book_pressure", "size_multiplier": 0.0}
         if depth_imbalance < self._crypto_scalper_min_depth_imbalance:
@@ -1275,12 +1411,22 @@ class MacroIntelligenceSystem:
             size_multiplier *= 0.75
         if signal_age_seconds > (self._crypto_scalper_max_signal_age_seconds * 0.65):
             size_multiplier *= 0.80
+        if flicker_filter_retention < 0.45:
+            size_multiplier *= 0.85
+        execution_mode = (
+            "taker"
+            if book_pressure >= self._crypto_taker_book_pressure_threshold and spread_velocity > self._crypto_taker_spread_velocity_threshold
+            else "maker"
+        )
         return {
             "allow": True,
             "reason": "active",
             "size_multiplier": round(size_multiplier, 4),
             "spread_pct": round(spread_pct, 5),
             "signal_age_seconds": round(signal_age_seconds, 3),
+            "spread_velocity": round(spread_velocity, 8),
+            "flicker_filter_retention": round(flicker_filter_retention, 4),
+            "execution_mode": execution_mode,
         }
 
     @staticmethod
@@ -1523,7 +1669,12 @@ class MacroIntelligenceSystem:
                 "risk_adjustments": {},
             }
 
-        depth_snapshot = DEPTH_BUFFER.latest(symbol)
+        depth_snapshot = DEPTH_BUFFER.filtered_snapshot(
+            symbol,
+            min_lifetime_ms=self._crypto_obi_min_lifetime_ms,
+            max_updates_per_second=self._crypto_obi_max_updates_per_second,
+            min_inter_update_delay_ms=self._crypto_obi_min_inter_update_delay_ms,
+        )
         depth_updated_at = depth_snapshot.get("updated_at")
         depth_age_seconds = None
         if depth_updated_at:
@@ -1554,8 +1705,8 @@ class MacroIntelligenceSystem:
 
         best_bid_qty = float(depth_snapshot.get("best_bid_qty", 0.0) or 0.0)
         best_ask_qty = float(depth_snapshot.get("best_ask_qty", 0.0) or 0.0)
-        depth_bids = depth_snapshot.get("bids", []) or []
-        depth_asks = depth_snapshot.get("asks", []) or []
+        depth_bids = depth_snapshot.get("filtered_bids") or depth_snapshot.get("bids", []) or []
+        depth_asks = depth_snapshot.get("filtered_asks") or depth_snapshot.get("asks", []) or []
         bid_depth_qty = sum(_safe_level_qty(level) for level in depth_bids[:5])
         ask_depth_qty = sum(_safe_level_qty(level) for level in depth_asks[:5])
         if bid_depth_qty <= 0 and best_bid_qty > 0:
@@ -1569,9 +1720,13 @@ class MacroIntelligenceSystem:
         depth_book_imbalance = 0.0
         if (bid_depth_qty + ask_depth_qty) > 0:
             depth_book_imbalance = (bid_depth_qty - ask_depth_qty) / (bid_depth_qty + ask_depth_qty)
+        filtered_depth_imbalance = self._safe_number(depth_snapshot.get("filtered_book_imbalance"), depth_book_imbalance)
+        if depth_bids or depth_asks:
+            depth_book_imbalance = filtered_depth_imbalance
 
         best_bid = float(depth_snapshot.get("best_bid", 0.0) or 0.0)
         best_ask = float(depth_snapshot.get("best_ask", 0.0) or 0.0)
+        spread_velocity = self._safe_number(depth_snapshot.get("spread_velocity"), 0.0)
         microprice_bias = 0.0
         if best_bid > 0 and best_ask > 0 and (best_bid_qty + best_ask_qty) > 0:
             microprice = ((best_ask * best_bid_qty) + (best_bid * best_ask_qty)) / (best_bid_qty + best_ask_qty)
@@ -1878,8 +2033,10 @@ class MacroIntelligenceSystem:
             "book_imbalance": round(depth_book_imbalance, 4),
             "top_book_imbalance": round(top_book_imbalance, 4),
             "book_pressure": round(book_pressure, 4),
+            "spread_velocity": round(spread_velocity, 8),
             "microprice_bias": round(microprice_bias, 4),
             "depth_available": depth_available,
+            "flicker_filter_retention": round(self._safe_number(depth_snapshot.get("flicker_filter_retention"), 1.0), 4),
             "session_vwap": round(session_vwap, 4),
             "vwap_bias": round(vwap_bias, 4),
             "vwap_slope": round(vwap_slope, 4),
@@ -1956,7 +2113,12 @@ class MacroIntelligenceSystem:
         if tick_age_seconds > self._crypto_signal_stale_seconds:
             return None
 
-        depth_snapshot = DEPTH_BUFFER.latest(symbol) or {}
+        depth_snapshot = DEPTH_BUFFER.filtered_snapshot(
+            symbol,
+            min_lifetime_ms=self._crypto_obi_min_lifetime_ms,
+            max_updates_per_second=self._crypto_obi_max_updates_per_second,
+            min_inter_update_delay_ms=self._crypto_obi_min_inter_update_delay_ms,
+        ) or {}
         overlay = self._compute_intraday_overlay(symbol, latest_row=None)
         if not overlay:
             best_bid = float(depth_snapshot.get("best_bid", 0.0) or getattr(latest_tick, "bid", 0.0) or 0.0)
@@ -1984,6 +2146,8 @@ class MacroIntelligenceSystem:
                 "score": round(book_imbalance * 1.9, 4),
                 "news_boost": 0.0,
                 "order_flow_imbalance": round(book_imbalance * 0.85, 4),
+                "spread_velocity": round(self._safe_number(depth_snapshot.get("spread_velocity"), 0.0), 8),
+                "flicker_filter_retention": round(self._safe_number(depth_snapshot.get("flicker_filter_retention"), 1.0), 4),
                 "vwap_bias": 0.0,
                 "ret_5m": 0.0,
                 "trade_window_active": True,
@@ -2015,6 +2179,7 @@ class MacroIntelligenceSystem:
         trend_score = float(overlay.get("trend_score", 0.0) or 0.0)
         volume_spike = float(overlay.get("volume_spike", 1.0) or 1.0)
         score_value = float(overlay.get("score", 0.0) or 0.0)
+        spread_velocity = self._safe_number(overlay.get("spread_velocity"), self._safe_number(depth_snapshot.get("spread_velocity"), 0.0))
 
         trend_factor = self._clamp((trend_score * 0.75) + (book_pressure * 0.20), -1.0, 1.0)
         momentum_factor = self._clamp(score_value / 1.8, -1.0, 1.0)
@@ -2116,6 +2281,8 @@ class MacroIntelligenceSystem:
             "intraday_overlay": {
                 **overlay,
                 "market": "CRYPTO",
+                "spread_velocity": round(spread_velocity, 8),
+                "flicker_filter_retention": round(self._safe_number(depth_snapshot.get("flicker_filter_retention"), 1.0), 4),
                 "best_bid": round(best_bid, 8) if best_bid > 0 else None,
                 "best_ask": round(best_ask, 8) if best_ask > 0 else None,
                 "spread_pct": round((((best_ask - best_bid) / ((best_bid + best_ask) / 2.0)) * 100.0), 5)
@@ -2389,16 +2556,15 @@ class MacroIntelligenceSystem:
                 checkpoint_dir / "xgboost_retrain_report.json",
                 checkpoint_dir / "meta_walkforward_report.json",
                 checkpoint_dir / "xgboost_model.json",
-                checkpoint_dir / "meta_take_model.joblib",
+                checkpoint_dir / "meta_directional_models.joblib",
             ]
             existing_refs = [p for p in checkpoint_refs if p.exists()]
             if existing_refs:
                 last_retrain_ts = max(p.stat().st_mtime for p in existing_refs)
                 updated_files = [p for p in feature_files if p.stat().st_mtime > last_retrain_ts]
-                if len(updated_files) < self._auto_retrain_min_updated_files:
+                if not updated_files:
                     logger.info(
-                        f"Auto retrain skipped: only {len(updated_files)} feature files newer than last retrain "
-                        f"(need {self._auto_retrain_min_updated_files})"
+                        "Auto retrain skipped: no feature-store files newer than last retrain"
                     )
                     return
                 logger.info(
@@ -2473,6 +2639,7 @@ class MacroIntelligenceSystem:
             target.update(overlay)
         target["lane_allocator"] = lane_allocator
         target["governor"] = governor
+        target["allocation_regime"] = self._detect_allocation_regime()
 
         allocations = target.get("allocations", {})
         for symbol, signal in self._signal_store.items():
@@ -2553,7 +2720,7 @@ class MacroIntelligenceSystem:
     def _refresh_learning_status(self) -> Dict:
         import json
 
-        from models.institutional_retraining import META_REPORT_PATH, XGB_REPORT_PATH
+        from models.institutional_retraining import META_DIRECTIONAL_PATH, META_REPORT_PATH, XGB_REPORT_PATH, XGB_SHAP_REPORT_PATH
 
         feature_files = sorted(self._feature_store_dir.glob("*.parquet")) if self._feature_store_dir.exists() else []
         status = {
@@ -2574,6 +2741,7 @@ class MacroIntelligenceSystem:
                 status["xgb_validation_accuracy"] = xgb_report.get("validation_accuracy")
                 status["xgb_validation_rows"] = xgb_report.get("validation_rows")
                 status["xgb_features"] = xgb_report.get("n_features")
+                status["xgb_shap_monitor"] = xgb_report.get("shap_monitor")
             except Exception as exc:
                 status["xgb_error"] = str(exc)
 
@@ -2586,8 +2754,24 @@ class MacroIntelligenceSystem:
                 status["meta_coverage_pct"] = summary.get("mean_coverage_pct")
                 status["meta_edge_pct"] = summary.get("mean_taken_edge_pct")
                 status["meta_hit_rate_pct"] = summary.get("mean_taken_hit_rate_pct")
+                status["meta_deployment_rules"] = meta_report.get("deployment_rules", {})
             except Exception as exc:
                 status["meta_error"] = str(exc)
+        status["meta_directional_ready"] = META_DIRECTIONAL_PATH.exists()
+        if XGB_SHAP_REPORT_PATH.exists():
+            try:
+                status["xgb_shap_baseline"] = json.loads(XGB_SHAP_REPORT_PATH.read_text(encoding="utf-8"))
+            except Exception as exc:
+                status["xgb_shap_error"] = str(exc)
+        drift_status = self._components.get("drift_status")
+        if isinstance(drift_status, dict) and drift_status:
+            status["drift_status"] = drift_status
+        execution_overfit = self._components.get("execution_overfit")
+        if isinstance(execution_overfit, dict) and execution_overfit:
+            status["execution_overfit"] = execution_overfit
+        decay_library = self._components.get("signal_decay_library")
+        if isinstance(decay_library, dict) and decay_library:
+            status["signal_decay_library"] = dict(list(decay_library.items())[:15])
 
         target = self._components.get("learning_status")
         if not isinstance(target, dict):
@@ -2597,22 +2781,132 @@ class MacroIntelligenceSystem:
         target.update(status)
         return dict(target)
 
+    def _refresh_drift_status(self, broker) -> Dict:
+        target = self._components.get("drift_status")
+        if not isinstance(target, dict):
+            target = {}
+            self._components["drift_status"] = target
+        if not broker:
+            target.clear()
+            return {}
+
+        closed_rows = self._recent_closed_trade_rows(broker, lookback_days=self._drift_baseline_window_days)
+        recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=self._drift_recent_window_hours)
+        lanes = {}
+        trigger_retrain = False
+
+        for lane in self._lane_engine_order:
+            lane_rows = [
+                row for row in closed_rows
+                if str((row.get("metadata") or {}).get("lane") or "normal").lower() == lane
+            ]
+            if not lane_rows:
+                lanes[lane] = {
+                    "baseline_log_loss": None,
+                    "recent_log_loss": None,
+                    "error_delta": 0.0,
+                    "weight": 0.0,
+                    "trigger_retrain": False,
+                    "paused": False,
+                    "recent_win_rate_pct": None,
+                    "recent_trade_count": 0,
+                }
+                continue
+
+            def _trade_log_loss(row: Dict) -> Optional[float]:
+                metadata = row.get("metadata") or {}
+                prob = self._safe_number(
+                    metadata.get("entry_take_probability", metadata.get("take_probability")),
+                    -1.0,
+                )
+                if prob < 0:
+                    return None
+                prob = float(np.clip(prob, 1e-6, 1.0 - 1e-6))
+                label = 1.0 if self._safe_number(row.get("realized_pnl"), 0.0) > 0 else 0.0
+                return float(-((label * math.log(prob)) + ((1.0 - label) * math.log(1.0 - prob))))
+
+            baseline_losses = [loss for loss in (_trade_log_loss(row) for row in lane_rows) if loss is not None]
+            recent_rows = [row for row in lane_rows if row.get("filled_at_dt") and row["filled_at_dt"] >= recent_cutoff]
+            recent_losses = [loss for loss in (_trade_log_loss(row) for row in recent_rows) if loss is not None]
+            baseline_error = float(np.mean(baseline_losses)) if baseline_losses else None
+            recent_error = float(np.mean(recent_losses)) if recent_losses else None
+            error_delta = 0.0
+            weight = 0.0
+            lane_trigger = False
+            if (
+                baseline_error is not None
+                and baseline_error > 0
+                and recent_error is not None
+                and len(recent_losses) >= 3
+                and recent_error > (baseline_error * self._drift_error_trigger_mult)
+            ):
+                error_delta = recent_error - baseline_error
+                weight = min(1.0, max(0.0, error_delta / baseline_error))
+                lane_trigger = True
+
+            ordered_rows = sorted(
+                lane_rows,
+                key=lambda row: row.get("filled_at_dt") or datetime.min.replace(tzinfo=timezone.utc),
+            )
+            trailing_window = ordered_rows[-self._lane_pause_trade_window :]
+            wins = sum(1 for row in trailing_window if self._safe_number(row.get("realized_pnl"), 0.0) > 0)
+            recent_win_rate = wins / max(len(trailing_window), 1) if trailing_window else None
+            paused = bool(
+                trailing_window
+                and len(trailing_window) >= self._lane_pause_trade_window
+                and recent_win_rate is not None
+                and recent_win_rate < self._lane_pause_win_rate_floor
+            )
+            trigger_retrain = trigger_retrain or lane_trigger or paused
+            lanes[lane] = {
+                "baseline_log_loss": round(baseline_error, 5) if baseline_error is not None else None,
+                "recent_log_loss": round(recent_error, 5) if recent_error is not None else None,
+                "error_delta": round(error_delta, 5),
+                "weight": round(weight, 4),
+                "trigger_retrain": lane_trigger,
+                "paused": paused,
+                "recent_win_rate_pct": round((recent_win_rate or 0.0) * 100.0, 1) if recent_win_rate is not None else None,
+                "recent_trade_count": len(trailing_window),
+            }
+
+        target.clear()
+        target.update(
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "recent_window_hours": self._drift_recent_window_hours,
+                "baseline_window_days": self._drift_baseline_window_days,
+                "error_trigger_multiple": self._drift_error_trigger_mult,
+                "trigger_retrain": trigger_retrain,
+                "lanes": lanes,
+            }
+        )
+        return dict(target)
+
     def _maybe_periodic_retrain(self, feature_matrices: Dict[str, object]) -> None:
         if not self._model_learning_enabled or self._model_learning_in_progress:
             return
         now = time.time()
-        if self._last_model_learning_ts and (now - self._last_model_learning_ts) < self._model_learning_refresh_seconds:
-            return
         if not feature_matrices:
+            return
+        broker = self._components.get("broker")
+        drift_status = self._refresh_drift_status(broker) if broker else {}
+        urgent_retrain = bool((drift_status or {}).get("trigger_retrain"))
+        if urgent_retrain and self._last_emergency_retrain_ts:
+            if (now - self._last_emergency_retrain_ts) < self._emergency_retrain_cooldown_seconds:
+                return
+        if not urgent_retrain and self._last_model_learning_ts and (now - self._last_model_learning_ts) < self._model_learning_refresh_seconds:
             return
 
         self._last_model_learning_ts = now
+        if urgent_retrain:
+            self._last_emergency_retrain_ts = now
         self._model_learning_in_progress = True
         self._refresh_learning_status()
 
         def _run_retrain(local_feature_matrices: Dict[str, object]):
             try:
-                logger.info("Periodic model-learning retrain started")
+                trigger_reason = "drift/emergency" if urgent_retrain else "scheduled"
+                logger.info(f"Periodic model-learning retrain started ({trigger_reason})")
                 report = self.retrain_institutional_models(
                     feature_matrices=local_feature_matrices,
                     run_optuna=self._auto_retrain_use_optuna,
@@ -2624,6 +2918,7 @@ class MacroIntelligenceSystem:
                     self._components["learning_status"] = target
                 target["last_runtime_retrain_at"] = datetime.now(timezone.utc).isoformat()
                 target["last_runtime_report"] = report
+                target["last_runtime_trigger"] = "drift/emergency" if urgent_retrain else "scheduled"
                 self._runtime_refresh_models = True
                 self._refresh_meta_model_status()
             except Exception as exc:
@@ -2678,13 +2973,14 @@ class MacroIntelligenceSystem:
         feature_matrices: Dict[str, object],
         lookback_days: int,
         constrained: bool = True,
+        entry_score_override: Optional[float] = None,
     ) -> Dict:
         import pandas as pd
 
         from pipeline.universe import get_sector, is_leader_symbol
 
         trade_cost_pct = self._execution_backtest_tx_cost_bps / 10_000.0
-        entry_score = self._execution_backtest_entry_score
+        entry_score = self._execution_backtest_entry_score if entry_score_override is None else float(entry_score_override)
         exit_score = self._execution_backtest_exit_score
         hold_days = self._execution_backtest_min_hold_days if constrained else 1
         max_positions = self._auto_trade_max_open_positions if constrained else max(5, self._auto_trade_max_open_positions * 2)
@@ -2725,6 +3021,7 @@ class MacroIntelligenceSystem:
 
         positions: Dict[str, int] = {}
         returns = []
+        trade_returns: List[float] = []
         turnover = 0
 
         for i in range(1, len(dates) - 1):
@@ -2752,7 +3049,9 @@ class MacroIntelligenceSystem:
                 c0 = float(frame.loc[day]["close"])
                 c1 = float(frame.loc[next_day]["close"])
                 if c0 > 0:
-                    day_returns.append((c1 / c0) - 1.0)
+                    realized_ret = (c1 / c0) - 1.0
+                    day_returns.append(realized_ret)
+                    trade_returns.append(realized_ret)
 
             for symbol, frame in symbol_frames.items():
                 if symbol in positions:
@@ -2798,6 +3097,7 @@ class MacroIntelligenceSystem:
             "days": len(rets),
             "avg_daily_turnover": round(turnover / max(len(rets), 1), 2),
             "constrained": constrained,
+            "trade_returns": [round(float(value), 6) for value in trade_returns],
         }
 
     def _maybe_refresh_execution_backtest(self, feature_matrices: Dict[str, object]):
@@ -2843,12 +3143,65 @@ class MacroIntelligenceSystem:
                         2,
                     ),
                 }
+                trade_returns = np.asarray(constrained.get("trade_returns", []) or [], dtype=float)
+                monte_carlo = {"status": "insufficient_data"}
+                if trade_returns.size >= 12:
+                    rng = np.random.default_rng(7)
+                    mc_sharpes = []
+                    annualizer = np.sqrt(252.0)
+                    for _ in range(self._execution_backtest_monte_carlo_runs):
+                        sample = rng.choice(trade_returns, size=trade_returns.size, replace=True)
+                        sample_std = float(np.std(sample))
+                        sharpe = 0.0 if sample_std <= 1e-9 else float(np.mean(sample) / sample_std * annualizer)
+                        mc_sharpes.append(sharpe)
+                    monte_carlo = {
+                        "status": "ok",
+                        "runs": self._execution_backtest_monte_carlo_runs,
+                        "sharpe_p10": round(float(np.percentile(mc_sharpes, 10)), 4),
+                        "sharpe_mean": round(float(np.mean(mc_sharpes)), 4),
+                        "sharpe_std": round(float(np.std(mc_sharpes)), 4),
+                    }
+                    monte_carlo["overfit_flag"] = bool(
+                        monte_carlo["sharpe_p10"] < 0
+                        or (abs(monte_carlo["sharpe_mean"]) > 1e-9 and monte_carlo["sharpe_std"] > (abs(monte_carlo["sharpe_mean"]) * 2.0))
+                    )
+
+                plateau_results = []
+                base_sharpe = float(constrained_m.get("sharpe_ratio", 0.0) or 0.0)
+                for delta in (-self._execution_backtest_plateau_delta, self._execution_backtest_plateau_delta):
+                    adjusted = self._simulate_overlay_backtest(
+                        feature_matrices=feature_matrices,
+                        lookback_days=self._execution_backtest_lookback_days,
+                        constrained=True,
+                        entry_score_override=self._execution_backtest_entry_score + delta,
+                    )
+                    adjusted_metrics = adjusted.get("metrics", {}) if isinstance(adjusted, dict) else {}
+                    adjusted_sharpe = float(adjusted_metrics.get("sharpe_ratio", 0.0) or 0.0)
+                    degradation = 0.0
+                    if abs(base_sharpe) > 1e-9:
+                        degradation = abs(adjusted_sharpe - base_sharpe) / abs(base_sharpe)
+                    plateau_results.append(
+                        {
+                            "delta": round(float(delta), 3),
+                            "sharpe_ratio": round(adjusted_sharpe, 4),
+                            "degradation_pct": round(degradation * 100.0, 2),
+                            "robust": degradation <= 0.20,
+                        }
+                    )
+                plateau_flag = any(not item["robust"] for item in plateau_results)
+                overfit_payload = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "monte_carlo": monte_carlo,
+                    "parameter_plateau": plateau_results,
+                    "flagged": bool(monte_carlo.get("overfit_flag")) or plateau_flag,
+                }
                 payload = {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "lookback_days": self._execution_backtest_lookback_days,
                     "overlay": constrained,
                     "baseline": baseline,
                     "uplift": uplift,
+                    "overfit": overfit_payload,
                 }
                 target = self._components.get("execution_backtest")
                 if isinstance(target, dict):
@@ -2856,6 +3209,12 @@ class MacroIntelligenceSystem:
                     target.update(payload)
                 else:
                     self._components["execution_backtest"] = payload
+                overfit_target = self._components.get("execution_overfit")
+                if isinstance(overfit_target, dict):
+                    overfit_target.clear()
+                    overfit_target.update(overfit_payload)
+                else:
+                    self._components["execution_overfit"] = overfit_payload
                 logger.info(
                     "Execution backtest refreshed: overlay return "
                     f"{constrained_m.get('total_return_pct', 'n/a')}% vs baseline "
@@ -2873,6 +3232,85 @@ class MacroIntelligenceSystem:
         if opened_at is None:
             return float(self._auto_trade_min_hold_seconds)
         return max(0.0, (datetime.now(timezone.utc) - opened_at).total_seconds())
+
+    def _day_fill_quality_adjustment(self, signal: dict, broker) -> Dict[str, float]:
+        if not broker:
+            return {"multiplier": 1.0, "fill_quality_score": 0.0}
+        symbol = str(signal.get("symbol", "") or "")
+        latest_row = self._latest_feature_row(symbol)
+        atr_pct = self._safe_number((latest_row or {}).get("atr_pct"), 0.01)
+        atr_pct_points = max(atr_pct * 100.0, 0.10)
+        scores: List[float] = []
+        for trade in reversed(list(getattr(broker, "trade_log", []) or [])):
+            metadata = trade.get("metadata") or {}
+            if str(metadata.get("lane") or "").lower() != "day":
+                continue
+            reference_price = self._safe_number(metadata.get("execution_reference_price"), 0.0)
+            fill_price = self._safe_number(trade.get("fill_price"), reference_price)
+            if reference_price <= 0 or fill_price <= 0:
+                continue
+            slip_pct = abs(fill_price - reference_price) / reference_price * 100.0
+            scores.append(slip_pct / atr_pct_points)
+            if len(scores) >= 5:
+                break
+        if not scores:
+            return {"multiplier": 1.0, "fill_quality_score": 0.0}
+        fill_quality_score = float(np.mean(scores))
+        if fill_quality_score > 0.50:
+            desired_base_pct = 0.008
+            multiplier = min(1.0, desired_base_pct / max(self._lane_config("day").get("base_position_pct", 0.012), 1e-6))
+        elif fill_quality_score < 0.10:
+            multiplier = 1.6
+        else:
+            multiplier = 1.0
+        return {
+            "multiplier": round(float(multiplier), 4),
+            "fill_quality_score": round(float(fill_quality_score), 4),
+        }
+
+    def _record_signal_halflife_observation(
+        self,
+        plan: Dict,
+        *,
+        age_seconds: float,
+        current_take_probability: float,
+        exit_reason: str,
+    ) -> None:
+        target = self._components.get("signal_decay_library")
+        if not isinstance(target, dict):
+            target = {}
+            self._components["signal_decay_library"] = target
+        sector = str(plan.get("sector") or "unknown")
+        bucket = str(plan.get("entry_time_bucket") or "unknown")
+        key = f"{sector}::{bucket}"
+        payload = target.setdefault(
+            key,
+            {
+                "sector": sector,
+                "time_bucket": bucket,
+                "observations": 0,
+                "avg_exit_age_seconds": 0.0,
+                "avg_entry_take_probability": 0.0,
+                "avg_exit_take_probability": 0.0,
+                "last_exit_reason": None,
+            },
+        )
+        count = int(payload.get("observations", 0))
+        entry_take_probability = self._safe_number(plan.get("entry_take_probability"), 0.0)
+        payload["observations"] = count + 1
+        payload["avg_exit_age_seconds"] = round(
+            ((payload["avg_exit_age_seconds"] * count) + max(age_seconds, 0.0)) / max(count + 1, 1),
+            2,
+        )
+        payload["avg_entry_take_probability"] = round(
+            ((payload["avg_entry_take_probability"] * count) + entry_take_probability) / max(count + 1, 1),
+            4,
+        )
+        payload["avg_exit_take_probability"] = round(
+            ((payload["avg_exit_take_probability"] * count) + max(current_take_probability, 0.0)) / max(count + 1, 1),
+            4,
+        )
+        payload["last_exit_reason"] = exit_reason
 
     def _compute_position_size(
         self,
@@ -2897,6 +3335,10 @@ class MacroIntelligenceSystem:
         else:
             target_pct = max(lane_config.get("base_position_pct", self._auto_trade_base_position_pct), suggested_pct)
         target_pct = min(target_pct, lane_config.get("max_position_pct", self._auto_trade_max_position_pct))
+        if lane == "day":
+            fill_quality = self._day_fill_quality_adjustment(signal, broker)
+            signal["fill_quality_score"] = fill_quality.get("fill_quality_score", 0.0)
+            target_pct *= self._safe_number(fill_quality.get("multiplier"), 1.0)
         if portfolio_target_pct <= 0 and isinstance(meta, dict) and meta:
             target_pct *= float(meta.get("size_multiplier", 1.0) or 1.0)
         target_pct *= self._safe_number(lane_allocator.get("size_multiplier"), 1.0)
@@ -3018,6 +3460,7 @@ class MacroIntelligenceSystem:
         plan = self._position_plans.get(resolved_position_key, {})
         lane = str(plan.get("lane") or "normal").lower()
         signal = self._get_lane_signal(symbol, lane)
+        age_seconds = self._get_position_age_seconds(existing)
         exit_signal = {
             **(signal if isinstance(signal, dict) else {}),
             "lane": plan.get("lane") or (signal.get("lane") if isinstance(signal, dict) else None),
@@ -3043,6 +3486,9 @@ class MacroIntelligenceSystem:
                 "entry_reason": plan.get("entry_reason"),
                 "entry_regime": plan.get("entry_regime"),
                 "entry_time_bucket": plan.get("entry_time_bucket"),
+                "entry_take_probability": plan.get("entry_take_probability"),
+                "entry_expected_edge_pct": plan.get("entry_expected_edge_pct"),
+                "entry_expected_drawdown_pct": plan.get("entry_expected_drawdown_pct"),
                 "scenario_label": lane_meta.get("lane_label"),
                 "signal_key": resolved_position_key,
                 "position_key": resolved_position_key,
@@ -3050,6 +3496,17 @@ class MacroIntelligenceSystem:
         )
         result = broker.submit_order(order, current_price)
         if result["status"] == "filled":
+            if lane == "day":
+                current_take_probability = self._safe_number(
+                    exit_signal.get("take_probability", (exit_signal.get("meta_decision") or {}).get("take_probability")),
+                    0.0,
+                )
+                self._record_signal_halflife_observation(
+                    plan,
+                    age_seconds=age_seconds,
+                    current_take_probability=current_take_probability,
+                    exit_reason=reason,
+                )
             self._position_plans.pop(resolved_position_key, None)
             self._record_trade_timestamp(symbol, lane)
             self._capture_execution_reconciliation(symbol, "sell", exit_signal, result, position_key=resolved_position_key)
@@ -3094,8 +3551,16 @@ class MacroIntelligenceSystem:
             take_profit_pct = float(plan.get("take_profit_pct", stop_loss_pct * 2.5 * 100)) / 100.0
             stop_price = position.avg_cost * (1 - stop_loss_pct)
             take_profit_price = position.avg_cost * (1 + take_profit_pct)
+            current_take_probability = self._safe_number(
+                meta.get("take_probability", signal.get("take_probability", 0.0)),
+                0.0,
+            )
 
-            if lane_config.get("force_exit_seconds", 0) > 0 and age_seconds >= lane_config.get("force_exit_seconds", 0):
+            if (
+                lane != "day"
+                and lane_config.get("force_exit_seconds", 0) > 0
+                and age_seconds >= lane_config.get("force_exit_seconds", 0)
+            ):
                 self._close_position(symbol, "time exit", position_key=position_key)
                 continue
             if current_price <= stop_price:
@@ -3115,6 +3580,20 @@ class MacroIntelligenceSystem:
                     if current_price <= trailing_stop_price:
                         self._close_position(symbol, "adaptive trailing stop", position_key=position_key)
                         continue
+                half_life_floor = max(
+                    0.05,
+                    self._safe_number(plan.get("entry_take_probability"), current_take_probability) * self._signal_halflife_exit_ratio,
+                )
+                day_min_halflife_hold = max(
+                    120.0,
+                    lane_config.get("min_hold_seconds", self._auto_trade_min_hold_seconds) * 0.50,
+                )
+                if age_seconds >= day_min_halflife_hold and current_take_probability <= half_life_floor:
+                    self._close_position(symbol, "signal halflife decay", position_key=position_key)
+                    continue
+                if lane_config.get("force_exit_seconds", 0) > 0 and age_seconds >= lane_config.get("force_exit_seconds", 0):
+                    self._close_position(symbol, "time exit", position_key=position_key)
+                    continue
                 if age_seconds >= max(120.0, lane_config.get("min_hold_seconds", self._auto_trade_min_hold_seconds) * 0.50):
                     if intraday.get("direction") == "sell" and float(intraday.get("score", 0.0) or 0.0) <= -0.10:
                         self._close_position(symbol, "intraday regime flip", position_key=position_key)
@@ -3194,6 +3673,19 @@ class MacroIntelligenceSystem:
             rank_score = float(meta.get("rank_score", signal.get("rank_score", 0.0)) or 0.0)
             portfolio_target_pct = float(construction.get("target_position_pct", 0.0) or 0.0)
             lane_min_conviction = lane_config.get("min_conviction", self._auto_trade_min_conviction)
+            if lane == "crypto":
+                try:
+                    signal_ts = datetime.fromisoformat(str(signal.get("timestamp") or datetime.now(timezone.utc).isoformat()))
+                except Exception:
+                    signal_ts = datetime.now(timezone.utc)
+                signal_hour_utc = signal_ts.astimezone(timezone.utc).hour
+                conviction_bias = 0.0
+                if self._crypto_prime_start_hour_utc <= signal_hour_utc < self._crypto_prime_end_hour_utc:
+                    conviction_bias += self._crypto_prime_conviction_bias
+                if signal_hour_utc == 21:
+                    conviction_bias += self._crypto_liquidity_hole_conviction_bias
+                lane_min_conviction = max(0.0, lane_min_conviction + conviction_bias)
+                signal["crypto_conviction_bias"] = round(conviction_bias, 4)
             min_conviction = min(lane_min_conviction, self._auto_trade_leader_min_conviction) if leader_symbol else lane_min_conviction
             leader_override = (
                 leader_symbol
@@ -3440,6 +3932,16 @@ class MacroIntelligenceSystem:
                     sector_counts[weakest_sector] = max(0, sector_counts.get(weakest_sector, 1) - 1)
                     lane_open_counts[lane] = max(0, lane_open_counts.get(lane, 1) - 1)
 
+                inventory_load = 0.0
+                if lane == "crypto":
+                    inventory_load = lane_open_counts.get(lane, 0) / max(lane_config.get("max_open_positions", 1), 1)
+                    signal["inventory_skew"] = round(inventory_load, 4)
+                    if inventory_load > self._crypto_inventory_skew_trigger:
+                        signal["execution_size_multiplier"] = round(
+                            self._safe_number(signal.get("execution_size_multiplier"), 1.0) * 0.85,
+                            4,
+                        )
+
                 position_size = self._compute_position_size(signal, current_price, broker, corr_snapshot=corr_snapshot)
                 min_position_size = 0.0001 if lane == "crypto" else 1.0
                 if position_size < min_position_size:
@@ -3460,11 +3962,30 @@ class MacroIntelligenceSystem:
                     "day": "DayTrading",
                     "crypto": "CryptoMicrostructure",
                 }.get(lane_meta.get("lane"), "EventMultiFactor")
+                order_type = "market"
+                limit_price = None
+                if lane == "crypto":
+                    intraday = signal.get("intraday_overlay", {}) if isinstance(signal.get("intraday_overlay"), dict) else {}
+                    execution_filter = signal.get("execution_filter", {}) if isinstance(signal.get("execution_filter"), dict) else {}
+                    execution_mode = str(execution_filter.get("execution_mode", "market") or "market").lower()
+                    best_bid = self._safe_number(intraday.get("best_bid"), 0.0)
+                    best_ask = self._safe_number(intraday.get("best_ask"), 0.0)
+                    mid_price = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0
+                    if execution_mode == "maker" and mid_price > 0 and best_bid > 0 and best_ask > 0:
+                        tick_size = max((best_ask - best_bid) / 2.0, mid_price * 0.00005)
+                        candidate_price = min(best_ask - tick_size, mid_price)
+                        if inventory_load > self._crypto_inventory_skew_trigger:
+                            candidate_price = max(best_bid, candidate_price - (tick_size * 0.50))
+                        order_type = "limit"
+                        limit_price = round(max(best_bid, candidate_price), 8)
+                    signal["execution_mode"] = execution_mode
                 order = Order(
                     symbol=symbol,
                     side=OrderSide.BUY,
                     quantity=position_size,
                     position_key=position_key,
+                    order_type=order_type,
+                    limit_price=limit_price,
                     signal_source=signal_source,
                     metadata={
                         **self._build_order_metadata(symbol, signal, action="buy", reason="ranked_entry"),
@@ -3473,6 +3994,8 @@ class MacroIntelligenceSystem:
                         "signal_key": position_key,
                         "position_key": position_key,
                         "underlying_symbol": symbol,
+                        "execution_mode": signal.get("execution_mode", "market"),
+                        "inventory_skew": signal.get("inventory_skew", 0.0),
                     },
                 )
                 result = broker.submit_order(order, current_price)
@@ -3510,6 +4033,9 @@ class MacroIntelligenceSystem:
                     "min_hold_seconds": int(lane_config.get("min_hold_seconds", self._auto_trade_min_hold_seconds)),
                     "trailing_stop_pct": float(risk.get("trailing_stop_pct", self._day_trade_trail_stop_pct * 100.0)),
                     "peak_price": float(current_price),
+                    "entry_take_probability": float(signal.get("take_probability", 0.0) or 0.0),
+                    "entry_expected_edge_pct": float(signal.get("expected_edge_pct", 0.0) or 0.0),
+                    "entry_expected_drawdown_pct": float(signal.get("expected_drawdown_pct", 0.0) or 0.0),
                 }
                 sector_counts[sector] = sector_counts.get(sector, 0) + 1
                 lane_open_counts[lane] = lane_open_counts.get(lane, 0) + 1
@@ -3569,7 +4095,8 @@ class MacroIntelligenceSystem:
         )
         logger.info(f"\n{'=' * 52}")
         logger.info(f"  Dashboard : http://localhost:{port}")
-        logger.info(f"  Camera    : http://localhost:{port}/video_feed")
+        if self._components.get("security") is not None:
+            logger.info(f"  Camera    : http://localhost:{port}/video_feed")
         logger.info(f"{'=' * 52}\n")
         socketio.run(app, host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
@@ -3833,10 +4360,9 @@ class MacroIntelligenceSystem:
         return trainer.train_all(feature_matrices, run_optuna=run_optuna)
 
     def _inference_loop(self):
-        import xgboost as xgb
-
         from core.explainability import SignalExplainer
         from core.signal_engine_v2 import MetaDecisionEngine, MultiFactorScorer
+        from models.xgboost_model import XGBoostSignalModel
         from pipeline.feature_bridge import FeatureBridge
         from pipeline.feature_engineering import FeaturePipeline
 
@@ -3864,13 +4390,7 @@ class MacroIntelligenceSystem:
             if should_reload_xgb:
                 if xgb_path.exists():
                     try:
-                        try:
-                            xgb_jobs = int(float(os.getenv("XGB_N_JOBS") or os.getenv("MAX_CPU_THREADS") or 2))
-                        except Exception:
-                            xgb_jobs = 2
-                        reloaded = xgb.XGBClassifier(n_jobs=max(1, xgb_jobs))
-                        reloaded.load_model(str(xgb_path))
-                        xgb_model = reloaded
+                        xgb_model = XGBoostSignalModel.load(xgb_path)
                         xgb_mtime = current_xgb_mtime
                         logger.info("XGBoost model loaded successfully")
                     except Exception as exc:
@@ -4059,8 +4579,8 @@ class MacroIntelligenceSystem:
                                 ohlcv = self._mark_price_frame_live(symbol, ohlcv)
                             X = bridge.prepare_latest(features, ohlcv)
                             if X is not None:
-                                pred_class = int(xgb_model.predict(X)[0])
-                                pred_proba = xgb_model.predict_proba(X)[0]
+                                pred_class = int(xgb_model.predict_selected(X)[0])
+                                pred_proba = xgb_model.predict_selected_proba(X)[0]
                                 xgb_direction = class_map.get(pred_class, "neutral")
                                 xgb_confidence = float(max(pred_proba))
                                 event_edge = max(

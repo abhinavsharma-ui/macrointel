@@ -23,6 +23,7 @@ import logging
 import json
 import inspect
 import os
+import pickle
 from pathlib import Path
 from typing import Optional, Dict, Tuple, List
 
@@ -31,6 +32,8 @@ import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, f1_score
+
+from models.calibration import MultiClassPlattCalibrator
 
 try:
     import xgboost as xgb
@@ -49,6 +52,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 MODELS_DIR = Path(__file__).parent / "checkpoints"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+CALIBRATION_SUFFIX = ".calibration.pkl"
 
 
 def _default_n_jobs() -> int:
@@ -242,6 +246,7 @@ class XGBoostSignalModel:
         self.model: Optional[xgb.XGBClassifier] = None
         self.selector = FeatureSelector()
         self.feature_names_in: List[str] = []
+        self.prob_calibrator = MultiClassPlattCalibrator()
         self._is_fitted = False
 
     def fit(
@@ -288,6 +293,14 @@ class XGBoostSignalModel:
         )
         self._is_fitted = True
 
+        calibration_features = X_sel
+        calibration_labels = y
+        if eval_set:
+            calibration_features = X_val_sel
+            calibration_labels = y_val
+        raw_calibration_probs = self.model.predict_proba(calibration_features.fillna(0))
+        self.prob_calibrator = MultiClassPlattCalibrator().fit(raw_calibration_probs, calibration_labels)
+
         # Compute in-sample metrics (informational only)
         y_pred = self.model.predict(X_sel.fillna(0))
         train_acc = accuracy_score(y, y_pred)
@@ -311,18 +324,37 @@ class XGBoostSignalModel:
                     f"features={len(self.feature_names_in)}")
         return metrics
 
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+    def _prepare_runtime_input(self, X) -> np.ndarray:
+        if isinstance(X, pd.DataFrame):
+            X_aug = add_regime_interactions(X)
+            X_sel = self.selector.transform(X_aug).fillna(0)
+            return X_sel.to_numpy(dtype=float)
+
+        array = np.asarray(X, dtype=float)
+        if array.ndim == 1:
+            array = array.reshape(1, -1)
+        return np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def predict_proba(self, X) -> np.ndarray:
         """Returns (n_samples, 3) probability array: [p_sell, p_hold, p_buy]"""
         if not self._is_fitted:
             raise RuntimeError("Model not fitted. Call .fit() first.")
-        X_aug = add_regime_interactions(X)
-        X_sel = self.selector.transform(X_aug).fillna(0)
-        return self.model.predict_proba(X_sel)
+        prepared = self._prepare_runtime_input(X)
+        raw_probs = self.model.predict_proba(prepared)
+        return self.prob_calibrator.transform(raw_probs)
 
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
+    def predict(self, X) -> np.ndarray:
         """Returns class labels: 0=sell, 1=hold, 2=buy"""
         probs = self.predict_proba(X)
         return probs.argmax(axis=1)
+
+    def predict_selected_proba(self, X) -> np.ndarray:
+        """Predict probabilities from pre-aligned selected features."""
+        return self.predict_proba(X)
+
+    def predict_selected(self, X) -> np.ndarray:
+        """Predict classes from pre-aligned selected features."""
+        return self.predict(X)
 
     def get_feature_importance(self, top_n: int = 20) -> pd.DataFrame:
         """Return feature importance as a DataFrame."""
@@ -400,11 +432,15 @@ class XGBoostSignalModel:
         path = path or MODELS_DIR / "xgboost_model.json"
         self.model.save_model(str(path))
         meta_path = path.with_suffix(".meta.json")
+        calibration_path = path.with_suffix(CALIBRATION_SUFFIX)
         with open(meta_path, "w") as f:
             json.dump({
                 "feature_names": self.feature_names_in,
                 "params": {k: v for k, v in self.params.items() if isinstance(v, (str, int, float, bool))},
+                "calibration_path": str(calibration_path),
             }, f)
+        with open(calibration_path, "wb") as f:
+            pickle.dump(self.prob_calibrator, f)
         logger.info(f"XGBoost saved to {path}")
         return path
 
@@ -420,6 +456,13 @@ class XGBoostSignalModel:
                 meta = json.load(f)
             model_obj.feature_names_in = meta.get("feature_names", [])
             model_obj.selector.selected_features = model_obj.feature_names_in
+            calibration_path = Path(meta.get("calibration_path") or path.with_suffix(CALIBRATION_SUFFIX))
+            if calibration_path.exists():
+                try:
+                    with open(calibration_path, "rb") as f:
+                        model_obj.prob_calibrator = pickle.load(f)
+                except Exception:
+                    model_obj.prob_calibrator = MultiClassPlattCalibrator()
         model_obj._is_fitted = True
         return model_obj
 

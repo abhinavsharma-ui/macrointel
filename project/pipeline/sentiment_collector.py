@@ -106,6 +106,25 @@ MAJOR_MEDIA_DOMAINS = {
     "business-standard.com",
 }
 
+RISK_FACTOR_KEYWORDS = (
+    "risk factor",
+    "material weakness",
+    "going concern",
+    "impairment",
+    "restatement",
+    "litigation",
+    "investigation",
+    "non-compliance",
+)
+
+EARNINGS_TONE_KEYWORDS = (
+    "earnings call",
+    "conference call",
+    "prepared remarks",
+    "earnings webcast",
+    "investor call",
+)
+
 
 def _get_vader():
     try:
@@ -166,6 +185,22 @@ def _canonicalize_url(url: str) -> str:
 def _normalize_title(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9 ]+", " ", (value or "").lower())
     return _normalize_space(cleaned)
+
+
+def _token_set(value: str) -> set:
+    tokens = re.findall(r"[a-z0-9]+", (value or "").lower())
+    return {token for token in tokens if len(token) > 2}
+
+
+def _jaccard_similarity(left: str, right: str) -> float:
+    left_tokens = _token_set(left)
+    right_tokens = _token_set(right)
+    if not left_tokens or not right_tokens:
+        return 1.0 if not left_tokens and not right_tokens else 0.0
+    union = left_tokens | right_tokens
+    if not union:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(union)
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -875,6 +910,9 @@ class SentimentPipeline:
                 dt = _article_date(article.get("publishedAt", ""))
             except Exception:
                 dt = date.today()
+            lower_text = text.lower()
+            is_earnings_call = float(any(keyword in lower_text for keyword in EARNINGS_TONE_KEYWORDS))
+            new_risk_factors = float(any(keyword in lower_text for keyword in RISK_FACTOR_KEYWORDS))
 
             scored.append(
                 {
@@ -885,6 +923,11 @@ class SentimentPipeline:
                     "media_sentiment": compound * media_weight,
                     "official_sentiment": compound * official,
                     "filing_sentiment": compound * filing,
+                    "filing_change_score": 0.0,
+                    "filing_fresh_language_score": 0.0,
+                    "new_risk_factors": new_risk_factors,
+                    "earnings_tone_signal": compound * is_earnings_call,
+                    "earnings_call_count": is_earnings_call,
                     "article_count": 1,
                     "media_article_count": media_weight,
                     "official_article_count": official,
@@ -898,6 +941,16 @@ class SentimentPipeline:
                     "url": article.get("url", ""),
                 }
             )
+        filing_records = [item for item in scored if float(item.get("filing_article_count", 0.0) or 0.0) > 0]
+        filing_records.sort(key=lambda item: (item.get("date"), item.get("title", "")))
+        previous_filing_text = ""
+        for record in filing_records:
+            filing_text = f"{record.get('title', '')} {record.get('source', '')}"
+            similarity = _jaccard_similarity(filing_text, previous_filing_text) if previous_filing_text else 1.0
+            change_score = max(0.0, 1.0 - similarity)
+            record["filing_change_score"] = round(change_score, 4)
+            record["filing_fresh_language_score"] = round(change_score, 4)
+            previous_filing_text = filing_text
         return scored
 
     def _fetch_symbol(self, symbol: str, from_date: date, to_date: date) -> FetchOutcome:
@@ -948,6 +1001,11 @@ class SentimentPipeline:
                             "media_sentiment": article["media_sentiment"],
                             "official_sentiment": article["official_sentiment"],
                             "filing_sentiment": article["filing_sentiment"],
+                            "filing_change_score": article["filing_change_score"],
+                            "filing_fresh_language_score": article["filing_fresh_language_score"],
+                            "new_risk_factors": article["new_risk_factors"],
+                            "earnings_tone_signal": article["earnings_tone_signal"],
+                            "earnings_call_count": article["earnings_call_count"],
                             "article_count": article["article_count"],
                             "media_article_count": article["media_article_count"],
                             "official_article_count": article["official_article_count"],
@@ -982,6 +1040,11 @@ class SentimentPipeline:
                     media_sentiment=("media_sentiment", "mean"),
                     official_sentiment=("official_sentiment", "mean"),
                     filing_sentiment=("filing_sentiment", "mean"),
+                    filing_change_score=("filing_change_score", "max"),
+                    filing_fresh_language_score=("filing_fresh_language_score", "max"),
+                    new_risk_factors=("new_risk_factors", "max"),
+                    earnings_tone_signal=("earnings_tone_signal", "mean"),
+                    earnings_call_count=("earnings_call_count", "sum"),
                     article_count=("article_count", "sum"),
                     media_article_count=("media_article_count", "sum"),
                     official_article_count=("official_article_count", "sum"),
@@ -1003,6 +1066,11 @@ class SentimentPipeline:
                     "media_sentiment",
                     "official_sentiment",
                     "filing_sentiment",
+                    "filing_change_score",
+                    "filing_fresh_language_score",
+                    "new_risk_factors",
+                    "earnings_tone_signal",
+                    "earnings_call_count",
                     "article_count",
                     "media_article_count",
                     "official_article_count",

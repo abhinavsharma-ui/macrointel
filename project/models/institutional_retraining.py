@@ -15,8 +15,9 @@ import json
 import logging
 import os
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -25,6 +26,8 @@ from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostin
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 from sklearn.preprocessing import StandardScaler
 from dotenv import load_dotenv
+
+from models.calibration import BinaryPlattCalibrator
 
 load_dotenv()
 
@@ -39,6 +42,148 @@ META_EDGE_PATH = CHECKPOINTS_DIR / "meta_edge_model.joblib"
 META_DRAWDOWN_PATH = CHECKPOINTS_DIR / "meta_drawdown_model.joblib"
 META_FEATURES_PATH = CHECKPOINTS_DIR / "meta_feature_cols.pkl"
 META_REPORT_PATH = CHECKPOINTS_DIR / "meta_walkforward_report.json"
+META_DIRECTIONAL_PATH = CHECKPOINTS_DIR / "meta_directional_models.joblib"
+META_DIRECTIONAL_PREVIOUS_PATH = CHECKPOINTS_DIR / "meta_directional_models.previous.joblib"
+XGB_SHAP_REPORT_PATH = CHECKPOINTS_DIR / "xgboost_shap_monitor.json"
+
+
+def _clip_prob(value: float) -> float:
+    return float(np.clip(float(value), 1e-6, 1.0 - 1e-6))
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value in (None, ""):
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _adaptive_horizon_days(frame: pd.DataFrame, idx: int, base_horizon_days: int) -> Tuple[int, float]:
+    row = frame.iloc[idx]
+    multiplier = 1.0
+    realized_vol = abs(_safe_float(row.get("realized_vol_21d", 0.0), 0.0))
+    baseline_window = frame.get("realized_vol_21d")
+    baseline = np.nan
+    if baseline_window is not None:
+        history = pd.to_numeric(baseline_window.iloc[max(0, idx - 30): idx + 1], errors="coerce")
+        history = history.replace(0, np.nan).dropna()
+        if not history.empty:
+            baseline = float(history.mean())
+    vol_ratio = _safe_float(row.get("vol_regime_ratio", np.nan), np.nan)
+    if np.isnan(vol_ratio) and baseline and baseline > 0:
+        vol_ratio = realized_vol / baseline
+    if (not np.isnan(vol_ratio) and vol_ratio > 1.5) or _safe_float(row.get("vol_regime_stressed", 0.0), 0.0) >= 1.0:
+        multiplier *= 0.60
+
+    event_signal = max(
+        abs(_safe_float(row.get("official_event_signal", 0.0), 0.0)),
+        abs(_safe_float(row.get("filing_event_signal", 0.0), 0.0)),
+        abs(_safe_float(row.get("earnings_tone_signal", 0.0), 0.0)),
+    )
+    filing_like_event = (
+        _safe_float(row.get("filing_event_hit", 0.0), 0.0) > 0
+        or _safe_float(row.get("new_risk_factors", 0.0), 0.0) > 0
+    )
+    if filing_like_event or event_signal >= 0.60:
+        multiplier = max(multiplier, 3.0)
+
+    horizon = max(1, int(round(base_horizon_days * multiplier)))
+    return horizon, round(float(multiplier), 3)
+
+
+def _triple_barrier_path_stats(
+    signal_direction: str,
+    entry_close: float,
+    future_window: pd.DataFrame,
+    stop_loss_pct: float,
+    take_profit_pct: float,
+) -> Dict[str, float]:
+    if future_window is None or future_window.empty or entry_close <= 0:
+        return {"edge_pct": 0.0, "drawdown_pct": 0.0, "hit": 0, "barrier": "none"}
+
+    highs = pd.to_numeric(future_window.get("high", future_window.get("close")), errors="coerce").fillna(method="ffill")
+    lows = pd.to_numeric(future_window.get("low", future_window.get("close")), errors="coerce").fillna(method="ffill")
+    closes = pd.to_numeric(future_window.get("close"), errors="coerce").fillna(method="ffill")
+    if closes.empty:
+        return {"edge_pct": 0.0, "drawdown_pct": 0.0, "hit": 0, "barrier": "none"}
+
+    if signal_direction == "sell":
+        favorable_path = ((entry_close / lows.replace(0, np.nan)) - 1.0) * 100.0
+        adverse_path = ((entry_close / highs.replace(0, np.nan)) - 1.0) * 100.0
+        final_edge = ((entry_close / max(float(closes.iloc[-1]), 1e-6)) - 1.0) * 100.0
+    else:
+        favorable_path = ((highs / entry_close) - 1.0) * 100.0
+        adverse_path = ((lows / entry_close) - 1.0) * 100.0
+        final_edge = ((float(closes.iloc[-1]) / entry_close) - 1.0) * 100.0
+
+    favorable_path = favorable_path.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    adverse_path = adverse_path.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    drawdown_pct = float(abs(min(float(adverse_path.min()), 0.0)))
+    exit_edge = float(final_edge)
+    barrier = "time"
+
+    for favorable, adverse in zip(favorable_path.to_numpy(dtype=float), adverse_path.to_numpy(dtype=float)):
+        stop_hit = adverse <= -abs(stop_loss_pct)
+        take_hit = favorable >= abs(take_profit_pct)
+        if stop_hit and take_hit:
+            exit_edge = -abs(stop_loss_pct)
+            barrier = "stop"
+            break
+        if stop_hit:
+            exit_edge = -abs(stop_loss_pct)
+            barrier = "stop"
+            break
+        if take_hit:
+            exit_edge = abs(take_profit_pct)
+            barrier = "take"
+            break
+
+    return {
+        "edge_pct": round(float(exit_edge), 4),
+        "drawdown_pct": round(float(drawdown_pct), 4),
+        "hit": int(exit_edge > 0),
+        "barrier": barrier,
+    }
+
+
+def _triple_barrier_direction_label(frame: pd.DataFrame, idx: int, base_horizon_days: int) -> int:
+    row = frame.iloc[idx]
+    entry_close = _safe_float(row.get("close", 0.0), 0.0)
+    if entry_close <= 0:
+        return 1
+    horizon_days, _ = _adaptive_horizon_days(frame, idx, base_horizon_days)
+    future_window = frame.iloc[idx + 1 : idx + 1 + horizon_days]
+    if future_window.empty:
+        return 1
+
+    atr_pct = max(abs(_safe_float(row.get("atr_pct", 0.02), 0.02)), 0.002)
+    stop_loss_pct = float(np.clip(atr_pct * 100 * 1.3, 1.0, 6.0))
+    take_profit_pct = float(np.clip(stop_loss_pct * 2.2, stop_loss_pct + 0.8, 12.0))
+    long_stats = _triple_barrier_path_stats("buy", entry_close, future_window, stop_loss_pct, take_profit_pct)
+    short_stats = _triple_barrier_path_stats("sell", entry_close, future_window, stop_loss_pct, take_profit_pct)
+
+    long_edge = float(long_stats["edge_pct"])
+    short_edge = float(short_stats["edge_pct"])
+    dominance_buffer = 0.20
+    if long_edge > max(abs(short_edge), dominance_buffer):
+        return 2
+    if short_edge > max(abs(long_edge), dominance_buffer):
+        return 0
+    return 1
+
+
+@dataclass
+class DirectionalMetaArtifacts:
+    classifier: object
+    calibrator: BinaryPlattCalibrator
+    edge_model: object
+    drawdown_model: object
+    decision_threshold: float
+    min_expected_edge_pct: float
+    min_edge_ratio: float
+    direction: str
 
 
 class MetaFeatureBuilder:
@@ -69,6 +214,7 @@ class MetaFeatureBuilder:
         "bb_position",
         "zscore_vs_60d",
         "realized_vol_21d",
+        "vol_regime_ratio",
         "vol_ratio_20",
         "sentiment_zscore",
         "sentiment_velocity",
@@ -77,6 +223,9 @@ class MetaFeatureBuilder:
         "source_quality_signal",
         "official_event_signal",
         "filing_event_signal",
+        "filing_change_score",
+        "filing_fresh_language_score",
+        "new_risk_factors",
         "media_sentiment_signal",
         "travel_activity_level",
         "travel_activity_change",
@@ -85,12 +234,22 @@ class MetaFeatureBuilder:
         "peer_earnings_shock_3d",
         "peer_earnings_shock_7d",
         "peer_earnings_breadth_7d",
+        "peer_earnings_negative_ratio_7d",
         "close_reversal_signal",
         "close_reversal_strength",
         "event_move_strength",
         "event_day_extreme",
         "event_alpha_signal",
         "alpha_signal",
+        "earnings_tone_signal",
+        "earnings_tone_velocity",
+        "adaptive_horizon_multiplier",
+        "long_momentum_edge",
+        "long_volume_surge_edge",
+        "long_sentiment_velocity_edge",
+        "short_spread_widening_edge",
+        "short_book_pressure_reversal_edge",
+        "short_earnings_miss_propagation_edge",
         "is_nse_symbol",
     ]
 
@@ -113,6 +272,7 @@ class MetaFeatureBuilder:
         "bb_position",
         "zscore_vs_60d",
         "realized_vol_21d",
+        "vol_regime_ratio",
         "vol_ratio_20",
         "sentiment_zscore",
         "sentiment_velocity",
@@ -121,6 +281,9 @@ class MetaFeatureBuilder:
         "source_quality_signal",
         "official_event_signal",
         "filing_event_signal",
+        "filing_change_score",
+        "filing_fresh_language_score",
+        "new_risk_factors",
         "media_sentiment_signal",
         "travel_activity_level",
         "travel_activity_change",
@@ -129,12 +292,15 @@ class MetaFeatureBuilder:
         "peer_earnings_shock_3d",
         "peer_earnings_shock_7d",
         "peer_earnings_breadth_7d",
+        "peer_earnings_negative_ratio_7d",
         "close_reversal_signal",
         "close_reversal_strength",
         "event_move_strength",
         "event_day_extreme",
         "event_alpha_signal",
         "alpha_signal",
+        "earnings_tone_signal",
+        "earnings_tone_velocity",
     ]
 
     @classmethod
@@ -169,8 +335,84 @@ class MetaFeatureBuilder:
                     payload[col] = float(value) if pd.notna(value) else 0.0
                 except Exception:
                     payload[col] = 0.0
+            vol_regime_ratio = payload.get("vol_regime_ratio", 0.0)
+            if not vol_regime_ratio:
+                realized_vol = abs(payload.get("realized_vol_21d", 0.0))
+                hist_vol = abs(_safe_float(feature_row.get("hist_vol_30", realized_vol), realized_vol))
+                vol_regime_ratio = realized_vol / max(hist_vol, 1e-6) if hist_vol > 0 else 0.0
+            payload["vol_regime_ratio"] = float(vol_regime_ratio)
+            horizon_multiplier = 3.0 if (
+                payload.get("filing_event_signal", 0.0) > 0.55
+                or payload.get("new_risk_factors", 0.0) > 0
+            ) else 0.60 if payload.get("vol_regime_ratio", 0.0) > 1.5 else 1.0
+            payload["adaptive_horizon_multiplier"] = float(horizon_multiplier)
+            payload["long_momentum_edge"] = float(
+                np.clip(
+                    (payload.get("momentum_20d", 0.0) / 0.15 * 0.45)
+                    + (payload.get("vol_ratio_20", 0.0) / 2.5 * 0.30)
+                    + (payload.get("sentiment_velocity", 0.0) / 0.30 * 0.25),
+                    -1.5,
+                    1.5,
+                )
+            )
+            payload["long_volume_surge_edge"] = float(
+                np.clip(
+                    (payload.get("vol_ratio_20", 0.0) / 2.5 * 0.55)
+                    + (payload.get("news_volume_spike", 0.0) / 2.0 * 0.20)
+                    + (payload.get("earnings_tone_signal", 0.0) * 0.25),
+                    -1.5,
+                    1.5,
+                )
+            )
+            payload["long_sentiment_velocity_edge"] = float(
+                np.clip(
+                    (payload.get("sentiment_velocity", 0.0) / 0.30 * 0.50)
+                    + (payload.get("earnings_tone_velocity", 0.0) / 0.20 * 0.25)
+                    + (payload.get("filing_change_score", 0.0) * 0.25),
+                    -1.5,
+                    1.5,
+                )
+            )
+            payload["short_spread_widening_edge"] = float(
+                np.clip(
+                    (payload.get("bb_position", 0.0) - 0.5) * 1.2
+                    + (payload.get("vol_regime_ratio", 0.0) * 0.35)
+                    + (payload.get("realized_vol_21d", 0.0) / 0.35 * 0.30),
+                    -1.5,
+                    1.5,
+                )
+            )
+            payload["short_book_pressure_reversal_edge"] = float(
+                np.clip(
+                    (-payload.get("close_reversal_signal", 0.0) * 0.55)
+                    + (payload.get("close_reversal_strength", 0.0) * 0.20)
+                    + (payload.get("event_move_strength", 0.0) * 0.25),
+                    -1.5,
+                    1.5,
+                )
+            )
+            payload["short_earnings_miss_propagation_edge"] = float(
+                np.clip(
+                    (-payload.get("earnings_propagation_signal", 0.0) * 0.50)
+                    + (payload.get("peer_earnings_negative_ratio_7d", 0.0) * 0.30)
+                    + (-payload.get("earnings_tone_velocity", 0.0) * 0.20),
+                    -1.5,
+                    1.5,
+                )
+            )
         else:
             for col in cls.ROW_COLUMNS:
+                payload[col] = 0.0
+            for col in (
+                "vol_regime_ratio",
+                "adaptive_horizon_multiplier",
+                "long_momentum_edge",
+                "long_volume_surge_edge",
+                "long_sentiment_velocity_edge",
+                "short_spread_widening_edge",
+                "short_book_pressure_reversal_edge",
+                "short_earnings_miss_propagation_edge",
+            ):
                 payload[col] = 0.0
 
         for col in cls.FEATURE_COLUMNS:
@@ -194,31 +436,27 @@ class TrainedMetaModel:
 
     def __init__(
         self,
-        classifier,
-        edge_model,
-        drawdown_model,
+        bundles: Dict[str, DirectionalMetaArtifacts],
         feature_columns: List[str],
-        decision_threshold: float = 0.58,
-        min_expected_edge_pct: float = 0.10,
-        min_edge_ratio: float = 0.12,
     ):
-        self.classifier = classifier
-        self.edge_model = edge_model
-        self.drawdown_model = drawdown_model
+        self.bundles = bundles
         self.feature_columns = feature_columns
-        self.decision_threshold = decision_threshold
-        self.min_expected_edge_pct = min_expected_edge_pct
-        self.min_edge_ratio = min_edge_ratio
+        default_bundle = bundles.get("long") or bundles.get("short") or next(iter(bundles.values()))
+        self.decision_threshold = float(default_bundle.decision_threshold)
+        self.min_expected_edge_pct = float(default_bundle.min_expected_edge_pct)
+        self.min_edge_ratio = float(default_bundle.min_edge_ratio)
 
     @classmethod
     def is_available(cls) -> bool:
-        return (
+        directional_ready = META_DIRECTIONAL_PATH.exists() and META_REPORT_PATH.exists()
+        legacy_ready = (
             META_CLASSIFIER_PATH.exists()
             and META_EDGE_PATH.exists()
             and META_DRAWDOWN_PATH.exists()
             and META_FEATURES_PATH.exists()
             and META_REPORT_PATH.exists()
         )
+        return directional_ready or legacy_ready
 
     @classmethod
     def _report_is_acceptable(cls, report: Dict) -> bool:
@@ -253,17 +491,53 @@ class TrainedMetaModel:
                     f"hit_rate={summary.get('mean_taken_hit_rate_pct')}"
                 )
                 return None
+            if META_DIRECTIONAL_PATH.exists():
+                payload = joblib.load(META_DIRECTIONAL_PATH)
+                bundles = payload.get("bundles", {}) if isinstance(payload, dict) else {}
+                feature_columns = list(payload.get("feature_columns", MetaFeatureBuilder.FEATURE_COLUMNS))
+                resolved_bundles: Dict[str, DirectionalMetaArtifacts] = {}
+                deployment_rules = report.get("deployment_rules", {}) if isinstance(report, dict) else {}
+                for direction, bundle_payload in bundles.items():
+                    rules = deployment_rules.get(direction, {}) if isinstance(deployment_rules, dict) else {}
+                    resolved_bundles[direction] = DirectionalMetaArtifacts(
+                        classifier=bundle_payload["classifier"],
+                        calibrator=bundle_payload.get("calibrator") or BinaryPlattCalibrator(),
+                        edge_model=bundle_payload["edge_model"],
+                        drawdown_model=bundle_payload["drawdown_model"],
+                        decision_threshold=float(
+                            os.getenv(
+                                "META_MODEL_RUNTIME_THRESHOLD",
+                                str(rules.get("decision_threshold", 0.58) or 0.58),
+                            )
+                        ),
+                        min_expected_edge_pct=float(
+                            os.getenv(
+                                "META_MODEL_RUNTIME_MIN_EDGE_PCT",
+                                str(rules.get("min_expected_edge_pct", 0.10) or 0.10),
+                            )
+                        ),
+                        min_edge_ratio=float(
+                            os.getenv(
+                                "META_MODEL_RUNTIME_MIN_EDGE_RATIO",
+                                str(rules.get("min_edge_ratio", 0.12) or 0.12),
+                            )
+                        ),
+                        direction=direction,
+                    )
+                if resolved_bundles:
+                    return cls(resolved_bundles, feature_columns)
+
             classifier = joblib.load(META_CLASSIFIER_PATH)
             edge_model = joblib.load(META_EDGE_PATH)
             drawdown_model = joblib.load(META_DRAWDOWN_PATH)
             with open(META_FEATURES_PATH, "rb") as f:
                 feature_columns = pickle.load(f)
             deployment_rules = report.get("deployment_rules", {}) if isinstance(report, dict) else {}
-            return cls(
-                classifier,
-                edge_model,
-                drawdown_model,
-                feature_columns,
+            legacy_bundle = DirectionalMetaArtifacts(
+                classifier=classifier,
+                calibrator=BinaryPlattCalibrator(),
+                edge_model=edge_model,
+                drawdown_model=drawdown_model,
                 decision_threshold=float(
                     os.getenv(
                         "META_MODEL_RUNTIME_THRESHOLD",
@@ -282,23 +556,29 @@ class TrainedMetaModel:
                         str(deployment_rules.get("min_edge_ratio", 0.12) or 0.12),
                     )
                 ),
+                direction="legacy",
             )
+            return cls({"long": legacy_bundle, "short": legacy_bundle}, feature_columns)
         except Exception as exc:
             logger.warning(f"Meta model load failed: {exc}")
             return None
 
     def predict_from_dict(self, features: Dict[str, float]) -> Dict[str, float]:
         frame = pd.DataFrame([{col: float(features.get(col, 0.0) or 0.0) for col in self.feature_columns}])
-        take_probability = float(self.classifier.predict_proba(frame)[0][1])
-        expected_edge_pct = float(self.edge_model.predict(frame)[0])
-        expected_drawdown_pct = float(abs(self.drawdown_model.predict(frame)[0]))
+        direction = "long" if float(features.get("is_buy_signal", 0.0) or 0.0) >= float(features.get("is_sell_signal", 0.0) or 0.0) else "short"
+        bundle = self.bundles.get(direction) or self.bundles.get("long") or next(iter(self.bundles.values()))
+        raw_take_probability = float(bundle.classifier.predict_proba(frame)[0][1])
+        take_probability = float(bundle.calibrator.transform(np.array([raw_take_probability]))[0]) if bundle.calibrator else raw_take_probability
+        expected_edge_pct = float(bundle.edge_model.predict(frame)[0])
+        expected_drawdown_pct = float(abs(bundle.drawdown_model.predict(frame)[0]))
         return {
             "take_probability": round(take_probability, 4),
             "expected_edge_pct": round(expected_edge_pct, 3),
             "expected_drawdown_pct": round(max(expected_drawdown_pct, 0.1), 3),
-            "decision_threshold": round(float(self.decision_threshold), 4),
-            "min_expected_edge_pct": round(float(self.min_expected_edge_pct), 4),
-            "min_edge_ratio": round(float(self.min_edge_ratio), 4),
+            "decision_threshold": round(float(bundle.decision_threshold), 4),
+            "min_expected_edge_pct": round(float(bundle.min_expected_edge_pct), 4),
+            "min_edge_ratio": round(float(bundle.min_edge_ratio), 4),
+            "direction_bundle": direction,
         }
 
 
@@ -308,8 +588,6 @@ class EventAwareXGBoostRetrainer:
         self.train_split = train_split
 
     def _build_dataset(self, feature_matrices: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-        from models.train_orchestrator import build_labels
-
         rows = []
         for symbol, frame in feature_matrices.items():
             if frame is None or frame.empty or len(frame) < 120:
@@ -318,7 +596,13 @@ class EventAwareXGBoostRetrainer:
             numeric = numeric.dropna(thresh=max(8, int(len(numeric.columns) * 0.6)))
             if numeric.empty:
                 continue
-            labels = build_labels(numeric, horizon=self.horizon).reindex(numeric.index).fillna(1).astype(int)
+            labels = []
+            for idx in range(len(numeric)):
+                if idx >= (len(numeric) - 2):
+                    labels.append(1)
+                    continue
+                labels.append(_triple_barrier_direction_label(numeric, idx, self.horizon))
+            labels = pd.Series(labels, index=numeric.index, dtype=int)
             numeric = numeric.copy()
             numeric["label"] = labels
             numeric["symbol"] = symbol
@@ -378,6 +662,47 @@ class EventAwareXGBoostRetrainer:
         with open(CHECKPOINTS_DIR / "scaler.pkl", "wb") as f:
             pickle.dump(scaler, f)
 
+        shap_monitor = {"status": "unavailable"}
+        try:
+            from core.explainability import GlobalFeatureImportance, SHAPExplainerFactory
+
+            X_val_aug = add_regime_interactions(X_val)
+            X_val_sel = model.selector.transform(X_val_aug).fillna(0.0)
+            explainer = SHAPExplainerFactory.for_xgboost(model.model)
+            importance = GlobalFeatureImportance().compute_global_importance(
+                explainer=explainer,
+                feature_matrix=X_val_sel,
+                feature_names=model.feature_names_in,
+                sample_n=min(500, len(X_val_sel)),
+            )
+            if not importance.empty:
+                current_values = {
+                    row["feature"]: round(float(row["mean_abs_shap"]), 8)
+                    for _, row in importance.head(20).iterrows()
+                }
+                alerts = []
+                previous_values = {}
+                if XGB_SHAP_REPORT_PATH.exists():
+                    previous_payload = json.loads(XGB_SHAP_REPORT_PATH.read_text(encoding="utf-8"))
+                    previous_values = (previous_payload.get("baseline") or {})
+                for feature, current_value in current_values.items():
+                    previous_value = _safe_float(previous_values.get(feature, 0.0), 0.0)
+                    if previous_value <= 0:
+                        continue
+                    if current_value < (previous_value * 0.60):
+                        alerts.append({"feature": feature, "type": "drop", "baseline": previous_value, "current": current_value})
+                    elif current_value > (previous_value * 1.80):
+                        alerts.append({"feature": feature, "type": "surge", "baseline": previous_value, "current": current_value})
+                shap_monitor = {
+                    "status": "ok",
+                    "baseline": current_values,
+                    "alerts": alerts[:10],
+                    "top_features": list(current_values.keys())[:10],
+                }
+                XGB_SHAP_REPORT_PATH.write_text(json.dumps(shap_monitor, indent=2), encoding="utf-8")
+        except Exception as exc:
+            shap_monitor = {"status": "error", "reason": str(exc)}
+
         report = {
             "status": "ok",
             "train_rows": int(len(X_train)),
@@ -387,6 +712,7 @@ class EventAwareXGBoostRetrainer:
             "fit_metrics": fit_metrics,
             "cv_metrics": cv_metrics,
             "model_path": str(model_path),
+            "shap_monitor": shap_monitor,
         }
         XGB_REPORT_PATH.write_text(json.dumps(report, indent=2))
         logger.info(
@@ -418,43 +744,6 @@ class MetaModelTrainer:
             "stop_loss_pct": round(stop_loss_pct, 3),
             "take_profit_pct": round(take_profit_pct, 3),
             "risk_reward_ratio": round(take_profit_pct / max(stop_loss_pct, 0.1), 3),
-        }
-
-    def _directional_path_stats(
-        self,
-        signal_direction: str,
-        entry_close: float,
-        future_close: pd.Series,
-        stop_loss_pct: float,
-        take_profit_pct: float,
-    ) -> Dict[str, float]:
-        if signal_direction == "sell":
-            pnl_path = (entry_close / future_close.replace(0, np.nan) - 1.0) * 100.0
-        else:
-            pnl_path = (future_close / entry_close - 1.0) * 100.0
-
-        pnl_path = pnl_path.replace([np.inf, -np.inf], np.nan).dropna()
-        if pnl_path.empty:
-            return {"edge_pct": 0.0, "drawdown_pct": 0.0, "hit": 0}
-
-        stop_hit = pnl_path[pnl_path <= -abs(stop_loss_pct)]
-        take_hit = pnl_path[pnl_path >= abs(take_profit_pct)]
-
-        exit_edge = float(pnl_path.iloc[-1])
-        hit = 1 if exit_edge > 0 else 0
-        if not stop_hit.empty and (take_hit.empty or stop_hit.index[0] <= take_hit.index[0]):
-            exit_edge = -abs(stop_loss_pct)
-            hit = 0
-        elif not take_hit.empty and (stop_hit.empty or take_hit.index[0] < stop_hit.index[0]):
-            exit_edge = abs(take_profit_pct)
-            hit = 1
-
-        edge_pct = float(exit_edge)
-        drawdown_pct = float(abs(min(float(pnl_path.min()), 0.0)))
-        return {
-            "edge_pct": round(edge_pct, 4),
-            "drawdown_pct": round(drawdown_pct, 4),
-            "hit": hit,
         }
 
     def _sample_weights(self, edge_pct: pd.Series, drawdown_pct: pd.Series, take_label: pd.Series) -> np.ndarray:
@@ -512,6 +801,93 @@ class MetaModelTrainer:
         best.pop("objective", None)
         return best
 
+    def _bundle_take_probability(self, bundle: DirectionalMetaArtifacts, X: pd.DataFrame) -> np.ndarray:
+        raw_prob = bundle.classifier.predict_proba(X)[:, 1]
+        return bundle.calibrator.transform(raw_prob) if bundle.calibrator else raw_prob
+
+    def _fit_direction_bundle(self, train_df: pd.DataFrame, direction: str) -> Optional[DirectionalMetaArtifacts]:
+        if train_df.empty or train_df["take_label"].nunique() < 2:
+            return None
+
+        X = train_df[MetaFeatureBuilder.FEATURE_COLUMNS].fillna(0.0)
+        y_take = train_df["take_label"].astype(int)
+        y_edge = train_df["edge_pct"].astype(float)
+        y_drawdown = train_df["drawdown_pct"].astype(float)
+        sample_weight = self._sample_weights(y_edge, y_drawdown, y_take)
+
+        calibration_rows = max(40, min(len(train_df) // 4, 180))
+        core_rows = max(len(train_df) - calibration_rows, max(60, len(train_df) // 2))
+        X_core = X.iloc[:core_rows]
+        y_core = y_take.iloc[:core_rows]
+        core_weight = sample_weight[: len(X_core)]
+        X_cal = X.iloc[core_rows:]
+        y_cal = y_take.iloc[core_rows:]
+        if X_cal.empty or y_cal.nunique() < 2 or y_core.nunique() < 2:
+            X_core = X
+            y_core = y_take
+            core_weight = sample_weight
+            X_cal = X
+            y_cal = y_take
+
+        classifier = HistGradientBoostingClassifier(
+            learning_rate=0.05,
+            max_depth=4,
+            max_iter=320,
+            min_samples_leaf=24,
+            l2_regularization=0.15,
+            random_state=42,
+        )
+        edge_model = HistGradientBoostingRegressor(
+            learning_rate=0.05,
+            max_depth=5,
+            max_iter=320,
+            min_samples_leaf=24,
+            l2_regularization=0.10,
+            random_state=42,
+        )
+        drawdown_model = HistGradientBoostingRegressor(
+            learning_rate=0.05,
+            max_depth=5,
+            max_iter=320,
+            min_samples_leaf=24,
+            l2_regularization=0.10,
+            random_state=42,
+            loss="absolute_error",
+        )
+
+        classifier.fit(X_core, y_core, sample_weight=core_weight)
+        edge_model.fit(X, y_edge, sample_weight=sample_weight)
+        drawdown_model.fit(X, y_drawdown, sample_weight=sample_weight)
+
+        raw_calibration = classifier.predict_proba(X_cal)[:, 1]
+        calibrator = BinaryPlattCalibrator().fit(raw_calibration, y_cal)
+        calibrated_take_prob = self._bundle_take_probability(
+            DirectionalMetaArtifacts(
+                classifier=classifier,
+                calibrator=calibrator,
+                edge_model=edge_model,
+                drawdown_model=drawdown_model,
+                decision_threshold=self.take_threshold,
+                min_expected_edge_pct=0.10,
+                min_edge_ratio=0.12,
+                direction=direction,
+            ),
+            X,
+        )
+        edge_pred = edge_model.predict(X)
+        drawdown_pred = np.abs(drawdown_model.predict(X))
+        decision_rule = self._select_decision_rule(train_df, calibrated_take_prob, edge_pred, drawdown_pred)
+        return DirectionalMetaArtifacts(
+            classifier=classifier,
+            calibrator=calibrator,
+            edge_model=edge_model,
+            drawdown_model=drawdown_model,
+            decision_threshold=float(decision_rule["decision_threshold"]),
+            min_expected_edge_pct=float(decision_rule["min_expected_edge_pct"]),
+            min_edge_ratio=float(decision_rule["min_edge_ratio"]),
+            direction=direction,
+        )
+
     def build_training_dataset(self, feature_matrices: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         from core.signal_engine_v2 import MultiFactorScorer
 
@@ -523,8 +899,7 @@ class MetaModelTrainer:
                 continue
 
             ordered = frame.sort_index()
-            last_usable_idx = len(ordered) - self.horizon_days
-            for idx in range(60, last_usable_idx):
+            for idx in range(60, len(ordered) - 2):
                 row = ordered.iloc[idx]
                 signal_score = scorer.score(row)
                 direction = signal_score["direction"]
@@ -550,7 +925,8 @@ class MetaModelTrainer:
                         round(min(6.6, abs(synthetic_direction) * 12.0), 1),
                     )
 
-                future_window = ordered.iloc[idx + 1 : idx + 1 + self.horizon_days]
+                horizon_days, horizon_multiplier = _adaptive_horizon_days(ordered, idx, self.horizon_days)
+                future_window = ordered.iloc[idx + 1 : idx + 1 + horizon_days]
                 if future_window.empty:
                     continue
 
@@ -559,10 +935,10 @@ class MetaModelTrainer:
                     continue
 
                 risk_parameters = self._estimate_risk_parameters(row)
-                path_stats = self._directional_path_stats(
+                path_stats = _triple_barrier_path_stats(
                     direction,
                     entry_close,
-                    future_window["close"],
+                    future_window,
                     stop_loss_pct=float(risk_parameters["stop_loss_pct"]),
                     take_profit_pct=float(risk_parameters["take_profit_pct"]),
                 )
@@ -589,11 +965,15 @@ class MetaModelTrainer:
                     {
                         "symbol": symbol,
                         "timestamp": pd.Timestamp(ordered.index[idx]),
+                        "direction_label": "long" if direction == "buy" else "short",
+                        "adaptive_horizon_days": horizon_days,
+                        "adaptive_horizon_multiplier": horizon_multiplier,
                         "take_label": take_label,
                         "edge_pct": path_stats["edge_pct"],
                         "drawdown_pct": path_stats["drawdown_pct"],
                         "edge_ratio": round(float(edge_ratio), 4),
                         "hit": path_stats["hit"],
+                        "barrier": path_stats["barrier"],
                     }
                 )
                 records.append(feature_values)
@@ -604,38 +984,6 @@ class MetaModelTrainer:
         dataset = pd.DataFrame(records)
         dataset = dataset.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
         return dataset
-
-    def _fit_models(self, X: pd.DataFrame, y_take: pd.Series, y_edge: pd.Series, y_drawdown: pd.Series):
-        classifier = HistGradientBoostingClassifier(
-            learning_rate=0.05,
-            max_depth=4,
-            max_iter=320,
-            min_samples_leaf=28,
-            l2_regularization=0.15,
-            random_state=42,
-        )
-        edge_model = HistGradientBoostingRegressor(
-            learning_rate=0.05,
-            max_depth=5,
-            max_iter=320,
-            min_samples_leaf=24,
-            l2_regularization=0.10,
-            random_state=42,
-        )
-        drawdown_model = HistGradientBoostingRegressor(
-            learning_rate=0.05,
-            max_depth=5,
-            max_iter=320,
-            min_samples_leaf=24,
-            l2_regularization=0.10,
-            random_state=42,
-            loss="absolute_error",
-        )
-        sample_weight = self._sample_weights(y_edge, y_drawdown, y_take)
-        classifier.fit(X, y_take, sample_weight=sample_weight)
-        edge_model.fit(X, y_edge, sample_weight=sample_weight)
-        drawdown_model.fit(X, y_drawdown, sample_weight=sample_weight)
-        return classifier, edge_model, drawdown_model
 
     def walk_forward_validate(self, dataset: pd.DataFrame) -> Dict:
         if dataset.empty:
@@ -659,61 +1007,61 @@ class MetaModelTrainer:
             test_df = dataset[dataset["timestamp"].isin(test_dates)]
             if train_df.empty or test_df.empty:
                 continue
-            if train_df["take_label"].nunique() < 2 or test_df["take_label"].nunique() < 2:
+            all_true = []
+            all_pred = []
+            taken_edges: List[float] = []
+            taken_drawdown: List[float] = []
+            direction_summaries: Dict[str, Dict] = {}
+
+            for direction, mask_column in (("long", "is_buy_signal"), ("short", "is_sell_signal")):
+                train_dir = train_df[train_df[mask_column] > 0.5]
+                test_dir = test_df[test_df[mask_column] > 0.5]
+                bundle = self._fit_direction_bundle(train_dir, direction)
+                if bundle is None or test_dir.empty:
+                    continue
+
+                X_test = test_dir[MetaFeatureBuilder.FEATURE_COLUMNS].fillna(0.0)
+                take_prob = self._bundle_take_probability(bundle, X_test)
+                edge_pred = bundle.edge_model.predict(X_test)
+                drawdown_pred = np.abs(bundle.drawdown_model.predict(X_test))
+                pred_take = (
+                    (take_prob >= bundle.decision_threshold)
+                    & (edge_pred >= bundle.min_expected_edge_pct)
+                    & ((edge_pred / np.maximum(drawdown_pred, 0.35)) >= bundle.min_edge_ratio)
+                )
+
+                realized_edges = test_dir["edge_pct"].to_numpy(dtype=float)
+                realized_drawdown = test_dir["drawdown_pct"].to_numpy(dtype=float)
+                taken_edges.extend(realized_edges[pred_take].tolist())
+                taken_drawdown.extend(realized_drawdown[pred_take].tolist())
+                all_true.extend(test_dir["take_label"].astype(int).tolist())
+                all_pred.extend(pred_take.astype(int).tolist())
+                direction_summaries[direction] = {
+                    "test_rows": int(len(test_dir)),
+                    "coverage_pct": round(float(pred_take.mean() * 100.0), 2),
+                    "decision_threshold": round(float(bundle.decision_threshold), 4),
+                    "min_expected_edge_pct": round(float(bundle.min_expected_edge_pct), 4),
+                    "min_edge_ratio": round(float(bundle.min_edge_ratio), 4),
+                }
+
+            if not all_true:
                 continue
 
-            X_train = train_df[MetaFeatureBuilder.FEATURE_COLUMNS].fillna(0.0)
-            X_test = test_df[MetaFeatureBuilder.FEATURE_COLUMNS].fillna(0.0)
-            classifier, edge_model, drawdown_model = self._fit_models(
-                X_train,
-                train_df["take_label"],
-                train_df["edge_pct"],
-                train_df["drawdown_pct"],
-            )
-            train_take_prob = classifier.predict_proba(X_train)[:, 1]
-            train_edge_pred = edge_model.predict(X_train)
-            train_drawdown_pred = np.abs(drawdown_model.predict(X_train))
-            decision_rule = self._select_decision_rule(
-                train_df,
-                train_take_prob,
-                train_edge_pred,
-                train_drawdown_pred,
-            )
-            take_prob = classifier.predict_proba(X_test)[:, 1]
-            edge_pred = edge_model.predict(X_test)
-            drawdown_pred = np.abs(drawdown_model.predict(X_test))
-            pred_take = (
-                (take_prob >= decision_rule["decision_threshold"])
-                & (edge_pred >= decision_rule["min_expected_edge_pct"])
-                & ((edge_pred / np.maximum(drawdown_pred, 0.35)) >= decision_rule["min_edge_ratio"])
-            )
-
-            realized_edges = test_df["edge_pct"].to_numpy(dtype=float)
-            realized_drawdown = test_df["drawdown_pct"].to_numpy(dtype=float)
-            taken_edges = realized_edges[pred_take]
-            taken_drawdown = realized_drawdown[pred_take]
-
+            all_true_arr = np.asarray(all_true, dtype=int)
+            all_pred_arr = np.asarray(all_pred, dtype=int)
             folds.append(
                 {
                     "fold": fold + 1,
                     "train_rows": int(len(train_df)),
-                    "test_rows": int(len(test_df)),
-                    "accuracy": round(float(accuracy_score(test_df["take_label"], pred_take.astype(int))), 4),
-                    "precision": round(
-                        float(precision_score(test_df["take_label"], pred_take.astype(int), zero_division=0)),
-                        4,
-                    ),
-                    "recall": round(
-                        float(recall_score(test_df["take_label"], pred_take.astype(int), zero_division=0)),
-                        4,
-                    ),
-                    "coverage_pct": round(float(pred_take.mean() * 100.0), 2),
-                    "decision_threshold": round(float(decision_rule["decision_threshold"]), 4),
-                    "min_expected_edge_pct": round(float(decision_rule["min_expected_edge_pct"]), 4),
-                    "min_edge_ratio": round(float(decision_rule["min_edge_ratio"]), 4),
-                    "taken_avg_edge_pct": round(float(np.mean(taken_edges)) if len(taken_edges) else 0.0, 3),
-                    "taken_avg_drawdown_pct": round(float(np.mean(taken_drawdown)) if len(taken_drawdown) else 0.0, 3),
-                    "taken_hit_rate_pct": round(float(np.mean(taken_edges > 0) * 100.0) if len(taken_edges) else 0.0, 2),
+                    "test_rows": int(len(all_true_arr)),
+                    "accuracy": round(float(accuracy_score(all_true_arr, all_pred_arr)), 4),
+                    "precision": round(float(precision_score(all_true_arr, all_pred_arr, zero_division=0)), 4),
+                    "recall": round(float(recall_score(all_true_arr, all_pred_arr, zero_division=0)), 4),
+                    "coverage_pct": round(float(all_pred_arr.mean() * 100.0), 2),
+                    "taken_avg_edge_pct": round(float(np.mean(taken_edges)) if taken_edges else 0.0, 3),
+                    "taken_avg_drawdown_pct": round(float(np.mean(taken_drawdown)) if taken_drawdown else 0.0, 3),
+                    "taken_hit_rate_pct": round(float(np.mean(np.asarray(taken_edges) > 0) * 100.0) if taken_edges else 0.0, 2),
+                    "directions": direction_summaries,
                 }
             )
 
@@ -743,26 +1091,44 @@ class MetaModelTrainer:
             raise ValueError("Meta labels do not contain both classes")
 
         walk_forward = self.walk_forward_validate(dataset)
-        X = dataset[MetaFeatureBuilder.FEATURE_COLUMNS].fillna(0.0)
-        classifier, edge_model, drawdown_model = self._fit_models(
-            X,
-            dataset["take_label"],
-            dataset["edge_pct"],
-            dataset["drawdown_pct"],
-        )
-        full_take_prob = classifier.predict_proba(X)[:, 1]
-        full_edge_pred = edge_model.predict(X)
-        full_drawdown_pred = np.abs(drawdown_model.predict(X))
-        deployment_rules = self._select_decision_rule(
-            dataset,
-            full_take_prob,
-            full_edge_pred,
-            full_drawdown_pred,
-        )
+        bundles: Dict[str, DirectionalMetaArtifacts] = {}
+        deployment_rules: Dict[str, Dict[str, float]] = {}
+        for direction, mask_column in (("long", "is_buy_signal"), ("short", "is_sell_signal")):
+            direction_df = dataset[dataset[mask_column] > 0.5]
+            bundle = self._fit_direction_bundle(direction_df, direction)
+            if bundle is None:
+                continue
+            bundles[direction] = bundle
+            deployment_rules[direction] = {
+                "decision_threshold": round(float(bundle.decision_threshold), 4),
+                "min_expected_edge_pct": round(float(bundle.min_expected_edge_pct), 4),
+                "min_edge_ratio": round(float(bundle.min_edge_ratio), 4),
+            }
 
-        joblib.dump(classifier, META_CLASSIFIER_PATH)
-        joblib.dump(edge_model, META_EDGE_PATH)
-        joblib.dump(drawdown_model, META_DRAWDOWN_PATH)
+        if not bundles:
+            raise ValueError("Failed to train any directional meta bundles")
+
+        if META_DIRECTIONAL_PATH.exists():
+            try:
+                META_DIRECTIONAL_PREVIOUS_PATH.write_bytes(META_DIRECTIONAL_PATH.read_bytes())
+            except Exception:
+                pass
+
+        joblib.dump(
+            {
+                "bundles": {
+                    direction: {
+                        "classifier": bundle.classifier,
+                        "calibrator": bundle.calibrator,
+                        "edge_model": bundle.edge_model,
+                        "drawdown_model": bundle.drawdown_model,
+                    }
+                    for direction, bundle in bundles.items()
+                },
+                "feature_columns": MetaFeatureBuilder.FEATURE_COLUMNS,
+            },
+            META_DIRECTIONAL_PATH,
+        )
         with open(META_FEATURES_PATH, "wb") as f:
             pickle.dump(MetaFeatureBuilder.FEATURE_COLUMNS, f)
 
@@ -771,6 +1137,10 @@ class MetaModelTrainer:
             "rows": int(len(dataset)),
             "positive_labels": int(dataset["take_label"].sum()),
             "feature_count": len(MetaFeatureBuilder.FEATURE_COLUMNS),
+            "direction_rows": {
+                "long": int((dataset["is_buy_signal"] > 0.5).sum()),
+                "short": int((dataset["is_sell_signal"] > 0.5).sum()),
+            },
             "deployment_rules": deployment_rules,
             "walk_forward": walk_forward,
         }
@@ -778,7 +1148,7 @@ class MetaModelTrainer:
         logger.info(
             "Meta model trained: "
             f"{report['rows']} rows | {report['positive_labels']} positive labels | "
-            f"{report['feature_count']} features"
+            f"{report['feature_count']} features | bundles {','.join(sorted(bundles.keys()))}"
         )
         return report
 

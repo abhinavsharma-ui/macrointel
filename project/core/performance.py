@@ -1,5 +1,5 @@
 """
-Lightweight performance knobs for running on laptops.
+Lightweight performance knobs for running on laptops and small cloud VMs.
 
 Goals:
 - Reduce lag by capping native threadpools (BLAS/OpenMP/NumExpr/joblib).
@@ -61,6 +61,11 @@ def _compute_default_threads(profile: str) -> int:
     return max(1, min(2, cpu_count))
 
 
+def _default_profile() -> str:
+    # Windows sessions are most likely local/laptop runs; Linux defaults are usually cloud/server.
+    return "laptop" if sys.platform.startswith("win") else "balanced"
+
+
 def _set_windows_priority(priority: str) -> bool:
     priority = (priority or "").strip().lower()
     if not priority:
@@ -116,13 +121,13 @@ def apply_performance_profile() -> Dict[str, object]:
     Apply thread caps and optional process-priority tweaks.
 
     Controlled via env vars:
-    - PERF_PROFILE: laptop|balanced|full  (default: laptop)
+    - PERF_PROFILE: laptop|balanced|full  (default: laptop on Windows, balanced elsewhere)
     - MAX_CPU_THREADS: integer cap for native threadpools (default depends on PERF_PROFILE)
     - PROCESS_PRIORITY: windows priority class (below_normal recommended)
     - PERF_SET_PROCESS_PRIORITY: 1 to allow setting priority (default: 1 on Windows in laptop profile)
     """
-
-    profile = (os.getenv("PERF_PROFILE") or os.getenv("PERFORMANCE_PROFILE") or "laptop").strip().lower() or "laptop"
+    default_profile = _default_profile()
+    profile = (os.getenv("PERF_PROFILE") or os.getenv("PERFORMANCE_PROFILE") or default_profile).strip().lower() or default_profile
     default_threads = _compute_default_threads(profile)
     threads = _env_int("MAX_CPU_THREADS", default_threads, min_value=1, max_value=(os.cpu_count() or None))
 

@@ -658,9 +658,9 @@ class MetaDecisionEngine:
             min_edge_required = self._min_edge_pct
             min_ratio_required = self._min_edge_ratio
             if self._trained_model is not None and decision_source == "trained_blend":
-                effective_threshold = self._take_threshold
-                min_edge_required = self._min_edge_pct
-                min_ratio_required = self._min_edge_ratio
+                effective_threshold = trained_threshold
+                min_edge_required = trained_min_edge
+                min_ratio_required = trained_min_ratio
             edge_ratio_live = expected_edge_pct / max(expected_drawdown_pct, 0.25)
             min_conviction = self._leader_min_conviction if leader_symbol else self._min_conviction
             take_trade = (

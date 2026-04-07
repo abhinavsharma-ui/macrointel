@@ -79,6 +79,46 @@ class InstitutionalPortfolioConstructor:
             rows.append([float(factor_scores.get(name, 0.0) or 0.0) for name in self.FACTOR_ORDER])
         return np.array(rows, dtype=float) if rows else np.zeros((0, len(self.FACTOR_ORDER)))
 
+    def _mst_peripherality_scores(self, returns: pd.DataFrame) -> Dict[str, float]:
+        if returns is None or returns.empty or returns.shape[1] <= 1:
+            return {symbol: 1.0 for symbol in returns.columns} if returns is not None else {}
+
+        corr = returns.corr().abs().fillna(0.0).to_numpy(dtype=float)
+        n = corr.shape[0]
+        distance = 1.0 - corr
+        np.fill_diagonal(distance, 0.0)
+        visited = {0}
+        degrees = np.zeros(n, dtype=float)
+
+        while len(visited) < n:
+            best_edge = None
+            best_distance = float("inf")
+            for left in visited:
+                for right in range(n):
+                    if right in visited or left == right:
+                        continue
+                    candidate = float(distance[left, right])
+                    if candidate < best_distance:
+                        best_distance = candidate
+                        best_edge = (left, right)
+            if best_edge is None:
+                break
+            left, right = best_edge
+            degrees[left] += 1.0
+            degrees[right] += 1.0
+            visited.add(right)
+
+        raw_scores = 1.0 / (1.0 + degrees)
+        if raw_scores.max() > raw_scores.min():
+            normalized = (raw_scores - raw_scores.min()) / (raw_scores.max() - raw_scores.min())
+        else:
+            normalized = np.ones_like(raw_scores)
+        bonus = 0.8 + (normalized * 0.5)
+        return {
+            symbol: round(float(bonus[idx]), 4)
+            for idx, symbol in enumerate(list(returns.columns))
+        }
+
     def _expected_residual_alpha(self, symbols, signals: Dict[str, Dict], returns: pd.DataFrame, market_proxy: pd.Series, betas: np.ndarray) -> np.ndarray:
         mu = []
         for idx, symbol in enumerate(symbols):
@@ -185,6 +225,8 @@ class InstitutionalPortfolioConstructor:
         betas = np.array(betas, dtype=float)
 
         mu = self._expected_residual_alpha(symbols, signals, raw_returns, market_proxy, betas)
+        peripherality_bonus = self._mst_peripherality_scores(raw_returns[symbols])
+        mu = np.array([mu[idx] * peripherality_bonus.get(symbol, 1.0) for idx, symbol in enumerate(symbols)], dtype=float)
         if np.all(mu <= 0):
             mu = np.array(
                 [
@@ -247,6 +289,7 @@ class InstitutionalPortfolioConstructor:
                 "portfolio_score": round(portfolio_score, 4),
                 "residual_alpha_score": round(float(mu[idx]), 5),
                 "beta": round(float(betas[idx]), 4),
+                "peripherality_bonus": peripherality_bonus.get(symbol, 1.0),
                 "take_probability": round(float(meta.get("take_probability", signal.get("take_probability", 0.0)) or 0.0), 4),
             }
 
@@ -257,6 +300,7 @@ class InstitutionalPortfolioConstructor:
             "target_beta": round(self.target_beta, 4),
             "beta_gap": round(net_beta - self.target_beta, 4),
             "hedge_ratio": round(max(0.0, net_beta - self.target_beta), 4),
+            "peripherality_bonus_avg": round(float(np.mean([peripherality_bonus.get(symbol, 1.0) for symbol in symbols])), 4),
             "factor_exposures": factor_exposures,
         }
 

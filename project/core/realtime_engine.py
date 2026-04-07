@@ -127,19 +127,184 @@ class PublicDepthBuffer:
 
     def __init__(self):
         self._books: Dict[str, Dict] = {}
+        self._level_stats: Dict[str, Dict[str, Dict[str, Dict]]] = defaultdict(lambda: {"bids": {}, "asks": {}})
+        self._spread_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=64))
         self._lock = threading.RLock()
+
+    @staticmethod
+    def _level_key(price: float) -> str:
+        return f"{float(price):.8f}"
+
+    @staticmethod
+    def _normalize_level(level) -> Optional[Dict[str, float]]:
+        if isinstance(level, (list, tuple)) and len(level) >= 2:
+            try:
+                return {"price": float(level[0] or 0.0), "quantity": float(level[1] or 0.0)}
+            except Exception:
+                return None
+        if isinstance(level, dict):
+            try:
+                return {
+                    "price": float(level.get("price", level.get("p", 0.0)) or 0.0),
+                    "quantity": float(level.get("quantity", level.get("qty", level.get("q", 0.0))) or 0.0),
+                }
+            except Exception:
+                return None
+        return None
+
+    def _update_level_stats(self, symbol: str, side: str, levels, ts: datetime):
+        side_stats = self._level_stats[symbol][side]
+        for raw_level in levels or []:
+            normalized = self._normalize_level(raw_level)
+            if not normalized:
+                continue
+            price = normalized["price"]
+            quantity = normalized["quantity"]
+            if price <= 0 or quantity <= 0:
+                continue
+            key = self._level_key(price)
+            state = side_stats.get(key)
+            if state is None:
+                side_stats[key] = {
+                    "price": price,
+                    "quantity": quantity,
+                    "first_seen_ts": ts,
+                    "last_seen_ts": ts,
+                    "updates": 1,
+                    "inter_update_delay_ms": 9999.0,
+                }
+                continue
+
+            changed = abs(quantity - float(state.get("quantity", 0.0) or 0.0)) > 1e-12
+            delay_ms = max(0.0, (ts - state["last_seen_ts"]).total_seconds() * 1000.0)
+            state["last_seen_ts"] = ts
+            state["inter_update_delay_ms"] = delay_ms if changed else float(state.get("inter_update_delay_ms", 9999.0) or 9999.0)
+            if changed:
+                state["updates"] = int(state.get("updates", 0) or 0) + 1
+            state["quantity"] = quantity
+            side_stats[key] = state
 
     def update(self, symbol: str, payload: Dict):
         with self._lock:
             current = dict(self._books.get(symbol, {}))
             current.update(payload)
             current["symbol"] = symbol
-            current["updated_at"] = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
+            current["updated_at"] = now.isoformat()
+            if "bids" in payload:
+                self._update_level_stats(symbol, "bids", payload.get("bids", []), now)
+            if "asks" in payload:
+                self._update_level_stats(symbol, "asks", payload.get("asks", []), now)
+            best_bid = float(current.get("best_bid", 0.0) or 0.0)
+            best_ask = float(current.get("best_ask", 0.0) or 0.0)
+            if best_bid > 0 and best_ask > 0 and best_ask >= best_bid:
+                self._spread_history[symbol].append(
+                    {
+                        "timestamp": now,
+                        "spread": best_ask - best_bid,
+                        "mid": (best_bid + best_ask) / 2.0,
+                    }
+                )
             self._books[symbol] = current
 
     def latest(self, symbol: str) -> Dict:
         with self._lock:
             return dict(self._books.get(symbol, {}))
+
+    def filtered_snapshot(
+        self,
+        symbol: str,
+        *,
+        min_lifetime_ms: float = 200.0,
+        max_updates_per_second: float = 5.0,
+        min_inter_update_delay_ms: float = 20.0,
+    ) -> Dict:
+        with self._lock:
+            book = dict(self._books.get(symbol, {}))
+            if not book:
+                return {}
+            side_stats = self._level_stats.get(symbol, {"bids": {}, "asks": {}})
+            spread_history = list(self._spread_history.get(symbol, []))
+
+        updated_at_raw = book.get("updated_at")
+        try:
+            updated_at = datetime.fromisoformat(str(updated_at_raw))
+        except Exception:
+            updated_at = datetime.now(timezone.utc)
+
+        def _filter_side(side_name: str):
+            filtered_levels = []
+            metrics = []
+            for raw_level in book.get(side_name, []) or []:
+                normalized = self._normalize_level(raw_level)
+                if not normalized:
+                    continue
+                price = normalized["price"]
+                quantity = normalized["quantity"]
+                if price <= 0 or quantity <= 0:
+                    continue
+                state = (side_stats.get(side_name) or {}).get(self._level_key(price))
+                if state is None:
+                    continue
+                visible_seconds = max((updated_at - state["first_seen_ts"]).total_seconds(), 1e-3)
+                lifetime_ms = max(0.0, (updated_at - state["first_seen_ts"]).total_seconds() * 1000.0)
+                updates_per_second = float(state.get("updates", 1) or 1) / visible_seconds
+                inter_delay_ms = float(state.get("inter_update_delay_ms", 9999.0) or 9999.0)
+                keep = (
+                    lifetime_ms >= min_lifetime_ms
+                    and updates_per_second <= max_updates_per_second
+                    and inter_delay_ms >= min_inter_update_delay_ms
+                )
+                metrics.append(
+                    {
+                        "price": price,
+                        "quantity": quantity,
+                        "lifetime_ms": round(lifetime_ms, 2),
+                        "updates_per_second": round(updates_per_second, 3),
+                        "inter_update_delay_ms": round(inter_delay_ms, 2),
+                        "kept": keep,
+                    }
+                )
+                if keep:
+                    filtered_levels.append(raw_level)
+            return filtered_levels, metrics
+
+        filtered_bids, bid_metrics = _filter_side("bids")
+        filtered_asks, ask_metrics = _filter_side("asks")
+
+        def _notional(levels) -> float:
+            total = 0.0
+            for raw_level in levels[:5]:
+                normalized = self._normalize_level(raw_level)
+                if not normalized:
+                    continue
+                total += normalized["price"] * normalized["quantity"]
+            return total
+
+        bid_notional = _notional(filtered_bids)
+        ask_notional = _notional(filtered_asks)
+        denominator = bid_notional + ask_notional
+        filtered_imbalance = ((bid_notional - ask_notional) / denominator) if denominator > 0 else 0.0
+
+        spread_velocity = 0.0
+        if len(spread_history) >= 2:
+            first = spread_history[max(0, len(spread_history) - 10)]
+            last = spread_history[-1]
+            delta_seconds = max((last["timestamp"] - first["timestamp"]).total_seconds(), 1e-3)
+            mid_price = max(float(last.get("mid", 0.0) or 0.0), 1e-6)
+            spread_velocity = ((float(last.get("spread", 0.0) or 0.0) - float(first.get("spread", 0.0) or 0.0)) / mid_price) / delta_seconds
+
+        book["filtered_bids"] = filtered_bids
+        book["filtered_asks"] = filtered_asks
+        book["filtered_bid_metrics"] = bid_metrics
+        book["filtered_ask_metrics"] = ask_metrics
+        book["filtered_book_imbalance"] = round(float(filtered_imbalance), 6)
+        book["spread_velocity"] = round(float(spread_velocity), 8)
+        book["flicker_filter_retention"] = round(
+            (len(filtered_bids) + len(filtered_asks)) / max(len(book.get("bids", [])) + len(book.get("asks", [])), 1),
+            4,
+        )
+        return book
 
     def active_symbols(self) -> Set[str]:
         with self._lock:
