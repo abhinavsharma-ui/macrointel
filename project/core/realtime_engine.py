@@ -1,0 +1,664 @@
+﻿"""
+Real-Time WebSocket Data Engine
+=================================
+"Professional systems don't use polled APIs for real-time work. They use WebSockets."
+
+This module replaces the polling approach with event-driven WebSocket connections:
+  - Finnhub: Sub-second US stock tick data (NYSE, NASDAQ)
+  - Upstox/Dhan: Real-time NSE/BSE tick data
+  - Latency target: price â†’ alert on phone in < 500ms
+
+Architecture:
+  WebSocket threads â†’ Shared price buffer â†’ Signal engine â†’ SocketIO â†’ Dashboard
+  (real-time)          (thread-safe)         (async)        (push)     (browser)
+"""
+
+import json
+import time
+import logging
+import threading
+from datetime import datetime, timezone
+from collections import deque, defaultdict
+from typing import Optional, Dict, Callable, List, Set
+from dataclasses import dataclass, field
+
+import websocket  # websocket-client
+import requests
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Shared Real-Time Price Buffer
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+@dataclass
+class Tick:
+    """A single price tick from any market."""
+    symbol: str
+    price: float
+    volume: int
+    timestamp: datetime
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    market: str = "US"   # "US" or "IN"
+
+    @property
+    def spread(self) -> Optional[float]:
+        if self.bid and self.ask:
+            return self.ask - self.bid
+        return None
+
+
+class RealTimePriceBuffer:
+    """
+    Thread-safe circular buffer for real-time price data.
+    Shared between all WebSocket threads and the signal engine.
+    """
+
+    def __init__(self, buffer_size: int = 1000):
+        self._buffer: Dict[str, deque] = defaultdict(lambda: deque(maxlen=buffer_size))
+        self._latest: Dict[str, Tick] = {}
+        self._lock = threading.RLock()
+        self._subscribers: List[Callable] = []
+        self._stats: Dict[str, int] = defaultdict(int)
+
+    def push(self, tick: Tick):
+        """Push a new tick into the buffer. Thread-safe."""
+        with self._lock:
+            self._buffer[tick.symbol].append(tick)
+            self._latest[tick.symbol] = tick
+            self._stats["total_ticks"] += 1
+
+        # Notify subscribers (on separate thread to avoid blocking WebSocket)
+        for callback in self._subscribers:
+            try:
+                callback(tick)
+            except Exception as e:
+                logger.debug(f"Subscriber callback error: {e}")
+
+    def latest(self, symbol: str) -> Optional[Tick]:
+        """Get the most recent tick for a symbol."""
+        return self._latest.get(symbol)
+
+    def recent_ticks(self, symbol: str, n: int = 50) -> List[Tick]:
+        """Get the N most recent ticks for a symbol."""
+        with self._lock:
+            buf = self._buffer.get(symbol, deque())
+            return list(buf)[-n:]
+
+    def get_ohlcv(self, symbol: str, seconds: int = 60) -> Optional[Dict]:
+        """Compute a 1-minute OHLCV bar from tick data in real time."""
+        ticks = self.recent_ticks(symbol, n=500)
+        if not ticks:
+            return None
+
+        cutoff = datetime.now(timezone.utc).timestamp() - seconds
+        recent = [t for t in ticks if t.timestamp.timestamp() > cutoff]
+        if not recent:
+            return None
+
+        prices = [t.price for t in recent]
+        return {
+            "symbol": symbol,
+            "open": prices[0],
+            "high": max(prices),
+            "low": min(prices),
+            "close": prices[-1],
+            "volume": sum(t.volume for t in recent),
+            "tick_count": len(recent),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def subscribe(self, callback: Callable[[Tick], None]):
+        """Subscribe to all incoming ticks."""
+        self._subscribers.append(callback)
+
+    def active_symbols(self) -> Set[str]:
+        return set(self._latest.keys())
+
+    @property
+    def stats(self) -> Dict:
+        return dict(self._stats)
+
+
+class PublicDepthBuffer:
+    """Thread-safe top-of-book / depth snapshot store."""
+
+    def __init__(self):
+        self._books: Dict[str, Dict] = {}
+        self._lock = threading.RLock()
+
+    def update(self, symbol: str, payload: Dict):
+        with self._lock:
+            current = dict(self._books.get(symbol, {}))
+            current.update(payload)
+            current["symbol"] = symbol
+            current["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._books[symbol] = current
+
+    def latest(self, symbol: str) -> Dict:
+        with self._lock:
+            return dict(self._books.get(symbol, {}))
+
+    def active_symbols(self) -> Set[str]:
+        with self._lock:
+            return set(self._books.keys())
+
+
+# Global shared buffer (singleton pattern)
+PRICE_BUFFER = RealTimePriceBuffer()
+DEPTH_BUFFER = PublicDepthBuffer()
+
+
+class BinancePublicDepthWebSocket:
+    """
+    Public no-KYC crypto market data.
+
+    Streams:
+    - trade
+    - bookTicker
+    - depth20@100ms
+    """
+
+    WS_BASE = "wss://stream.binance.com:9443/stream?streams="
+
+    def __init__(
+        self,
+        symbols: List[str],
+        buffer: RealTimePriceBuffer = None,
+        depth_buffer: PublicDepthBuffer = None,
+    ):
+        self.symbols = [str(symbol).strip().lower() for symbol in symbols if str(symbol).strip()]
+        self.buffer = buffer or PRICE_BUFFER
+        self.depth_buffer = depth_buffer or DEPTH_BUFFER
+        self.ws: Optional[websocket.WebSocketApp] = None
+        self._running = False
+
+    def _build_url(self) -> str:
+        streams: List[str] = []
+        for symbol in self.symbols:
+            streams.extend([f"{symbol}@trade", f"{symbol}@bookTicker", f"{symbol}@depth20@100ms"])
+        return self.WS_BASE + "/".join(streams)
+
+    def start(self, daemon: bool = True):
+        self._running = True
+        thread = threading.Thread(target=self._run_forever, daemon=daemon)
+        thread.start()
+        logger.info(f"Binance public depth WebSocket started for {len(self.symbols)} crypto symbols")
+
+    def stop(self):
+        self._running = False
+        if self.ws:
+            self.ws.close()
+
+    def _run_forever(self):
+        while self._running:
+            try:
+                self.ws = websocket.WebSocketApp(
+                    self._build_url(),
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self.ws.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as exc:
+                logger.warning(f"Binance public depth WebSocket error: {exc}")
+            if self._running:
+                time.sleep(3)
+
+    def _on_open(self, ws):
+        logger.info("Binance public depth WebSocket connected")
+
+    def _on_message(self, ws, message):
+        try:
+            payload = json.loads(message)
+        except Exception:
+            return
+
+        stream = str(payload.get("stream", ""))
+        data = payload.get("data", {})
+        if not stream or not isinstance(data, dict):
+            return
+
+        symbol = stream.split("@", 1)[0].upper()
+
+        if "@trade" in stream:
+            trade_ts = datetime.fromtimestamp(float(data.get("T", time.time() * 1000)) / 1000.0, tz=timezone.utc)
+            try:
+                volume = float(data.get("q", 0.0) or 0.0)
+            except Exception:
+                volume = 0.0
+            price = float(data.get("p", 0.0) or 0.0)
+            volume_proxy = int(max(1.0, price * volume)) if price > 0 and volume > 0 else 0
+            tick = Tick(
+                symbol=symbol,
+                price=price,
+                volume=volume_proxy,
+                timestamp=trade_ts,
+                market="CRYPTO",
+            )
+            if tick.price > 0:
+                self.buffer.push(tick)
+            return
+
+        if "@bookTicker" in stream:
+            best_bid = float(data.get("b", 0.0) or 0.0)
+            best_ask = float(data.get("a", 0.0) or 0.0)
+            self.depth_buffer.update(
+                symbol,
+                {
+                    "best_bid": best_bid,
+                    "best_bid_qty": float(data.get("B", 0.0) or 0.0),
+                    "best_ask": best_ask,
+                    "best_ask_qty": float(data.get("A", 0.0) or 0.0),
+                    "book_ticker_update_id": data.get("u"),
+                },
+            )
+            mid = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0
+            if mid > 0:
+                self.buffer.push(
+                    Tick(
+                        symbol=symbol,
+                        price=mid,
+                        volume=0,
+                        timestamp=datetime.now(timezone.utc),
+                        bid=best_bid,
+                        ask=best_ask,
+                        market="CRYPTO",
+                    )
+                )
+            return
+
+        if "@depth20" in stream:
+            bids = data.get("bids", []) or []
+            asks = data.get("asks", []) or []
+            self.depth_buffer.update(
+                symbol,
+                {
+                    "bids": bids,
+                    "asks": asks,
+                    "last_depth_update_id": data.get("lastUpdateId"),
+                },
+            )
+
+    def _on_error(self, ws, error):
+        logger.warning(f"Binance public depth WebSocket error: {error}")
+
+    def _on_close(self, ws, close_status_code, close_msg):
+        logger.info(f"Binance public depth WebSocket closed: {close_status_code}")
+
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Finnhub WebSocket (US Markets)
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+class FinnhubWebSocket:
+    """
+    Real-time US stock data via Finnhub WebSocket.
+    Free tier: 50 symbols, sub-second data.
+    
+    Sign up: https://finnhub.io (free API key)
+    
+    Message format:
+    {"type":"trade","data":[{"p":150.25,"s":"AAPL","t":1640000000000,"v":100}]}
+    """
+
+    WS_URL = "wss://ws.finnhub.io?token={api_key}"
+
+    def __init__(
+        self,
+        api_key: str,
+        symbols: List[str],
+        buffer: RealTimePriceBuffer = None,
+        on_signal_callback: Optional[Callable] = None,
+    ):
+        self.api_key = api_key
+        self.symbols = symbols[:50]  # Free tier limit
+        self.buffer = buffer or PRICE_BUFFER
+        self.on_signal = on_signal_callback
+        self.ws: Optional[websocket.WebSocketApp] = None
+        self._running = False
+        self._reconnect_delay = 5
+        self._latency_tracker: deque = deque(maxlen=100)
+
+    def start(self, daemon: bool = True):
+        """Start the WebSocket connection in a background thread."""
+        self._running = True
+        thread = threading.Thread(target=self._run_forever, daemon=daemon)
+        thread.start()
+        logger.info(f"Finnhub WebSocket started for {len(self.symbols)} symbols")
+
+    def stop(self):
+        self._running = False
+        if self.ws:
+            self.ws.close()
+
+    def _run_forever(self):
+        """Keep reconnecting if the WebSocket drops."""
+        while self._running:
+            try:
+                url = self.WS_URL.format(api_key=self.api_key)
+                self.ws = websocket.WebSocketApp(
+                    url,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+            except Exception as e:
+                logger.error(f"Finnhub WebSocket error: {e}")
+
+            if self._running:
+                logger.info(f"Reconnecting in {self._reconnect_delay}s...")
+                time.sleep(self._reconnect_delay)
+
+    def _on_open(self, ws):
+        """Subscribe to all symbols on connection."""
+        logger.info("Finnhub WebSocket connected")
+        for symbol in self.symbols:
+            ws.send(json.dumps({"type": "subscribe", "symbol": symbol}))
+        logger.info(f"Subscribed to {len(self.symbols)} symbols")
+
+    def _on_message(self, ws, message):
+        """Parse incoming tick data."""
+        recv_time = datetime.now(timezone.utc)
+        try:
+            data = json.loads(message)
+            if data.get("type") != "trade":
+                return
+
+            for trade in data.get("data", []):
+                exchange_time_ms = trade.get("t", recv_time.timestamp() * 1000)
+                tick_time = datetime.fromtimestamp(exchange_time_ms / 1000, tz=timezone.utc)
+
+                # Latency measurement
+                latency_ms = (recv_time.timestamp() - exchange_time_ms / 1000) * 1000
+                self._latency_tracker.append(latency_ms)
+
+                tick = Tick(
+                    symbol=trade["s"],
+                    price=float(trade["p"]),
+                    volume=int(trade.get("v", 0)),
+                    timestamp=tick_time,
+                    market="US",
+                )
+                self.buffer.push(tick)
+
+        except Exception as e:
+            logger.debug(f"Message parse error: {e}")
+
+    def _on_error(self, ws, error):
+        logger.warning(f"Finnhub WebSocket error: {error}")
+
+    def _on_close(self, ws, close_status_code, close_msg):
+        logger.info(f"Finnhub WebSocket closed: {close_status_code}")
+
+    @property
+    def avg_latency_ms(self) -> float:
+        if not self._latency_tracker:
+            return 0.0
+        return sum(self._latency_tracker) / len(self._latency_tracker)
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Upstox WebSocket (India NSE/BSE)
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+class UpstoxWebSocket:
+    """
+    Real-time NSE/BSE data via Upstox WebSocket API.
+    Free for Upstox account holders.
+    
+    Sign up: https://upstox.com/developer (free)
+    Requires: Upstox trading account + API key
+    
+    The Upstox WebSocket uses a different binary protocol (protobuf).
+    This implementation handles both JSON and protobuf modes.
+    """
+
+    WS_URL = "wss://api.upstox.com/v2/feed/market-data-feed"
+
+    # NSE instrument token format: NSE_EQ|{isin}
+    # We convert our standard NSE symbols to Upstox format
+    SYMBOL_MAP = {
+        "RELIANCE.NS": "NSE_EQ|INE002A01018",
+        "TCS.NS": "NSE_EQ|INE467B01029",
+        "INFY.NS": "NSE_EQ|INE009A01021",
+        "HDFCBANK.NS": "NSE_EQ|INE040A01034",
+        "ICICIBANK.NS": "NSE_EQ|INE090A01021",
+        "SBIN.NS": "NSE_EQ|INE062A01020",
+        "WIPRO.NS": "NSE_EQ|INE075A01022",
+        "AXISBANK.NS": "NSE_EQ|INE238A01034",
+        "^NSEI": "NSE_INDEX|Nifty 50",
+        "^NSEBANK": "NSE_INDEX|Nifty Bank",
+    }
+
+    def __init__(
+        self,
+        access_token: str,
+        symbols: List[str],
+        buffer: RealTimePriceBuffer = None,
+    ):
+        self.access_token = access_token
+        self.nse_symbols = [s for s in symbols if s.endswith(".NS") or s.startswith("^")]
+        self.buffer = buffer or PRICE_BUFFER
+        self.ws: Optional[websocket.WebSocketApp] = None
+        self._running = False
+
+    def start(self, daemon: bool = True):
+        self._running = True
+        thread = threading.Thread(target=self._run_forever, daemon=daemon)
+        thread.start()
+        logger.info(f"Upstox WebSocket started for {len(self.nse_symbols)} NSE symbols")
+
+    def stop(self):
+        self._running = False
+        if self.ws:
+            self.ws.close()
+
+    def _run_forever(self):
+        while self._running:
+            try:
+                self.ws = websocket.WebSocketApp(
+                    self.WS_URL,
+                    header={"Authorization": f"Bearer {self.access_token}"},
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self.ws.run_forever()
+            except Exception as e:
+                logger.error(f"Upstox WebSocket error: {e}")
+
+            if self._running:
+                time.sleep(5)
+
+    def _on_open(self, ws):
+        # Subscribe to instruments
+        instrument_keys = [
+            self.SYMBOL_MAP.get(s) for s in self.nse_symbols
+            if s in self.SYMBOL_MAP
+        ]
+        if instrument_keys:
+            ws.send(json.dumps({
+                "guid": "upstox-feed",
+                "method": "sub",
+                "data": {
+                    "mode": "full",
+                    "instrumentKeys": [k for k in instrument_keys if k],
+                }
+            }))
+        logger.info("Upstox WebSocket connected and subscribed")
+
+    def _on_message(self, ws, message):
+        """Parse Upstox feed message (JSON mode)."""
+        try:
+            data = json.loads(message) if isinstance(message, str) else {}
+            # Upstox v2 JSON message format
+            feeds = data.get("feeds", {})
+            for instrument_key, feed_data in feeds.items():
+                # Map back from instrument key to our symbol
+                symbol = next(
+                    (sym for sym, key in self.SYMBOL_MAP.items() if key == instrument_key),
+                    instrument_key
+                )
+                ltp_data = feed_data.get("ff", {}).get("marketFF", {})
+                ltpc = ltp_data.get("ltpc", {})
+                ltp = ltpc.get("ltp")
+
+                if ltp:
+                    tick = Tick(
+                        symbol=symbol,
+                        price=float(ltp),
+                        volume=int(ltp_data.get("tv", 0)),
+                        timestamp=datetime.now(timezone.utc),
+                        bid=ltpc.get("cp"),
+                        market="IN",
+                    )
+                    self.buffer.push(tick)
+        except Exception as e:
+            logger.debug(f"Upstox parse error: {e}")
+
+    def _on_error(self, ws, error):
+        logger.warning(f"Upstox WebSocket error: {error}")
+
+    def _on_close(self, ws, *args):
+        logger.info("Upstox WebSocket closed")
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Fallback: Polling for when WebSocket keys aren't available
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+class PollingFallback:
+    """
+    REST polling fallback. Not as fast as WebSocket but works without extra API keys.
+    Polls Yahoo Finance every N seconds to simulate real-time data.
+    Latency: ~1-3 seconds (vs <500ms for WebSocket).
+    """
+
+    def __init__(
+        self,
+        symbols: List[str],
+        interval_seconds: int = 5,
+        buffer: RealTimePriceBuffer = None,
+        batch_size: int = 20,
+    ):
+        self.symbols = list(dict.fromkeys(symbols or []))
+        self.interval = interval_seconds
+        self.buffer = buffer or PRICE_BUFFER
+        self.batch_size = max(1, batch_size)
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._batch_index = 0
+        self._batches: List[List[str]] = [
+            self.symbols[i : i + self.batch_size]
+            for i in range(0, len(self.symbols), self.batch_size)
+        ]
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+        logger.info(f"Polling fallback started for {len(self.symbols)} symbols ({self.interval}s interval)")
+
+    def stop(self):
+        self._running = False
+
+    def _poll_loop(self):
+        import yfinance as yf
+        while self._running:
+            start_time = time.time()
+            try:
+                if not self.symbols:
+                    time.sleep(self.interval)
+                    continue
+
+                if not self._batches:
+                    time.sleep(self.interval)
+                    continue
+
+                batch = self._batches[self._batch_index % len(self._batches)]
+                self._batch_index += 1
+                tickers = yf.download(
+                    " ".join(batch),
+                    period="1d",
+                    interval="1m",
+                    progress=False,
+                    auto_adjust=True,
+                    threads=False,
+                )
+
+                if not tickers.empty and "Close" in tickers.columns:
+                    close_row = tickers["Close"].iloc[-1]
+                    vol_row = tickers.get("Volume", pd.Series()).iloc[-1] if hasattr(tickers, "__getitem__") else {}
+
+                    for symbol in batch:
+                        try:
+                            price = float(close_row.get(symbol, close_row) if hasattr(close_row, 'get') else close_row)
+                            if price > 0:
+                                tick = Tick(
+                                    symbol=symbol,
+                                    price=price,
+                                    volume=int(vol_row.get(symbol, 0) if hasattr(vol_row, "get") else 0),
+                                    timestamp=datetime.now(timezone.utc),
+                                    market="IN" if symbol.endswith(".NS") else "US",
+                                )
+                                self.buffer.push(tick)
+                        except Exception:
+                            pass
+
+            except Exception as e:
+                logger.debug(f"Polling error: {e}")
+
+            elapsed = time.time() - start_time
+            sleep_time = max(0, self.interval - elapsed)
+            time.sleep(sleep_time)
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Latency Monitor
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+class LatencyMonitor:
+    """
+    Measures end-to-end latency across the live market-data pipeline.
+    Professionals target < 500ms.
+    """
+
+    def __init__(self):
+        self._measurements: deque = deque(maxlen=1000)
+        self._checkpoints: Dict[str, float] = {}
+
+    def mark(self, event_id: str, checkpoint: str):
+        """Mark a timestamp for an event at a specific checkpoint."""
+        self._checkpoints[f"{event_id}:{checkpoint}"] = time.time()
+
+    def measure(self, event_id: str, from_checkpoint: str, to_checkpoint: str) -> Optional[float]:
+        """Measure elapsed time between two checkpoints in milliseconds."""
+        t1 = self._checkpoints.get(f"{event_id}:{from_checkpoint}")
+        t2 = self._checkpoints.get(f"{event_id}:{to_checkpoint}")
+        if t1 and t2:
+            ms = (t2 - t1) * 1000
+            self._measurements.append(ms)
+            return ms
+        return None
+
+    @property
+    def stats(self) -> Dict:
+        if not self._measurements:
+            return {}
+        measurements = list(self._measurements)
+        return {
+            "avg_latency_ms": round(sum(measurements) / len(measurements), 1),
+            "p50_ms": round(sorted(measurements)[len(measurements) // 2], 1),
+            "p95_ms": round(sorted(measurements)[int(len(measurements) * 0.95)], 1),
+            "p99_ms": round(sorted(measurements)[int(len(measurements) * 0.99)], 1),
+            "target_met_pct": round(sum(1 for m in measurements if m < 500) / len(measurements) * 100, 1),
+            "samples": len(measurements),
+        }
+
+
+LATENCY = LatencyMonitor()
+

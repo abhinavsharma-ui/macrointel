@@ -1,0 +1,4198 @@
+"""
+Master system orchestrator for the Macro Intelligence project.
+"""
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+import os
+
+# Apply performance caps *before* importing NumPy/Pandas/XGBoost/etc.
+from core.performance import apply_performance_profile
+
+_PERF_SETTINGS = apply_performance_profile()
+
+import logging
+import math
+import subprocess
+import sys
+import threading
+import time
+from collections import defaultdict, deque
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+def _get_primary_env_value(*env_names: str) -> str:
+    for env_name in env_names:
+        raw = os.getenv(env_name, "")
+        for part in raw.replace(";", ",").split(","):
+            value = part.strip()
+            if value:
+                return value
+    return ""
+
+
+class MacroIntelligenceSystem:
+    def __init__(self):
+        self._signal_store: Dict = {}
+        self._components: Dict = {}
+        self._running = False
+        self._data_versions = {"prices": 0, "sentiment": 0, "earnings": 0, "altdata": 0}
+        self._last_inference_versions = dict(self._data_versions)
+        self._last_seen_tick_ts: Dict[str, str] = {}
+        self._api_keys = {
+            "alpha_vantage": _get_primary_env_value("ALPHA_VANTAGE_API_KEYS", "ALPHA_VANTAGE_API_KEY"),
+            "news_api": _get_primary_env_value("NEWS_API_KEYS", "NEWS_API_KEY"),
+            "finnhub": _get_primary_env_value("FINNHUB_API_KEYS", "FINNHUB_API_KEY"),
+            "upstox": os.getenv("UPSTOX_ACCESS_TOKEN", ""),
+            "fred": os.getenv("FRED_API_KEY", ""),
+        }
+        self._universe_mode = os.getenv("UNIVERSE_MODE", "full").strip().lower() or "full"
+        if self._universe_mode not in {"core", "full", "us", "nse", "daytrade", "daytrade_us", "daytrade_nse"}:
+            logger.warning(f"Invalid UNIVERSE_MODE '{self._universe_mode}', defaulting to full")
+            self._universe_mode = "full"
+        self._day_trading_mode = (
+            os.getenv("DAY_TRADING_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+            or self._universe_mode.startswith("daytrade")
+        )
+        self._day_trade_force_daytrade_universe = (
+            os.getenv("DAY_TRADE_FORCE_DAYTRADE_UNIVERSE", "1").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        self._crypto_depth_enabled = os.getenv("CRYPTO_DEPTH_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self._crypto_symbols = [
+            symbol.strip().upper()
+            for symbol in os.getenv("CRYPTO_DEPTH_SYMBOLS", "SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT").replace(";", ",").split(",")
+            if symbol.strip()
+        ]
+        self._crypto_signal_stale_seconds = max(15, int(os.getenv("CRYPTO_SIGNAL_STALE_SECONDS", "45")))
+        self._live_feature_overlay_enabled = os.getenv("LIVE_FEATURE_OVERLAY_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
+        self._live_signal_max_tick_age_seconds = max(5, int(os.getenv("LIVE_SIGNAL_MAX_TICK_AGE_SECONDS", "120")))
+        self._crypto_min_notional_usd = max(5.0, float(os.getenv("CRYPTO_MIN_NOTIONAL_USD", "75")))
+        self._model_learning_enabled = os.getenv("MODEL_LEARNING_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
+        self._model_learning_refresh_seconds = max(
+            900,
+            int(os.getenv("MODEL_LEARNING_REFRESH_SECONDS", "21600")),
+        )
+        if (
+            self._day_trading_mode
+            and self._day_trade_force_daytrade_universe
+            and not self._universe_mode.startswith("daytrade")
+        ):
+            self._universe_mode = "daytrade"
+        self._poll_batch_size = max(1, int(os.getenv("POLL_BATCH_SIZE", "20")))
+        self._poll_interval_seconds = max(5, int(os.getenv("POLL_INTERVAL_SECONDS", "15")))
+        self._sentiment_batch_size = max(1, int(os.getenv("SENTIMENT_BATCH_SIZE", "25")))
+        self._sentiment_pause_seconds = max(0.0, float(os.getenv("SENTIMENT_BATCH_PAUSE_SECONDS", "1.0")))
+        self._price_refresh_seconds = max(120, int(os.getenv("PRICE_REFRESH_SECONDS", "900")))
+        self._sentiment_refresh_seconds = max(900, int(os.getenv("SENTIMENT_REFRESH_SECONDS", "3600")))
+        self._earnings_refresh_seconds = max(1800, int(os.getenv("EARNINGS_REFRESH_SECONDS", "21600")))
+        self._altdata_refresh_seconds = max(900, int(os.getenv("ALTDATA_REFRESH_SECONDS", "3600")))
+        self._inference_refresh_seconds = max(15, int(os.getenv("INFERENCE_REFRESH_SECONDS", "120")))
+        self._auto_trade_min_conviction = max(0.0, float(os.getenv("AUTO_TRADE_MIN_CONVICTION", "7.4")))
+        self._auto_trade_top_k = max(1, int(os.getenv("AUTO_TRADE_TOP_K", "12")))
+        self._auto_trade_max_new_per_cycle = max(1, int(os.getenv("AUTO_TRADE_MAX_NEW_PER_CYCLE", "3")))
+        self._auto_trade_max_open_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "12")))
+        self._auto_trade_max_sector_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_SECTOR_POSITIONS", "3")))
+        self._auto_trade_cooldown_seconds = max(0, int(os.getenv("AUTO_TRADE_COOLDOWN_SECONDS", "1800")))
+        self._auto_trade_min_hold_seconds = max(0, int(os.getenv("AUTO_TRADE_MIN_HOLD_SECONDS", "14400")))
+        self._day_trade_force_exit_seconds = max(300, int(os.getenv("DAY_TRADE_FORCE_EXIT_SECONDS", "3600")))
+        self._day_trade_min_tick_count = max(6, int(os.getenv("DAY_TRADE_MIN_TICK_COUNT", "14")))
+        self._day_trade_intraday_score_threshold = max(
+            0.10,
+            float(os.getenv("DAY_TRADE_INTRADAY_SCORE_THRESHOLD", "0.30")),
+        )
+        self._day_trade_intraday_weight = min(
+            0.95,
+            max(0.20, float(os.getenv("DAY_TRADE_INTRADAY_WEIGHT", "0.70"))),
+        )
+        self._day_trade_news_boost_threshold = max(
+            0.0,
+            float(os.getenv("DAY_TRADE_NEWS_BOOST_THRESHOLD", "0.25")),
+        )
+        self._day_trade_risk_per_trade_pct = min(
+            0.02,
+            max(0.001, float(os.getenv("DAY_TRADE_RISK_PER_TRADE_PCT", "0.005"))),
+        )
+        self._day_trade_max_daily_loss_pct = min(
+            0.10,
+            max(0.005, float(os.getenv("DAY_TRADE_MAX_DAILY_LOSS_PCT", "0.02"))),
+        )
+        self._day_trade_max_consecutive_losses = max(
+            1,
+            int(os.getenv("DAY_TRADE_MAX_CONSECUTIVE_LOSSES", "3")),
+        )
+        self._day_trade_opening_range_minutes = max(
+            5,
+            int(os.getenv("DAY_TRADE_OPENING_RANGE_MINUTES", "15")),
+        )
+        self._day_trade_active_open_minutes = max(
+            self._day_trade_opening_range_minutes,
+            int(os.getenv("DAY_TRADE_ACTIVE_OPEN_MINUTES", "90")),
+        )
+        self._day_trade_power_hour_minutes = max(
+            15,
+            int(os.getenv("DAY_TRADE_POWER_HOUR_MINUTES", "60")),
+        )
+        self._day_trade_vwap_pullback_atr_mult = max(
+            0.05,
+            float(os.getenv("DAY_TRADE_VWAP_PULLBACK_ATR_MULT", "0.15")),
+        )
+        self._day_trade_ensemble_threshold = max(
+            0.15,
+            float(os.getenv("DAY_TRADE_ENSEMBLE_THRESHOLD", "0.58")),
+        )
+        self._day_trade_trail_stop_pct = max(
+            0.0025,
+            float(os.getenv("DAY_TRADE_TRAIL_STOP_PCT", "0.0065")),
+        )
+        self._auto_trade_base_position_pct = max(0.005, float(os.getenv("AUTO_TRADE_BASE_POSITION_PCT", "0.03")))
+        self._auto_trade_max_position_pct = max(
+            self._auto_trade_base_position_pct,
+            float(os.getenv("AUTO_TRADE_MAX_POSITION_PCT", "0.08")),
+        )
+        self._auto_trade_leader_min_conviction = max(
+            0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_CONVICTION", "4.2"))
+        )
+        self._auto_trade_leader_min_take_probability = min(
+            0.99, max(0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_TAKE_PROBABILITY", "0.57")))
+        )
+        self._auto_trade_leader_min_rank_score = max(
+            0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_RANK_SCORE", "0.85"))
+        )
+        self._auto_trade_zero_weight_fallback_enabled = (
+            os.getenv("AUTO_TRADE_ZERO_WEIGHT_FALLBACK_ENABLED", "1").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self._auto_trade_zero_weight_min_take_probability = min(
+            0.99,
+            max(0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_TAKE_PROBABILITY", "0.58"))),
+        )
+        self._auto_trade_zero_weight_min_rank_score = max(
+            0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_RANK_SCORE", "0.95"))
+        )
+        self._auto_trade_replace_margin = max(0.1, float(os.getenv("AUTO_TRADE_REPLACE_MARGIN", "0.8")))
+        self._auto_trade_stress_position_mult = min(
+            1.0,
+            max(0.1, float(os.getenv("AUTO_TRADE_STRESS_POSITION_MULT", "0.6"))),
+        )
+        self._auto_trade_corr_lookback_days = max(20, int(os.getenv("AUTO_TRADE_CORR_LOOKBACK_DAYS", "60")))
+        self._auto_trade_max_pair_correlation = min(
+            0.98,
+            max(0.10, float(os.getenv("AUTO_TRADE_MAX_PAIR_CORRELATION", "0.78"))),
+        )
+        self._auto_trade_target_avg_correlation = min(
+            self._auto_trade_max_pair_correlation,
+            max(0.05, float(os.getenv("AUTO_TRADE_TARGET_AVG_CORRELATION", "0.55"))),
+        )
+        self._auto_trade_correlation_size_floor = min(
+            1.0,
+            max(0.10, float(os.getenv("AUTO_TRADE_CORRELATION_SIZE_FLOOR", "0.35"))),
+        )
+        self._portfolio_optimizer_enabled = os.getenv("PORTFOLIO_OPTIMIZER_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
+        self._portfolio_optimizer_gross_target_pct = min(
+            0.95,
+            max(0.10, float(os.getenv("PORTFOLIO_OPTIMIZER_GROSS_TARGET_PCT", "0.65"))),
+        )
+        self._portfolio_optimizer_max_names = max(
+            self._auto_trade_max_open_positions,
+            int(os.getenv("PORTFOLIO_OPTIMIZER_MAX_NAMES", str(max(self._auto_trade_max_open_positions, 14)))),
+        )
+        self._portfolio_optimizer_min_weight = max(0.0, float(os.getenv("PORTFOLIO_OPTIMIZER_MIN_WEIGHT", "0.03")))
+        self._portfolio_optimizer_max_weight = min(
+            1.0,
+            max(self._portfolio_optimizer_min_weight, float(os.getenv("PORTFOLIO_OPTIMIZER_MAX_WEIGHT", "0.16"))),
+        )
+        self._portfolio_optimizer_covariance_shrinkage = min(
+            0.95,
+            max(0.0, float(os.getenv("PORTFOLIO_OPTIMIZER_COV_SHRINKAGE", "0.25"))),
+        )
+        self._portfolio_optimizer_factor_penalty = max(
+            0.0, float(os.getenv("PORTFOLIO_OPTIMIZER_FACTOR_PENALTY", "0.30"))
+        )
+        self._portfolio_optimizer_beta_penalty = max(
+            0.0, float(os.getenv("PORTFOLIO_OPTIMIZER_BETA_PENALTY", "0.45"))
+        )
+        self._portfolio_optimizer_target_beta = float(os.getenv("PORTFOLIO_OPTIMIZER_TARGET_BETA", "0.10"))
+        self._feature_store_enabled = os.getenv("FEATURE_STORE_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
+        self._feature_store_save_seconds = max(300, int(os.getenv("FEATURE_STORE_SAVE_SECONDS", "1800")))
+        self._feature_store_dir = Path(os.getenv("FEATURE_STORE_DIR", "data/features"))
+        self._auto_retrain_on_start = os.getenv("AUTO_RETRAIN_ON_START", "1").strip().lower() not in {"0", "false", "off"}
+        self._auto_retrain_only_if_new_data = os.getenv("AUTO_RETRAIN_ONLY_IF_NEW_DATA", "1").strip().lower() not in {"0", "false", "off"}
+        self._auto_retrain_min_updated_files = max(1, int(os.getenv("AUTO_RETRAIN_MIN_UPDATED_FILES", "5")))
+        self._auto_retrain_timeout_seconds = max(60, int(os.getenv("AUTO_RETRAIN_TIMEOUT_SECONDS", "1800")))
+        self._auto_retrain_use_optuna = os.getenv("AUTO_RETRAIN_USE_OPTUNA", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self._execution_trace_limit = max(100, int(os.getenv("EXECUTION_TRACE_LIMIT", "500")))
+        self._execution_backtest_enabled = os.getenv("EXECUTION_BACKTEST_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+        self._execution_backtest_interval_seconds = max(
+            300, int(os.getenv("EXECUTION_BACKTEST_INTERVAL_SECONDS", "1800"))
+        )
+        self._execution_backtest_lookback_days = max(
+            30, int(os.getenv("EXECUTION_BACKTEST_LOOKBACK_DAYS", "120"))
+        )
+        self._execution_backtest_symbol_limit = max(
+            30, int(os.getenv("EXECUTION_BACKTEST_SYMBOL_LIMIT", "160"))
+        )
+        self._execution_backtest_entry_score = float(os.getenv("EXECUTION_BACKTEST_ENTRY_SCORE", "0.35"))
+        self._execution_backtest_exit_score = float(os.getenv("EXECUTION_BACKTEST_EXIT_SCORE", "0.10"))
+        self._execution_backtest_min_hold_days = max(1, int(os.getenv("EXECUTION_BACKTEST_MIN_HOLD_DAYS", "2")))
+        self._execution_backtest_tx_cost_bps = max(0.0, float(os.getenv("EXECUTION_BACKTEST_TX_COST_BPS", "8")))
+        self._broker_execution_mode = str(os.getenv("BROKER_EXECUTION_MODE", "paper") or "paper").strip().lower()
+        if self._broker_execution_mode not in {"paper", "shadow"}:
+            logger.warning(f"Unsupported BROKER_EXECUTION_MODE '{self._broker_execution_mode}', falling back to paper")
+            self._broker_execution_mode = "paper"
+        self._shadow_router_enabled = self._broker_execution_mode == "shadow"
+        self._shadow_reconciliation_log_path = str(
+            os.getenv("SHADOW_RECONCILIATION_LOG_PATH", "data/shadow_execution_log.jsonl")
+        ).strip() or "data/shadow_execution_log.jsonl"
+        if self._day_trading_mode:
+            self._inference_refresh_seconds = max(10, int(os.getenv("INFERENCE_REFRESH_SECONDS", "15")))
+            self._auto_trade_top_k = max(self._auto_trade_top_k, int(os.getenv("DAY_TRADE_TOP_K", "36")))
+            self._auto_trade_max_new_per_cycle = max(
+                self._auto_trade_max_new_per_cycle, int(os.getenv("DAY_TRADE_MAX_NEW_PER_CYCLE", "8"))
+            )
+            self._auto_trade_max_open_positions = max(
+                self._auto_trade_max_open_positions, int(os.getenv("DAY_TRADE_MAX_OPEN_POSITIONS", "18"))
+            )
+            self._auto_trade_max_sector_positions = max(
+                self._auto_trade_max_sector_positions, int(os.getenv("DAY_TRADE_MAX_SECTOR_POSITIONS", "5"))
+            )
+            self._auto_trade_cooldown_seconds = min(
+                self._auto_trade_cooldown_seconds, int(os.getenv("DAY_TRADE_COOLDOWN_SECONDS", "240"))
+            )
+            self._auto_trade_min_hold_seconds = min(
+                self._auto_trade_min_hold_seconds, int(os.getenv("DAY_TRADE_MIN_HOLD_SECONDS", "600"))
+            )
+            self._auto_trade_base_position_pct = min(
+                self._auto_trade_base_position_pct, float(os.getenv("DAY_TRADE_BASE_POSITION_PCT", "0.02"))
+            )
+            self._auto_trade_max_position_pct = min(
+                self._auto_trade_max_position_pct, float(os.getenv("DAY_TRADE_MAX_POSITION_PCT", "0.05"))
+            )
+            self._portfolio_optimizer_gross_target_pct = max(
+                self._portfolio_optimizer_gross_target_pct,
+                float(os.getenv("DAY_TRADE_GROSS_TARGET_PCT", "0.82")),
+            )
+            self._portfolio_optimizer_max_names = max(
+                self._portfolio_optimizer_max_names, int(os.getenv("DAY_TRADE_MAX_ALLOC_NAMES", "18"))
+            )
+        self._lane_engine_order = ("crypto", "day", "normal")
+        self._lane_base_allocations = {
+            "normal": max(0.05, float(os.getenv("NORMAL_LANE_BASE_ALLOC_PCT", "0.40"))),
+            "day": max(0.05, float(os.getenv("DAY_LANE_BASE_ALLOC_PCT", "0.35"))),
+            "crypto": max(0.05, float(os.getenv("CRYPTO_LANE_BASE_ALLOC_PCT", "0.25"))),
+        }
+        self._lane_min_allocations = {
+            "normal": max(0.05, float(os.getenv("NORMAL_LANE_MIN_ALLOC_PCT", "0.15"))),
+            "day": max(0.05, float(os.getenv("DAY_LANE_MIN_ALLOC_PCT", "0.15"))),
+            "crypto": max(0.05, float(os.getenv("CRYPTO_LANE_MIN_ALLOC_PCT", "0.10"))),
+        }
+        self._lane_max_allocations = {
+            "normal": min(0.90, max(self._lane_min_allocations["normal"], float(os.getenv("NORMAL_LANE_MAX_ALLOC_PCT", "0.55")))),
+            "day": min(0.90, max(self._lane_min_allocations["day"], float(os.getenv("DAY_LANE_MAX_ALLOC_PCT", "0.50")))),
+            "crypto": min(0.90, max(self._lane_min_allocations["crypto"], float(os.getenv("CRYPTO_LANE_MAX_ALLOC_PCT", "0.40")))),
+        }
+        self._governor_lookback_days = max(7, int(os.getenv("GOVERNOR_LOOKBACK_DAYS", "30")))
+        self._governor_min_setup_trades = max(3, int(os.getenv("GOVERNOR_MIN_SETUP_TRADES", "6")))
+        self._governor_min_time_bucket_trades = max(3, int(os.getenv("GOVERNOR_MIN_TIME_BUCKET_TRADES", "5")))
+        self._governor_setup_pf_floor = max(0.5, float(os.getenv("GOVERNOR_SETUP_PF_FLOOR", "0.95")))
+        self._governor_setup_review_pf = max(self._governor_setup_pf_floor, float(os.getenv("GOVERNOR_SETUP_REVIEW_PF", "1.10")))
+        self._governor_time_bucket_pf_floor = max(0.4, float(os.getenv("GOVERNOR_TIME_BUCKET_PF_FLOOR", "0.90")))
+        self._governor_time_bucket_throttle_mult = min(
+            1.0,
+            max(0.25, float(os.getenv("GOVERNOR_TIME_BUCKET_THROTTLE_MULT", "0.55"))),
+        )
+        self._governor_lane_throttle_mult = min(
+            1.0,
+            max(0.25, float(os.getenv("GOVERNOR_LANE_THROTTLE_MULT", "0.75"))),
+        )
+        self._crypto_scalper_max_spread_pct = max(0.001, float(os.getenv("CRYPTO_SCALPER_MAX_SPREAD_PCT", "0.08")))
+        self._crypto_scalper_max_depth_age_seconds = max(
+            0.2,
+            float(os.getenv("CRYPTO_SCALPER_MAX_DEPTH_AGE_SECONDS", "2.0")),
+        )
+        self._crypto_scalper_max_tick_age_seconds = max(
+            0.2,
+            float(os.getenv("CRYPTO_SCALPER_MAX_TICK_AGE_SECONDS", "2.0")),
+        )
+        self._crypto_scalper_max_signal_age_seconds = max(
+            0.5,
+            float(os.getenv("CRYPTO_SCALPER_MAX_SIGNAL_AGE_SECONDS", "3.0")),
+        )
+        self._crypto_scalper_min_book_pressure = max(
+            0.0,
+            float(os.getenv("CRYPTO_SCALPER_MIN_BOOK_PRESSURE", "0.08")),
+        )
+        self._crypto_scalper_min_depth_imbalance = max(
+            0.0,
+            float(os.getenv("CRYPTO_SCALPER_MIN_DEPTH_IMBALANCE", "0.06")),
+        )
+        self._crypto_scalper_min_take_probability = min(
+            0.99,
+            max(0.0, float(os.getenv("CRYPTO_SCALPER_MIN_TAKE_PROBABILITY", "0.50"))),
+        )
+        self._lane_engine_config = {
+            "normal": {
+                "top_k": max(1, int(os.getenv("NORMAL_LANE_TOP_K", "18"))),
+                "max_new_per_cycle": max(1, int(os.getenv("NORMAL_LANE_MAX_NEW_PER_CYCLE", "3"))),
+                "max_open_positions": max(1, int(os.getenv("NORMAL_LANE_MAX_OPEN_POSITIONS", "10"))),
+                "cooldown_seconds": max(60, int(os.getenv("NORMAL_LANE_COOLDOWN_SECONDS", "1800"))),
+                "min_hold_seconds": max(300, int(os.getenv("NORMAL_LANE_MIN_HOLD_SECONDS", "14400"))),
+                "force_exit_seconds": 0,
+                "risk_per_trade_pct": min(0.02, max(0.001, float(os.getenv("NORMAL_LANE_RISK_PER_TRADE_PCT", "0.0075")))),
+                "base_position_pct": max(0.005, float(os.getenv("NORMAL_LANE_BASE_POSITION_PCT", "0.04"))),
+                "max_position_pct": max(0.01, float(os.getenv("NORMAL_LANE_MAX_POSITION_PCT", "0.10"))),
+                "min_conviction": max(0.0, float(os.getenv("NORMAL_LANE_MIN_CONVICTION", str(self._auto_trade_min_conviction)))),
+                "min_take_probability": min(0.99, max(0.0, float(os.getenv("NORMAL_LANE_MIN_TAKE_PROBABILITY", "0.52")))),
+                "sector_cap": max(1, int(os.getenv("NORMAL_LANE_MAX_SECTOR_POSITIONS", "4"))),
+                "pair_corr_cap": min(0.98, max(0.10, float(os.getenv("NORMAL_LANE_MAX_PAIR_CORRELATION", "0.84")))),
+            },
+            "day": {
+                "top_k": max(1, int(os.getenv("DAY_LANE_TOP_K", str(self._auto_trade_top_k)))),
+                "max_new_per_cycle": max(1, int(os.getenv("DAY_LANE_MAX_NEW_PER_CYCLE", str(self._auto_trade_max_new_per_cycle)))),
+                "max_open_positions": max(1, int(os.getenv("DAY_LANE_MAX_OPEN_POSITIONS", str(self._auto_trade_max_open_positions)))),
+                "cooldown_seconds": max(15, int(os.getenv("DAY_LANE_COOLDOWN_SECONDS", str(self._auto_trade_cooldown_seconds)))),
+                "min_hold_seconds": max(30, int(os.getenv("DAY_LANE_MIN_HOLD_SECONDS", str(self._auto_trade_min_hold_seconds)))),
+                "force_exit_seconds": max(0, int(os.getenv("DAY_LANE_FORCE_EXIT_SECONDS", str(self._day_trade_force_exit_seconds)))),
+                "risk_per_trade_pct": self._day_trade_risk_per_trade_pct,
+                "base_position_pct": max(0.005, float(os.getenv("DAY_LANE_BASE_POSITION_PCT", str(self._auto_trade_base_position_pct)))),
+                "max_position_pct": max(0.005, float(os.getenv("DAY_LANE_MAX_POSITION_PCT", str(self._auto_trade_max_position_pct)))),
+                "min_conviction": max(0.0, float(os.getenv("DAY_LANE_MIN_CONVICTION", str(self._auto_trade_min_conviction)))),
+                "min_take_probability": min(0.99, max(0.0, float(os.getenv("DAY_LANE_MIN_TAKE_PROBABILITY", "0.46")))),
+                "sector_cap": max(1, int(os.getenv("DAY_LANE_MAX_SECTOR_POSITIONS", str(self._auto_trade_max_sector_positions + 1)))),
+                "pair_corr_cap": min(0.98, max(0.10, float(os.getenv("DAY_LANE_MAX_PAIR_CORRELATION", str(min(0.92, self._auto_trade_max_pair_correlation + 0.08)))))),
+            },
+            "crypto": {
+                "top_k": max(1, int(os.getenv("CRYPTO_LANE_TOP_K", "16"))),
+                "max_new_per_cycle": max(1, int(os.getenv("CRYPTO_LANE_MAX_NEW_PER_CYCLE", "6"))),
+                "max_open_positions": max(1, int(os.getenv("CRYPTO_LANE_MAX_OPEN_POSITIONS", "8"))),
+                "cooldown_seconds": max(5, int(os.getenv("CRYPTO_LANE_COOLDOWN_SECONDS", "45"))),
+                "min_hold_seconds": max(15, int(os.getenv("CRYPTO_LANE_MIN_HOLD_SECONDS", "90"))),
+                "force_exit_seconds": max(0, int(os.getenv("CRYPTO_LANE_FORCE_EXIT_SECONDS", "900"))),
+                "risk_per_trade_pct": min(0.02, max(0.001, float(os.getenv("CRYPTO_LANE_RISK_PER_TRADE_PCT", "0.004")))),
+                "base_position_pct": max(0.0025, float(os.getenv("CRYPTO_LANE_BASE_POSITION_PCT", "0.02"))),
+                "max_position_pct": max(0.005, float(os.getenv("CRYPTO_LANE_MAX_POSITION_PCT", "0.04"))),
+                "min_conviction": max(0.0, float(os.getenv("CRYPTO_LANE_MIN_CONVICTION", "4.0"))),
+                "min_take_probability": self._crypto_scalper_min_take_probability,
+                "sector_cap": max(1, int(os.getenv("CRYPTO_LANE_MAX_SECTOR_POSITIONS", "8"))),
+                "pair_corr_cap": min(0.99, max(0.10, float(os.getenv("CRYPTO_LANE_MAX_PAIR_CORRELATION", "0.92")))),
+            },
+        }
+        self._last_feature_signature: Dict[str, str] = {}
+        self._position_plans: Dict[str, Dict] = {}
+        self._last_trade_timestamps: Dict[str, float] = {}
+        self._last_execution_backtest_ts = 0.0
+        self._execution_backtest_running = False
+        self._last_feature_store_save_ts = 0.0
+        self._execution_trace: List[Dict] = []
+        self._execution_reconciliation: List[Dict] = []
+        self._intraday_state: Dict[str, Dict] = {}
+        self._intraday_state_lock = threading.RLock()
+        self._intraday_subscription_attached = False
+        self._last_model_learning_ts = 0.0
+        self._model_learning_in_progress = False
+        self._runtime_refresh_models = False
+        self._components["learning_status"] = {}
+        self._components["lane_allocator"] = {}
+        self._components["governor"] = {}
+        self._components["latest_feature_rows"] = {}
+        self._components["execution_reconciliation"] = self._execution_reconciliation
+        self._components["feature_matrices"] = {}
+        self._components["event_feature_map"] = {}
+        self._components["data_versions"] = dict(self._data_versions)
+
+    def _get_target_symbols(self, market: str = "full") -> List[str]:
+        from pipeline.universe import get_universe
+
+        mode = self._universe_mode
+        if market == "us":
+            if mode in {"daytrade", "daytrade_us"}:
+                return get_universe("daytrade_us")
+            if mode == "daytrade_nse":
+                return []
+            return get_universe("us") if mode != "core" else [s for s in get_universe("core") if not s.endswith(".NS")]
+        if market == "nse":
+            if mode in {"daytrade", "daytrade_nse"}:
+                return get_universe("daytrade_nse")
+            if mode == "daytrade_us":
+                return []
+            return get_universe("nse") if mode != "core" else [s for s in get_universe("core") if s.endswith(".NS")]
+        if mode in {"core", "full", "us", "nse", "daytrade", "daytrade_us", "daytrade_nse"}:
+            return get_universe(mode)
+        return get_universe("full")
+
+    def _chunk_symbols(self, symbols: List[str], batch_size: int) -> List[List[str]]:
+        return [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
+
+    def _collect_sentiment_batched(self, symbols: List[str], days_back: int = 3, save: bool = True) -> Dict:
+        import pandas as pd
+        from pipeline.sentiment_collector import SentimentPipeline
+
+        pipeline = SentimentPipeline()
+        batches = self._chunk_symbols(symbols, self._sentiment_batch_size)
+        merged_daily = []
+        merged_headlines = {}
+        merged_provider_map = {}
+        summary_provider_counts: Dict[str, int] = {}
+        total_symbols_with_news = 0
+        total_official_symbols = 0
+        total_fallback_symbols = 0
+        no_news_symbols: List[str] = []
+
+        for idx, batch in enumerate(batches, start=1):
+            logger.info(f"Sentiment batch {idx}/{len(batches)}: {len(batch)} symbols")
+            result = pipeline.run(symbols=batch, days_back=days_back, save=save)
+            daily = result.get("symbol_sentiment_daily")
+            if daily is not None and not getattr(daily, "empty", True):
+                merged_daily.append(daily)
+            merged_headlines.update(result.get("headlines", {}))
+            merged_provider_map.update(result.get("news_provider_by_symbol", {}))
+            summary = result.get("news_summary", {}) or {}
+            total_symbols_with_news += int(summary.get("symbols_with_news", 0) or 0)
+            total_official_symbols += int(summary.get("official_symbols", 0) or 0)
+            total_fallback_symbols += int(summary.get("fallback_symbols", 0) or 0)
+            no_news_symbols.extend(summary.get("no_news_symbols", []) or [])
+            for provider, count in (summary.get("provider_counts", {}) or {}).items():
+                summary_provider_counts[provider] = summary_provider_counts.get(provider, 0) + int(count)
+            if idx < len(batches) and self._sentiment_pause_seconds > 0:
+                time.sleep(self._sentiment_pause_seconds)
+
+        daily_merged = pd.concat(merged_daily).sort_index() if merged_daily else pd.DataFrame()
+        return {
+            "symbol_sentiment_daily": daily_merged,
+            "headlines": merged_headlines,
+            "news_provider_by_symbol": merged_provider_map,
+            "news_summary": {
+                "symbols_with_news": total_symbols_with_news,
+                "official_symbols": total_official_symbols,
+                "fallback_symbols": total_fallback_symbols,
+                "no_news_symbols": no_news_symbols,
+                "provider_counts": summary_provider_counts,
+            },
+            "run_timestamp": pd.Timestamp.utcnow().isoformat(),
+            "symbols_covered": len(merged_headlines),
+        }
+
+    def _collect_altdata(self, symbols: List[str]) -> Dict:
+        from pipeline.altdata_collector import OpenSkyTravelFactorPipeline
+
+        pipeline = OpenSkyTravelFactorPipeline()
+        return pipeline.run(symbols=symbols)
+
+    def start(
+        self,
+        run_dashboard: bool = True,
+        run_realtime: bool = True,
+        run_backtest: bool = True,
+        run_security: bool = True,
+        dashboard_port: int = int(os.getenv("DASHBOARD_PORT", "5050")),
+    ):
+        logger.info("=" * 60)
+        logger.info("MACRO INTELLIGENCE SYSTEM - STARTING")
+        logger.info("=" * 60)
+        try:
+            logger.info(
+                "Performance: profile=%s | threads=%s | priority_applied=%s",
+                _PERF_SETTINGS.get("profile"),
+                _PERF_SETTINGS.get("threads"),
+                _PERF_SETTINGS.get("process_priority_applied"),
+            )
+        except Exception:
+            pass
+        logger.info(f"Universe mode: {self._universe_mode}")
+        if self._day_trading_mode:
+            logger.info(
+                "Day trading mode: active | "
+                f"force exit {self._day_trade_force_exit_seconds}s | "
+                f"intraday threshold {self._day_trade_intraday_score_threshold:.2f}"
+            )
+        logger.info(f"Price provider order: {os.getenv('PRICE_PROVIDER_ORDER', 'yfinance,finnhub,alpha_vantage,twelve_data')}")
+        logger.info(
+            "News provider order: "
+            f"{os.getenv('NEWS_PROVIDER_ORDER', 'google_rss,rss,nse_announcements,sec_filings,press_releases,finnhub,alpha_vantage,newsapi,gnews,bse_announcements')}"
+        )
+        logger.info(f"Earnings provider order: {os.getenv('EARNINGS_PROVIDER_ORDER', 'finnhub,alpha_vantage')}")
+        logger.info(
+            f"Refresh cadence: prices {self._price_refresh_seconds}s | "
+            f"sentiment {self._sentiment_refresh_seconds}s | "
+            f"earnings {self._earnings_refresh_seconds}s | "
+            f"altdata {self._altdata_refresh_seconds}s | "
+            f"inference {self._inference_refresh_seconds}s"
+        )
+        logger.info(
+            f"Execution overlay: top {self._auto_trade_top_k} ideas | "
+            f"max {self._auto_trade_max_open_positions} positions | "
+            f"max {self._auto_trade_max_sector_positions} per sector"
+        )
+        logger.info(
+            f"Portfolio correlation guard: max pair {self._auto_trade_max_pair_correlation:.2f} | "
+            f"target avg {self._auto_trade_target_avg_correlation:.2f}"
+        )
+        if self._portfolio_optimizer_enabled:
+            logger.info(
+                f"Portfolio optimizer: gross {self._portfolio_optimizer_gross_target_pct:.2f} | "
+                f"beta target {self._portfolio_optimizer_target_beta:.2f} | "
+                f"max {self._portfolio_optimizer_max_names} names"
+            )
+        if self._feature_store_enabled:
+            logger.info(
+                f"Feature store autosave: {self._feature_store_dir} every {self._feature_store_save_seconds}s"
+            )
+        if self._auto_retrain_on_start:
+            logger.info(
+                f"Auto retrain on start: enabled | timeout {self._auto_retrain_timeout_seconds}s | "
+                f"optuna {'on' if self._auto_retrain_use_optuna else 'off'} | "
+                f"only-if-new-data {'on' if self._auto_retrain_only_if_new_data else 'off'}"
+            )
+
+        self._maybe_auto_retrain()
+
+        self._running = True
+        self._components["execution_trace"] = self._execution_trace
+        self._components["execution_backtest"] = {}
+        self._components["portfolio_overlay"] = {}
+        self._components["meta_model_status"] = {}
+        self._components["stress_results"] = {}
+        self._refresh_meta_model_status()
+        self._refresh_learning_status()
+
+        logger.info("[1/8] Initializing Point-in-Time database...")
+        from core.point_in_time import PITDatabase
+
+        self._components["pit_db"] = PITDatabase()
+
+        logger.info("[2/8] Initializing execution broker...")
+        from core.brokerages import ShadowBroker, UpstoxExecutionBroker
+        from core.paper_trading import VirtualBroker
+
+        paper_broker = VirtualBroker(
+            initial_capital=float(os.getenv("PAPER_CAPITAL", "100000")),
+            max_position_pct=self._auto_trade_max_position_pct,
+            max_drawdown_pct=float(os.getenv("PAPER_MAX_DRAWDOWN_PCT", "0.20")),
+            max_daily_loss_pct=self._day_trade_max_daily_loss_pct,
+            max_consecutive_losses=self._day_trade_max_consecutive_losses,
+            session_guardrails_enabled=os.getenv("PAPER_SESSION_GUARDRAILS_ENABLED", "0").strip().lower()
+            in {"1", "true", "yes", "on"},
+        )
+        self._components["paper_broker"] = paper_broker
+
+        broker = paper_broker
+        if self._shadow_router_enabled:
+            shadow_router = UpstoxExecutionBroker(
+                access_token=self._api_keys.get("upstox", ""),
+                instrument_map_path=os.getenv("UPSTOX_INSTRUMENT_MAP_PATH", "data/upstox_instruments.json"),
+                enabled=os.getenv("UPSTOX_ORDER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},
+                dry_run=True,
+                timeout_seconds=int(os.getenv("UPSTOX_ORDER_TIMEOUT_SECONDS", "8")),
+                tracked_symbols=self._get_target_symbols("nse"),
+            )
+            broker = ShadowBroker(
+                paper_broker,
+                secondary=shadow_router,
+                reconciliation_path=self._shadow_reconciliation_log_path,
+            )
+            self._components["live_execution_router"] = shadow_router
+            logger.info(
+                f"Execution mode: shadow | Upstox router configured={shadow_router.configured} | "
+                f"log={self._shadow_reconciliation_log_path}"
+            )
+        else:
+            logger.info("Execution mode: paper")
+
+        self._components["broker"] = broker
+
+        logger.info("[3/8] Starting data pipeline...")
+        threading.Thread(target=self._data_pipeline_loop, daemon=True).start()
+
+        if run_backtest:
+            logger.info("[4/8] Running stress tests...")
+            threading.Thread(target=self._run_stress_tests, daemon=True).start()
+
+        if run_realtime:
+            logger.info("[5/8] Starting real-time data feeds...")
+            self._start_realtime_feeds()
+
+        logger.info("[6/8] Starting signal inference loop...")
+        threading.Thread(target=self._inference_loop, daemon=True).start()
+
+        if run_security:
+            logger.info("[7/8] Starting Humanizer Security Suite...")
+            self._start_security_suite(dashboard_port)
+
+        if run_dashboard:
+            logger.info(f"[8/8] Starting dashboard on http://localhost:{dashboard_port}")
+            self._start_dashboard(dashboard_port)
+
+    def _start_realtime_feeds(self):
+        from core.realtime_engine import (
+            BinancePublicDepthWebSocket,
+            FinnhubWebSocket,
+            PollingFallback,
+            UpstoxWebSocket,
+            PRICE_BUFFER,
+        )
+
+        if not self._intraday_subscription_attached:
+            PRICE_BUFFER.subscribe(self._on_realtime_tick)
+            self._intraday_subscription_attached = True
+
+        us = self._get_target_symbols("us")
+        nse = self._get_target_symbols("nse")
+        target_symbols = self._get_target_symbols()
+        polling_enabled = os.getenv("POLLING_FALLBACK_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+        covered_by_ws = set()
+
+        if self._api_keys.get("finnhub") and us:
+            ws_symbols = us[:50]
+            if len(us) > len(ws_symbols):
+                logger.warning(f"Finnhub free-tier limit reached: streaming {len(ws_symbols)} of {len(us)} US symbols")
+            ws = FinnhubWebSocket(api_key=self._api_keys["finnhub"], symbols=ws_symbols, buffer=PRICE_BUFFER)
+            ws.start()
+            self._components["finnhub_ws"] = ws
+            covered_by_ws.update(ws_symbols)
+
+        if self._api_keys.get("upstox") and nse:
+            ws = UpstoxWebSocket(access_token=self._api_keys["upstox"], symbols=nse, buffer=PRICE_BUFFER)
+            ws.start()
+            self._components["upstox_ws"] = ws
+            covered_by_ws.update(nse)
+
+        if self._crypto_depth_enabled and self._crypto_symbols:
+            crypto_ws = BinancePublicDepthWebSocket(symbols=self._crypto_symbols, buffer=PRICE_BUFFER)
+            crypto_ws.start()
+            self._components["binance_public_depth_ws"] = crypto_ws
+
+        if not polling_enabled:
+            logger.info("Polling fallback disabled (POLLING_FALLBACK_ENABLED=0)")
+            return
+
+        poll_symbols = [s for s in target_symbols if s not in covered_by_ws]
+        if not poll_symbols:
+            logger.info("Polling fallback skipped: all symbols covered by WebSockets")
+            return
+
+        poller = PollingFallback(
+            symbols=poll_symbols,
+            interval_seconds=self._poll_interval_seconds,
+            buffer=PRICE_BUFFER,
+            batch_size=self._poll_batch_size,
+        )
+        poller.start()
+        self._components["poller"] = poller
+        logger.info(
+            f"Polling fallback configured for {len(poll_symbols)} symbols in batches of {self._poll_batch_size} "
+            f"(covered by ws={len(covered_by_ws)})"
+        )
+
+    def _start_security_suite(self, port: int):
+        def _boot():
+            try:
+                from security.camera_alerts import SecuritySuite
+
+                enable_ngrok = os.getenv("SECURITY_ENABLE_NGROK", os.getenv("ENABLE_NGROK", "1")).strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+                suite = SecuritySuite(camera_index=int(os.getenv("CAMERA_INDEX", "0")), dashboard_port=port)
+                result = suite.start(enable_ngrok=enable_ngrok)
+                self._components["security"] = suite
+                if result.get("ngrok_url"):
+                    logger.info(f"Remote access: {result['ngrok_url']}")
+                elif not enable_ngrok:
+                    logger.info("Remote access: disabled by SECURITY_ENABLE_NGROK=0")
+            except Exception as exc:
+                logger.error(f"Security suite error: {exc}")
+
+        threading.Thread(target=_boot, daemon=True).start()
+
+    def _get_latest_close(self, symbol: str) -> Optional[float]:
+        try:
+            from core.realtime_engine import PRICE_BUFFER
+
+            latest_tick = PRICE_BUFFER.latest(symbol)
+            if latest_tick and float(latest_tick.price) > 0:
+                return float(latest_tick.price)
+        except Exception:
+            pass
+        price_data = self._components.get("price_data", {})
+        recent = price_data.get("price_daily_recent", {}).get(symbol)
+        if recent is None or recent.empty:
+            return None
+        current_price = float(recent["close"].iloc[-1])
+        if current_price <= 0:
+            return None
+        return current_price
+
+    def _get_recent_return_series(self, symbol: str, lookback_days: Optional[int] = None):
+        live_recent = self._components.get("live_price_data", {}).get("price_daily_recent", {}).get(symbol)
+        recent = live_recent if live_recent is not None else self._components.get("price_data", {}).get("price_daily_recent", {}).get(symbol)
+        if recent is None or recent.empty or "close" not in recent.columns:
+            return None
+        closes = recent["close"].dropna()
+        if len(closes) < 20:
+            return None
+        returns = closes.pct_change().dropna()
+        if lookback_days:
+            returns = returns.tail(lookback_days)
+        if len(returns) < 15:
+            return None
+        returns.name = symbol
+        return returns
+
+    @staticmethod
+    def _clamp(value: float, lower: float, upper: float) -> float:
+        return max(lower, min(upper, float(value)))
+
+    @staticmethod
+    def _market_code_for_symbol(symbol: str) -> str:
+        raw = str(symbol or "").upper()
+        if raw.endswith(("USDT", "USDC", "BUSD")):
+            return "CRYPTO"
+        if raw.endswith(".NS") or raw.startswith("^NSE"):
+            return "IN"
+        return "US"
+
+    @staticmethod
+    def _lane_label(lane: str) -> str:
+        return {
+            "normal": "Normal Trading",
+            "day": "Day Trading",
+            "crypto": "Crypto Scalper",
+        }.get(str(lane or "").lower(), "Normal Trading")
+
+    def _time_bucket_label(self, timestamp: Optional[datetime], market: str) -> str:
+        if not isinstance(timestamp, datetime):
+            return "unknown"
+        local_ts, open_local, close_local = self._market_session_clock(timestamp, market)
+        minutes_from_open = max(0.0, (local_ts - open_local).total_seconds() / 60.0)
+        minutes_to_close = max(0.0, (close_local - local_ts).total_seconds() / 60.0)
+        if str(market).upper() == "CRYPTO":
+            hour = local_ts.hour
+            if 0 <= hour < 8:
+                return "asia"
+            if 8 <= hour < 13:
+                return "europe"
+            if 13 <= hour < 21:
+                return "us"
+            return "late_session"
+        if minutes_from_open <= 30:
+            return "open"
+        if minutes_from_open <= 120:
+            return "trend_window"
+        if minutes_to_close <= 60:
+            return "power_hour"
+        if minutes_from_open >= 120:
+            return "midday"
+        return "session"
+
+    def _signal_lane_meta(self, symbol: str, signal: Optional[Dict] = None, lane_override: Optional[str] = None) -> Dict:
+        signal = signal or {}
+        intraday = signal.get("intraday_overlay", {}) if isinstance(signal.get("intraday_overlay"), dict) else {}
+        signal_style = str(signal.get("signal_style", "") or "")
+        market = str(
+            signal.get("market")
+            or intraday.get("market")
+            or self._market_code_for_symbol(symbol)
+        ).upper()
+        if lane_override:
+            lane = lane_override
+        elif market == "CRYPTO" or signal_style == "crypto_depth_intraday":
+            lane = "crypto"
+        elif signal_style == "day_trade_intraday":
+            lane = "day"
+        else:
+            lane = "normal"
+        setup_id = str(
+            signal.get("setup_id")
+            or intraday.get("setup")
+            or ("crypto_microstructure" if lane == "crypto" else "event_multifactor")
+        )
+        timestamp_raw = signal.get("timestamp")
+        timestamp = None
+        if isinstance(timestamp_raw, datetime):
+            timestamp = timestamp_raw
+        elif timestamp_raw:
+            try:
+                timestamp = datetime.fromisoformat(str(timestamp_raw))
+            except Exception:
+                timestamp = None
+        signal_key = f"{symbol}::{lane}"
+        return {
+            "lane": lane,
+            "lane_label": self._lane_label(lane),
+            "market": market,
+            "setup_id": setup_id,
+            "signal_key": signal_key,
+            "time_bucket": self._time_bucket_label(timestamp or datetime.now(timezone.utc), market),
+        }
+
+    def _decorate_signal(self, symbol: str, signal: Optional[Dict], lane_override: Optional[str] = None) -> Dict:
+        payload = dict(signal or {})
+        payload["symbol"] = symbol
+        payload.update(self._signal_lane_meta(symbol, payload, lane_override=lane_override))
+        payload.setdefault("scenario", payload.get("lane_label"))
+        return payload
+
+    def _get_meta_engine(self):
+        engine = self._components.get("meta_engine")
+        if engine is None:
+            from core.signal_engine_v2 import MetaDecisionEngine
+
+            engine = MetaDecisionEngine()
+            self._components["meta_engine"] = engine
+        return engine
+
+    def _latest_feature_row(self, symbol: str):
+        rows = self._components.get("latest_feature_rows", {})
+        if not isinstance(rows, dict):
+            return None
+        return rows.get(symbol)
+
+    def _hydrate_signal_runtime_fields(self, symbol: str, signal: Optional[Dict]) -> Dict:
+        payload = dict(signal or {})
+        if not payload:
+            return {}
+
+        meta = payload.get("meta_decision")
+        if not (isinstance(meta, dict) and "take_trade" in meta):
+            feature_row = self._latest_feature_row(symbol)
+            try:
+                feature_rows = {symbol: feature_row} if feature_row is not None else None
+                evaluated = self._get_meta_engine().evaluate_universe({symbol: payload}, feature_rows=feature_rows).get(symbol, {})
+            except Exception as exc:
+                logger.debug(f"Meta hydration failed for {symbol}: {exc}")
+                evaluated = {}
+            if evaluated:
+                payload["meta_decision"] = evaluated
+                payload["trade_eligible"] = evaluated.get("take_trade", False)
+                payload["take_probability"] = evaluated.get("take_probability", 0.0)
+                payload["skip_probability"] = evaluated.get("skip_probability", 1.0)
+                payload["expected_edge_pct"] = evaluated.get("expected_edge_pct", 0.0)
+                payload["expected_drawdown_pct"] = evaluated.get("expected_drawdown_pct", 0.0)
+                payload["rank_score"] = evaluated.get("rank_score", 0.0)
+                payload["rank_percentile"] = evaluated.get("rank_percentile", 0.0)
+                payload["size_multiplier"] = evaluated.get("size_multiplier", 1.0)
+                payload["meta_source"] = evaluated.get("source", "heuristic")
+
+        lane = str(payload.get("lane") or self._signal_lane_meta(symbol, payload).get("lane") or "normal").lower()
+        overlay = self._components.get("portfolio_overlay", {})
+        if isinstance(overlay, dict):
+            lane_allocator = (overlay.get("lane_allocator", {}) or {}).get(lane, {})
+            governor_state = (overlay.get("governor", {}) or {}).get(lane, {})
+            if lane_allocator and not isinstance(payload.get("lane_allocator"), dict):
+                payload["lane_allocator"] = lane_allocator
+            if governor_state and not isinstance(payload.get("governor_state"), dict):
+                payload["governor_state"] = governor_state
+
+        return payload
+
+    def _build_order_metadata(self, symbol: str, signal: Optional[Dict], *, action: str, reason: str) -> Dict:
+        payload = self._decorate_signal(symbol, signal or {})
+        intraday = payload.get("intraday_overlay", {}) if isinstance(payload.get("intraday_overlay"), dict) else {}
+        metadata = {
+            "lane": payload.get("lane"),
+            "lane_label": payload.get("lane_label"),
+            "market": payload.get("market"),
+            "setup_id": payload.get("setup_id"),
+            "regime": str(payload.get("regime") or intraday.get("regime") or "normal"),
+            "signal_style": payload.get("signal_style"),
+            "time_bucket": payload.get("time_bucket"),
+            "action_reason": reason,
+            "signal_strength": round(float(payload.get("ensemble_score", payload.get("final_score", 0.0)) or 0.0), 4),
+            "relative_volume": round(float(intraday.get("volume_spike", 0.0) or 0.0), 4),
+            "news_flag": bool(abs(float(intraday.get("news_boost", 0.0) or 0.0)) >= self._day_trade_news_boost_threshold),
+            "action": action,
+        }
+        execution_reference_price = self._get_latest_close(symbol)
+        if execution_reference_price is not None:
+            metadata["execution_reference_price"] = round(float(execution_reference_price), 8)
+        for field in ("best_bid", "best_ask", "spread_pct", "tick_age_seconds", "depth_age_seconds", "signal_age_seconds"):
+            value = intraday.get(field)
+            if value is None:
+                continue
+            try:
+                metadata[field] = float(value)
+            except Exception:
+                metadata[field] = value
+        return metadata
+
+    @staticmethod
+    def _safe_number(value, default: float = 0.0) -> float:
+        try:
+            if value in (None, ""):
+                return float(default)
+            return float(value)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _cooldown_key(symbol: str, lane: Optional[str] = None) -> str:
+        return f"{str(lane or 'shared').lower()}::{symbol}"
+
+    @staticmethod
+    def _position_key(symbol: str, lane: Optional[str] = None) -> str:
+        normalized_lane = str(lane or "normal").lower()
+        return f"{symbol}::{normalized_lane}"
+
+    @staticmethod
+    def _lane_from_position_key(position_key: str, default: str = "normal") -> str:
+        text = str(position_key or "")
+        if "::" in text:
+            _, lane = text.rsplit("::", 1)
+            if lane:
+                return lane.lower()
+        return str(default or "normal").lower()
+
+    def _iter_open_positions(self, broker) -> List[Tuple[str, object, str, str, Dict]]:
+        rows: List[Tuple[str, object, str, str, Dict]] = []
+        if not broker:
+            return rows
+        for position_key, position in getattr(broker, "positions", {}).items():
+            if getattr(position, "quantity", 0) <= 0:
+                continue
+            symbol = str(getattr(position, "symbol", position_key) or position_key)
+            plan = self._position_plans.get(position_key, {})
+            lane = str(plan.get("lane") or self._lane_from_position_key(position_key) or "normal").lower()
+            rows.append((position_key, position, symbol, lane, plan))
+        return rows
+
+    def _lane_config(self, lane: str) -> Dict:
+        return self._lane_engine_config.get(str(lane or "normal").lower(), self._lane_engine_config["normal"])
+
+    def _get_lane_signal(self, symbol: str, lane: Optional[str] = None) -> Dict:
+        raw = self._signal_store.get(symbol, {})
+        if not isinstance(raw, dict):
+            return {}
+        target_lane = str(lane or raw.get("lane") or "normal").lower()
+        if target_lane == "normal" and isinstance(raw.get("normal_lane_signal"), dict):
+            variant = self._hydrate_signal_runtime_fields(symbol, raw["normal_lane_signal"])
+            variant["symbol"] = symbol
+            return self._decorate_signal(symbol, variant, lane_override="normal")
+        if target_lane == "normal" and str(raw.get("lane", "")).lower() == "normal":
+            return self._decorate_signal(symbol, self._hydrate_signal_runtime_fields(symbol, raw), lane_override="normal")
+        if target_lane in {"day", "crypto"} and str(raw.get("lane", "")).lower() == target_lane:
+            return self._decorate_signal(symbol, self._hydrate_signal_runtime_fields(symbol, raw), lane_override=target_lane)
+        if lane is None:
+            inferred = self._signal_lane_meta(symbol, raw).get("lane")
+            return self._decorate_signal(symbol, self._hydrate_signal_runtime_fields(symbol, raw), lane_override=inferred)
+        return {}
+
+    def _iter_lane_signal_items(self) -> List[Tuple[str, str, Dict]]:
+        items: List[Tuple[str, str, Dict]] = []
+        seen = set()
+        for symbol, raw in self._signal_store.items():
+            if not isinstance(raw, dict):
+                continue
+            primary_lane = str(raw.get("lane") or self._signal_lane_meta(symbol, raw).get("lane") or "normal").lower()
+            primary = self._get_lane_signal(symbol, primary_lane)
+            if primary:
+                key = (symbol, primary_lane)
+                if key not in seen:
+                    items.append((primary_lane, symbol, primary))
+                    seen.add(key)
+            normal_variant = self._get_lane_signal(symbol, "normal")
+            if normal_variant and (symbol, "normal") not in seen:
+                items.append(("normal", symbol, normal_variant))
+                seen.add((symbol, "normal"))
+        return items
+
+    def _recent_closed_trade_rows(self, broker, lookback_days: Optional[int] = None) -> List[Dict]:
+        if not broker:
+            return []
+        rows: List[Dict] = []
+        cutoff = None
+        if lookback_days:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        for trade in list(getattr(broker, "trade_log", []) or []):
+            realized = self._safe_number(trade.get("realized_pnl"), 0.0)
+            if abs(realized) < 1e-9:
+                continue
+            filled_at_raw = trade.get("filled_at")
+            if not filled_at_raw:
+                continue
+            try:
+                filled_at = datetime.fromisoformat(str(filled_at_raw))
+            except Exception:
+                continue
+            filled_at = filled_at.astimezone(timezone.utc)
+            if cutoff and filled_at < cutoff:
+                continue
+            rows.append({**trade, "filled_at_dt": filled_at})
+        return rows
+
+    def _lane_position_snapshot(self, broker, current_prices: Optional[Dict[str, float]] = None) -> Dict[str, Dict]:
+        snapshot = {
+            lane: {"open_positions": 0, "position_value": 0.0, "current_exposure_pct": 0.0}
+            for lane in self._lane_engine_order
+        }
+        if not broker:
+            return snapshot
+        current_prices = current_prices or {}
+        portfolio_value = max(self._safe_number(getattr(broker, "portfolio_value", 0.0), 0.0), 1.0)
+        for position_key, position, symbol, lane, plan in self._iter_open_positions(broker):
+            if lane not in snapshot:
+                snapshot[lane] = {"open_positions": 0, "position_value": 0.0, "current_exposure_pct": 0.0}
+            current_price = (
+                current_prices.get(position_key)
+                or current_prices.get(symbol)
+                or self._get_latest_close(symbol)
+                or getattr(position, "avg_cost", 0.0)
+            )
+            position_value = abs(getattr(position, "quantity", 0)) * self._safe_number(current_price, getattr(position, "avg_cost", 0.0))
+            snapshot[lane]["open_positions"] += 1
+            snapshot[lane]["position_value"] += position_value
+        for lane, payload in snapshot.items():
+            payload["current_exposure_pct"] = round(payload["position_value"] / portfolio_value, 6)
+            payload["position_value"] = round(payload["position_value"], 2)
+        return snapshot
+
+    def _refresh_lane_allocator(self, broker, current_prices: Optional[Dict[str, float]] = None) -> Dict[str, Dict]:
+        target = self._components.get("lane_allocator")
+        if not isinstance(target, dict):
+            target = {}
+            self._components["lane_allocator"] = target
+        if not broker:
+            target.clear()
+            return {}
+
+        base_weights = dict(self._lane_base_allocations)
+        base_total = max(sum(base_weights.values()), 1e-9)
+        normalized_base = {lane: weight / base_total for lane, weight in base_weights.items()}
+        exposure = self._lane_position_snapshot(broker, current_prices=current_prices)
+        closed_rows = self._recent_closed_trade_rows(broker, lookback_days=self._governor_lookback_days)
+        lane_rows: Dict[str, List[Dict]] = defaultdict(list)
+        for trade in closed_rows:
+            lane = str((trade.get("metadata") or {}).get("lane") or "normal").lower()
+            lane_rows[lane].append(trade)
+
+        raw_weights: Dict[str, float] = {}
+        summaries: Dict[str, Dict] = {}
+        for lane in self._lane_engine_order:
+            rows = lane_rows.get(lane, [])
+            wins = [self._safe_number(r.get("realized_pnl"), 0.0) for r in rows if self._safe_number(r.get("realized_pnl"), 0.0) > 0]
+            losses = [abs(self._safe_number(r.get("realized_pnl"), 0.0)) for r in rows if self._safe_number(r.get("realized_pnl"), 0.0) < 0]
+            gross_wins = sum(wins)
+            gross_losses = sum(losses)
+            profit_factor = gross_wins / gross_losses if gross_losses > 0 else (2.0 if gross_wins > 0 else 1.0)
+            recent_pnl = sum(self._safe_number(r.get("realized_pnl"), 0.0) for r in rows)
+            win_rate = (len(wins) / max(len(rows), 1)) if rows else 0.5
+            pnl_pct = recent_pnl / max(self._safe_number(getattr(broker, "initial_capital", 0.0), 100000.0), 1.0)
+            strength = 1.0
+            if rows:
+                strength += self._clamp((profit_factor - 1.0) * 0.35, -0.35, 0.45)
+                strength += self._clamp((win_rate - 0.5) * 0.45, -0.18, 0.18)
+                strength += self._clamp(pnl_pct * 8.0, -0.20, 0.20)
+            raw_weights[lane] = normalized_base.get(lane, 0.0) * max(0.35, strength)
+            summaries[lane] = {
+                "recent_closed_trades": len(rows),
+                "profit_factor": round(profit_factor, 3),
+                "win_rate_pct": round(win_rate * 100.0, 1),
+                "recent_pnl": round(recent_pnl, 2),
+            }
+
+        total_raw = max(sum(raw_weights.values()), 1e-9)
+        provisional = {lane: raw_weights.get(lane, 0.0) / total_raw for lane in self._lane_engine_order}
+        clamped = {
+            lane: self._clamp(
+                provisional.get(lane, normalized_base.get(lane, 0.0)),
+                self._lane_min_allocations.get(lane, 0.05),
+                self._lane_max_allocations.get(lane, 0.90),
+            )
+            for lane in self._lane_engine_order
+        }
+        clamped_total = max(sum(clamped.values()), 1e-9)
+        final_weights = {lane: clamped[lane] / clamped_total for lane in self._lane_engine_order}
+
+        target.clear()
+        for lane in self._lane_engine_order:
+            base_weight = normalized_base.get(lane, 0.0)
+            target_weight = final_weights.get(lane, base_weight)
+            current_exposure_pct = self._safe_number(exposure.get(lane, {}).get("current_exposure_pct"), 0.0)
+            size_multiplier = self._clamp(
+                target_weight / max(base_weight, 1e-6),
+                0.50,
+                1.60,
+            )
+            target[lane] = {
+                "lane": lane,
+                "lane_label": self._lane_label(lane),
+                "base_capital_pct": round(base_weight, 4),
+                "target_capital_pct": round(target_weight, 4),
+                "size_multiplier": round(size_multiplier, 4),
+                "open_positions": int(exposure.get(lane, {}).get("open_positions", 0)),
+                "current_exposure_pct": round(current_exposure_pct, 4),
+                "available_capital_pct": round(max(0.0, target_weight - current_exposure_pct), 4),
+                "status": (
+                    "boosted"
+                    if size_multiplier > 1.06
+                    else "throttled"
+                    if size_multiplier < 0.94
+                    else "neutral"
+                ),
+                **summaries.get(lane, {}),
+            }
+        return dict(target)
+
+    def _refresh_governor_state(self, broker) -> Dict[str, Dict]:
+        target = self._components.get("governor")
+        if not isinstance(target, dict):
+            target = {}
+            self._components["governor"] = target
+        if not broker:
+            target.clear()
+            return {}
+
+        closed_rows = self._recent_closed_trade_rows(broker, lookback_days=self._governor_lookback_days)
+        lane_rows: Dict[str, List[Dict]] = defaultdict(list)
+        for trade in closed_rows:
+            lane = str((trade.get("metadata") or {}).get("lane") or "normal").lower()
+            lane_rows[lane].append(trade)
+
+        target.clear()
+        for lane in self._lane_engine_order:
+            rows = lane_rows.get(lane, [])
+            wins = [self._safe_number(r.get("realized_pnl"), 0.0) for r in rows if self._safe_number(r.get("realized_pnl"), 0.0) > 0]
+            losses = [abs(self._safe_number(r.get("realized_pnl"), 0.0)) for r in rows if self._safe_number(r.get("realized_pnl"), 0.0) < 0]
+            gross_wins = sum(wins)
+            gross_losses = sum(losses)
+            lane_pf = gross_wins / gross_losses if gross_losses > 0 else (2.0 if gross_wins > 0 else 1.0)
+            lane_pnl = sum(self._safe_number(r.get("realized_pnl"), 0.0) for r in rows)
+            disabled_setups = set()
+            time_bucket_actions: Dict[str, Dict] = {}
+            setup_stats: Dict[str, Dict] = defaultdict(lambda: {"count": 0, "wins": 0, "pnl": 0.0, "gross_wins": 0.0, "gross_losses": 0.0})
+            time_stats: Dict[str, Dict] = defaultdict(lambda: {"count": 0, "wins": 0, "pnl": 0.0, "gross_wins": 0.0, "gross_losses": 0.0})
+
+            for trade in rows:
+                metadata = trade.get("metadata") or {}
+                realized = self._safe_number(trade.get("realized_pnl"), 0.0)
+                setup_id = str(metadata.get("setup_id") or "unclassified")
+                time_bucket = str(metadata.get("entry_time_bucket") or metadata.get("time_bucket") or "unknown")
+                for bucket_name, bucket in ((setup_id, setup_stats[setup_id]), (time_bucket, time_stats[time_bucket])):
+                    bucket["count"] += 1
+                    bucket["pnl"] += realized
+                    if realized > 0:
+                        bucket["wins"] += 1
+                        bucket["gross_wins"] += realized
+                    elif realized < 0:
+                        bucket["gross_losses"] += abs(realized)
+
+            for setup_id, stat in setup_stats.items():
+                if stat["count"] < self._governor_min_setup_trades:
+                    continue
+                pf = stat["gross_wins"] / stat["gross_losses"] if stat["gross_losses"] > 0 else (2.0 if stat["gross_wins"] > 0 else 1.0)
+                if pf < self._governor_setup_pf_floor and stat["pnl"] < 0:
+                    disabled_setups.add(setup_id)
+
+            for bucket_name, stat in time_stats.items():
+                if stat["count"] < self._governor_min_time_bucket_trades:
+                    continue
+                pf = stat["gross_wins"] / stat["gross_losses"] if stat["gross_losses"] > 0 else (2.0 if stat["gross_wins"] > 0 else 1.0)
+                win_rate = stat["wins"] / max(stat["count"], 1)
+                if pf < (self._governor_time_bucket_pf_floor * 0.75) and stat["pnl"] < 0 and win_rate < 0.35:
+                    time_bucket_actions[bucket_name] = {"blocked": True, "size_multiplier": 0.0}
+                elif pf < self._governor_time_bucket_pf_floor and stat["pnl"] < 0:
+                    time_bucket_actions[bucket_name] = {
+                        "blocked": False,
+                        "size_multiplier": self._governor_time_bucket_throttle_mult,
+                    }
+
+            lane_status = "active"
+            lane_throttle_multiplier = 1.0
+            if len(rows) >= self._governor_min_setup_trades and lane_pf < self._governor_setup_review_pf and lane_pnl < 0:
+                lane_status = "review"
+                lane_throttle_multiplier = self._governor_lane_throttle_mult
+
+            target[lane] = {
+                "lane": lane,
+                "lane_label": self._lane_label(lane),
+                "status": lane_status,
+                "lane_throttle_multiplier": round(lane_throttle_multiplier, 4),
+                "recent_closed_trades": len(rows),
+                "profit_factor": round(lane_pf, 3),
+                "recent_pnl": round(lane_pnl, 2),
+                "disabled_setups": sorted(disabled_setups),
+                "time_bucket_actions": time_bucket_actions,
+            }
+        return dict(target)
+
+    def _governor_decision(self, signal: Dict) -> Dict:
+        lane = str(signal.get("lane") or "normal").lower()
+        target = self._components.get("governor") if isinstance(self._components.get("governor"), dict) else {}
+        lane_state = target.get(lane, {}) if isinstance(target, dict) else {}
+        setup_id = str(signal.get("setup_id") or "unclassified")
+        time_bucket = str(signal.get("time_bucket") or "unknown")
+        if setup_id in set(lane_state.get("disabled_setups", []) or []):
+            return {"allow": False, "reason": "setup_retired", "size_multiplier": 0.0, "status": lane_state.get("status", "active")}
+        size_multiplier = self._safe_number(lane_state.get("lane_throttle_multiplier"), 1.0)
+        action = (lane_state.get("time_bucket_actions") or {}).get(time_bucket, {})
+        if action.get("blocked"):
+            return {"allow": False, "reason": "time_window_retired", "size_multiplier": 0.0, "status": lane_state.get("status", "active")}
+        size_multiplier *= self._safe_number(action.get("size_multiplier"), 1.0)
+        return {
+            "allow": size_multiplier > 0.0,
+            "reason": "lane_review_throttle" if size_multiplier < 0.99 else "active",
+            "size_multiplier": round(size_multiplier, 4),
+            "status": lane_state.get("status", "active"),
+        }
+
+    def _crypto_execution_filter(self, signal: Dict) -> Dict:
+        intraday = signal.get("intraday_overlay", {}) if isinstance(signal.get("intraday_overlay"), dict) else {}
+        best_bid = self._safe_number(intraday.get("best_bid"), 0.0)
+        best_ask = self._safe_number(intraday.get("best_ask"), 0.0)
+        mid_price = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0
+        spread_pct = ((best_ask - best_bid) / mid_price) * 100.0 if mid_price > 0 else 999.0
+        depth_age_seconds = self._safe_number(intraday.get("depth_age_seconds"), 999.0)
+        tick_age_seconds = self._safe_number(intraday.get("tick_age_seconds"), 999.0)
+        signal_age_seconds = max(depth_age_seconds, tick_age_seconds)
+        book_pressure = abs(self._safe_number(intraday.get("book_pressure"), 0.0))
+        depth_imbalance = abs(self._safe_number(intraday.get("book_imbalance"), 0.0))
+        trade_window_active = bool(intraday.get("trade_window_active", True))
+        if spread_pct > self._crypto_scalper_max_spread_pct:
+            return {"allow": False, "reason": "crypto_wide_spread", "size_multiplier": 0.0}
+        if depth_age_seconds > self._crypto_scalper_max_depth_age_seconds:
+            return {"allow": False, "reason": "crypto_stale_book", "size_multiplier": 0.0}
+        if tick_age_seconds > self._crypto_scalper_max_tick_age_seconds:
+            return {"allow": False, "reason": "crypto_stale_tick", "size_multiplier": 0.0}
+        if signal_age_seconds > self._crypto_scalper_max_signal_age_seconds:
+            return {"allow": False, "reason": "crypto_stale_signal", "size_multiplier": 0.0}
+        if book_pressure < self._crypto_scalper_min_book_pressure:
+            return {"allow": False, "reason": "crypto_weak_book_pressure", "size_multiplier": 0.0}
+        if depth_imbalance < self._crypto_scalper_min_depth_imbalance:
+            return {"allow": False, "reason": "crypto_weak_depth_imbalance", "size_multiplier": 0.0}
+        if not trade_window_active and self._safe_number(intraday.get("confidence"), 0.0) < 0.80:
+            return {"allow": False, "reason": "crypto_outside_prime_window", "size_multiplier": 0.0}
+        size_multiplier = 1.0
+        if spread_pct > (self._crypto_scalper_max_spread_pct * 0.65):
+            size_multiplier *= 0.75
+        if signal_age_seconds > (self._crypto_scalper_max_signal_age_seconds * 0.65):
+            size_multiplier *= 0.80
+        return {
+            "allow": True,
+            "reason": "active",
+            "size_multiplier": round(size_multiplier, 4),
+            "spread_pct": round(spread_pct, 5),
+            "signal_age_seconds": round(signal_age_seconds, 3),
+        }
+
+    @staticmethod
+    def _market_timezone(market: str) -> ZoneInfo:
+        market_key = str(market).upper()
+        if market_key == "IN":
+            return ZoneInfo("Asia/Kolkata")
+        if market_key == "CRYPTO":
+            return ZoneInfo("UTC")
+        return ZoneInfo("America/New_York")
+
+    def _market_session_clock(self, timestamp: datetime, market: str) -> Tuple[datetime, datetime, datetime]:
+        market_key = str(market).upper()
+        local_ts = timestamp.astimezone(self._market_timezone(market))
+        if market_key == "IN":
+            open_local = local_ts.replace(hour=9, minute=15, second=0, microsecond=0)
+            close_local = local_ts.replace(hour=15, minute=30, second=0, microsecond=0)
+        elif market_key == "CRYPTO":
+            open_local = local_ts.replace(hour=0, minute=0, second=0, microsecond=0)
+            close_local = local_ts.replace(hour=23, minute=59, second=59, microsecond=0)
+        else:
+            open_local = local_ts.replace(hour=9, minute=30, second=0, microsecond=0)
+            close_local = local_ts.replace(hour=16, minute=0, second=0, microsecond=0)
+        return local_ts, open_local, close_local
+
+    def _resolve_tick_volume_delta(self, tick, state: Dict) -> float:
+        raw_volume = max(0.0, float(getattr(tick, "volume", 0) or 0.0))
+        if str(getattr(tick, "market", "US")).upper() == "IN":
+            previous_reported = float(state.get("last_reported_volume", 0.0) or 0.0)
+            delta = raw_volume - previous_reported if raw_volume >= previous_reported else raw_volume
+            state["last_reported_volume"] = raw_volume
+            return max(delta, 1.0 if raw_volume > 0 else 0.0)
+        state["last_reported_volume"] = raw_volume
+        return max(raw_volume, 1.0)
+
+    def _on_realtime_tick(self, tick) -> None:
+        if not self._day_trading_mode or tick is None or float(getattr(tick, "price", 0.0) or 0.0) <= 0:
+            return
+
+        market = str(getattr(tick, "market", "US") or "US").upper()
+        local_ts, open_local, close_local = self._market_session_clock(tick.timestamp, market)
+        if local_ts < open_local or local_ts > close_local:
+            return
+
+        session_key = f"{market}:{local_ts.date().isoformat()}"
+        with self._intraday_state_lock:
+            state = self._intraday_state.get(tick.symbol)
+            if not state or state.get("session_key") != session_key:
+                state = {
+                    "session_key": session_key,
+                    "market": market,
+                    "session_open_utc": open_local.astimezone(timezone.utc),
+                    "session_close_utc": close_local.astimezone(timezone.utc),
+                    "session_open_price": float(tick.price),
+                    "session_high": float(tick.price),
+                    "session_low": float(tick.price),
+                    "opening_range_high": float(tick.price),
+                    "opening_range_low": float(tick.price),
+                    "opening_range_complete": False,
+                    "last_price": float(tick.price),
+                    "last_signed_direction": 0,
+                    "last_reported_volume": 0.0,
+                    "session_volume": 0.0,
+                    "vwap_num": 0.0,
+                    "vwap_den": 0.0,
+                    "cum_delta": 0.0,
+                    "recent_flow": deque(maxlen=720),
+                }
+                self._intraday_state[tick.symbol] = state
+
+            volume_delta = self._resolve_tick_volume_delta(tick, state)
+            last_price = float(state.get("last_price", tick.price) or tick.price)
+            direction = 1 if float(tick.price) > last_price else -1 if float(tick.price) < last_price else int(
+                state.get("last_signed_direction", 0) or 0
+            )
+            signed_volume = direction * volume_delta
+
+            state["session_high"] = max(float(state.get("session_high", tick.price) or tick.price), float(tick.price))
+            state["session_low"] = min(float(state.get("session_low", tick.price) or tick.price), float(tick.price))
+            state["session_volume"] = float(state.get("session_volume", 0.0) or 0.0) + volume_delta
+            state["vwap_num"] = float(state.get("vwap_num", 0.0) or 0.0) + (float(tick.price) * volume_delta)
+            state["vwap_den"] = float(state.get("vwap_den", 0.0) or 0.0) + volume_delta
+            state["cum_delta"] = float(state.get("cum_delta", 0.0) or 0.0) + signed_volume
+            state["last_price"] = float(tick.price)
+            state["last_signed_direction"] = direction
+            state["last_tick_ts"] = tick.timestamp
+
+            if local_ts <= open_local + timedelta(minutes=self._day_trade_opening_range_minutes):
+                state["opening_range_high"] = max(
+                    float(state.get("opening_range_high", tick.price) or tick.price),
+                    float(tick.price),
+                )
+                state["opening_range_low"] = min(
+                    float(state.get("opening_range_low", tick.price) or tick.price),
+                    float(tick.price),
+                )
+            else:
+                state["opening_range_complete"] = True
+
+            state["recent_flow"].append(
+                {
+                    "timestamp": tick.timestamp,
+                    "price": float(tick.price),
+                    "volume": volume_delta,
+                    "signed_volume": signed_volume,
+                    "cum_delta": float(state["cum_delta"]),
+                }
+            )
+
+    def _get_intraday_state_snapshot(self, symbol: str) -> Dict:
+        with self._intraday_state_lock:
+            raw = self._intraday_state.get(symbol)
+            if not raw:
+                return {}
+            snapshot = {k: v for k, v in raw.items() if k != "recent_flow"}
+            snapshot["recent_flow"] = list(raw.get("recent_flow", []))
+            return snapshot
+
+    def _compute_intraday_overlay(self, symbol: str, latest_row) -> Dict[str, float]:
+        if not self._day_trading_mode:
+            return {}
+
+        try:
+            from core.realtime_engine import DEPTH_BUFFER, PRICE_BUFFER
+        except Exception:
+            return {}
+
+        bar_1m = PRICE_BUFFER.get_ohlcv(symbol, 60)
+        bar_5m = PRICE_BUFFER.get_ohlcv(symbol, 300)
+        bar_15m = PRICE_BUFFER.get_ohlcv(symbol, 900) or bar_5m
+        if not bar_5m or int(bar_5m.get("tick_count", 0) or 0) < self._day_trade_min_tick_count:
+            return {}
+
+        def _bar_return(bar: Optional[Dict]) -> float:
+            if not bar:
+                return 0.0
+            open_px = float(bar.get("open", 0.0) or 0.0)
+            close_px = float(bar.get("close", 0.0) or 0.0)
+            if open_px <= 0:
+                return 0.0
+            return (close_px / open_px) - 1.0
+
+        def _row_value(name: str) -> float:
+            if latest_row is None or name not in latest_row.index:
+                return 0.0
+            raw = latest_row.get(name, 0.0)
+            if pd.isna(raw):
+                return 0.0
+            try:
+                return float(raw)
+            except Exception:
+                return 0.0
+
+        ret_1m = _bar_return(bar_1m)
+        ret_5m = _bar_return(bar_5m)
+        ret_15m = _bar_return(bar_15m)
+
+        close_5m = float(bar_5m.get("close", 0.0) or 0.0)
+        high_15m = float(bar_15m.get("high", close_5m) or close_5m)
+        low_15m = float(bar_15m.get("low", close_5m) or close_5m)
+        span = max(high_15m - low_15m, max(close_5m, 1.0) * 0.002)
+        range_pos = (close_5m - low_15m) / span
+        range_centered = self._clamp((range_pos - 0.5) * 2.0, -1.0, 1.0)
+
+        vol_1m = float((bar_1m or {}).get("volume", 0.0) or 0.0)
+        vol_15m = float((bar_15m or {}).get("volume", 0.0) or 0.0)
+        expected_1m_volume = vol_15m / (15.0 if bar_15m else 5.0) if vol_15m > 0 else 0.0
+        volume_spike = self._clamp(
+            (vol_1m / max(expected_1m_volume, 1.0)) if vol_1m > 0 else 0.0,
+            0.0,
+            4.0,
+        )
+
+        trend_bias = self._clamp(_row_value("trend_composite"), -1.5, 1.5)
+        momentum_bias = self._clamp(_row_value("momentum_composite"), -1.5, 1.5)
+        official_event = self._clamp(_row_value("official_event_signal"), -1.0, 1.5)
+        filing_event = self._clamp(_row_value("filing_event_signal"), -1.0, 1.5)
+        sentiment_z = self._clamp(_row_value("weighted_sentiment_zscore"), -2.0, 2.0)
+        source_quality = self._clamp(_row_value("source_quality_signal"), -1.0, 1.5)
+        news_volume = self._clamp(_row_value("news_volume_spike"), -1.0, 2.0)
+        travel_activity = self._clamp(_row_value("travel_activity_change"), -1.0, 1.0)
+
+        news_boost = self._clamp(
+            (official_event * 0.42)
+            + (filing_event * 0.32)
+            + (sentiment_z * 0.14)
+            + (news_volume * 0.12)
+            + (source_quality * 0.20)
+            + (travel_activity * 0.12),
+            -1.2,
+            1.8,
+        )
+
+        legacy_score = (
+            (ret_1m * 28.0)
+            + (ret_5m * 96.0)
+            + (ret_15m * 62.0)
+            + (max(0.0, volume_spike - 1.0) * 0.26)
+            + (range_centered * 0.24)
+            + (trend_bias * 0.18)
+            + (momentum_bias * 0.20)
+            + (news_boost * 0.42)
+        )
+        if volume_spike < 0.60:
+            legacy_score *= 0.82
+        legacy_score = self._clamp(legacy_score, -2.5, 2.5)
+
+        state = self._get_intraday_state_snapshot(symbol)
+        if not state:
+            direction = "neutral"
+            if legacy_score >= self._day_trade_intraday_score_threshold:
+                direction = "buy"
+            elif legacy_score <= -self._day_trade_intraday_score_threshold:
+                direction = "sell"
+            confidence = self._clamp(abs(legacy_score) / 1.45, 0.0, 0.99)
+            note_parts: List[str] = []
+            if abs(ret_5m) >= 0.002:
+                note_parts.append(f"5m move {ret_5m * 100:+.2f}%")
+            if volume_spike >= 1.35:
+                note_parts.append(f"RVOL {volume_spike:.1f}x")
+            if news_boost >= self._day_trade_news_boost_threshold:
+                note_parts.append("official/news catalyst")
+            return {
+                "score": round(legacy_score, 4),
+                "direction": direction,
+                "confidence": round(confidence, 4),
+                "regime": "legacy_intraday",
+                "setup": "legacy_momentum",
+                "ensemble_long": round(max(legacy_score, 0.0), 4),
+                "ensemble_short": round(max(-legacy_score, 0.0), 4),
+                "volume_spike": round(volume_spike, 3),
+                "ret_1m": round(ret_1m, 5),
+                "ret_5m": round(ret_5m, 5),
+                "ret_15m": round(ret_15m, 5),
+                "range_position": round(range_pos, 4),
+                "tick_count": int(bar_5m.get("tick_count", 0) or 0),
+                "news_boost": round(news_boost, 4),
+                "note": " | ".join(note_parts),
+                "trade_window_active": True,
+                "risk_adjustments": {},
+            }
+
+        depth_snapshot = DEPTH_BUFFER.latest(symbol)
+        depth_updated_at = depth_snapshot.get("updated_at")
+        depth_age_seconds = None
+        if depth_updated_at:
+            try:
+                depth_age_seconds = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - datetime.fromisoformat(str(depth_updated_at))).total_seconds(),
+                )
+            except Exception:
+                depth_age_seconds = None
+        depth_available = bool(depth_snapshot) and (
+            depth_age_seconds is None or depth_age_seconds <= (self._crypto_signal_stale_seconds * 2)
+        )
+
+        def _safe_level_qty(level) -> float:
+            if isinstance(level, (list, tuple)) and len(level) >= 2:
+                try:
+                    return float(level[1] or 0.0)
+                except Exception:
+                    return 0.0
+            if isinstance(level, dict):
+                raw = level.get("quantity", level.get("qty", 0.0))
+                try:
+                    return float(raw or 0.0)
+                except Exception:
+                    return 0.0
+            return 0.0
+
+        best_bid_qty = float(depth_snapshot.get("best_bid_qty", 0.0) or 0.0)
+        best_ask_qty = float(depth_snapshot.get("best_ask_qty", 0.0) or 0.0)
+        depth_bids = depth_snapshot.get("bids", []) or []
+        depth_asks = depth_snapshot.get("asks", []) or []
+        bid_depth_qty = sum(_safe_level_qty(level) for level in depth_bids[:5])
+        ask_depth_qty = sum(_safe_level_qty(level) for level in depth_asks[:5])
+        if bid_depth_qty <= 0 and best_bid_qty > 0:
+            bid_depth_qty = best_bid_qty
+        if ask_depth_qty <= 0 and best_ask_qty > 0:
+            ask_depth_qty = best_ask_qty
+
+        top_book_imbalance = 0.0
+        if (best_bid_qty + best_ask_qty) > 0:
+            top_book_imbalance = (best_bid_qty - best_ask_qty) / (best_bid_qty + best_ask_qty)
+        depth_book_imbalance = 0.0
+        if (bid_depth_qty + ask_depth_qty) > 0:
+            depth_book_imbalance = (bid_depth_qty - ask_depth_qty) / (bid_depth_qty + ask_depth_qty)
+
+        best_bid = float(depth_snapshot.get("best_bid", 0.0) or 0.0)
+        best_ask = float(depth_snapshot.get("best_ask", 0.0) or 0.0)
+        microprice_bias = 0.0
+        if best_bid > 0 and best_ask > 0 and (best_bid_qty + best_ask_qty) > 0:
+            microprice = ((best_ask * best_bid_qty) + (best_bid * best_ask_qty)) / (best_bid_qty + best_ask_qty)
+            mid_price = (best_bid + best_ask) / 2.0
+            if mid_price > 0:
+                microprice_bias = self._clamp(((microprice / mid_price) - 1.0) / 0.0008, -1.0, 1.0)
+
+        book_pressure = self._clamp(
+            (depth_book_imbalance * 0.60) + (top_book_imbalance * 0.25) + (microprice_bias * 0.15),
+            -1.2,
+            1.2,
+        )
+        if not depth_available:
+            top_book_imbalance = 0.0
+            depth_book_imbalance = 0.0
+            microprice_bias = 0.0
+            book_pressure = 0.0
+
+        recent_flow = state.get("recent_flow", []) or []
+        last_tick_ts = state.get("last_tick_ts")
+        market = str(state.get("market", "US") or "US").upper()
+        trade_window_active = True
+        session_age_minutes = 0.0
+        minutes_to_close = 0.0
+        if isinstance(last_tick_ts, datetime):
+            local_ts, open_local, close_local = self._market_session_clock(last_tick_ts, market)
+            session_age_minutes = max(0.0, (local_ts - open_local).total_seconds() / 60.0)
+            minutes_to_close = max(0.0, (close_local - local_ts).total_seconds() / 60.0)
+            trade_window_active = (
+                session_age_minutes <= self._day_trade_active_open_minutes
+                or minutes_to_close <= self._day_trade_power_hour_minutes
+            )
+
+        def _flow_window(seconds: int) -> List[Dict]:
+            if not recent_flow:
+                return []
+            cutoff = recent_flow[-1]["timestamp"] - timedelta(seconds=seconds)
+            return [item for item in recent_flow if item["timestamp"] >= cutoff]
+
+        def _flow_stats(items: List[Dict]) -> Dict[str, float]:
+            if not items:
+                return {
+                    "ofi": 0.0,
+                    "delta_norm": 0.0,
+                    "total_volume": 0.0,
+                    "price_return": 0.0,
+                    "high": close_5m,
+                    "low": close_5m,
+                }
+            prices = [float(item.get("price", close_5m) or close_5m) for item in items]
+            volumes = [float(item.get("volume", 0.0) or 0.0) for item in items]
+            total_volume = sum(volumes)
+            signed_volume = sum(float(item.get("signed_volume", 0.0) or 0.0) for item in items)
+            delta_first = float(items[0].get("cum_delta", 0.0) or 0.0)
+            delta_last = float(items[-1].get("cum_delta", 0.0) or 0.0)
+            first_price = prices[0]
+            price_return = (prices[-1] / first_price) - 1.0 if first_price > 0 else 0.0
+            norm = max(total_volume, 1.0)
+            return {
+                "ofi": signed_volume / norm,
+                "delta_norm": (delta_last - delta_first) / norm,
+                "total_volume": total_volume,
+                "price_return": price_return,
+                "high": max(prices),
+                "low": min(prices),
+            }
+
+        flow_short = _flow_stats(_flow_window(90))
+        flow_medium = _flow_stats(_flow_window(300))
+        flow_long = _flow_stats(_flow_window(900))
+        prior_flow_items = _flow_window(900)
+        exclude_count = max(3, len(_flow_window(120)) or 0)
+        prior_reference = prior_flow_items[:-exclude_count] if len(prior_flow_items) > exclude_count else prior_flow_items[:-1]
+        prior_high = max((float(item.get("price", close_5m) or close_5m) for item in prior_reference), default=flow_long["high"])
+        prior_low = min((float(item.get("price", close_5m) or close_5m) for item in prior_reference), default=flow_long["low"])
+
+        session_vwap = close_5m
+        if float(state.get("vwap_den", 0.0) or 0.0) > 0:
+            session_vwap = float(state.get("vwap_num", 0.0) or 0.0) / float(state.get("vwap_den", 1.0) or 1.0)
+        session_open_price = float(state.get("session_open_price", close_5m) or close_5m)
+        vwap_bias = self._clamp(((close_5m / max(session_vwap, 0.01)) - 1.0) / 0.0035, -1.5, 1.5)
+        vwap_slope = self._clamp(((session_vwap / max(session_open_price, 0.01)) - 1.0) / 0.0045, -1.2, 1.2)
+        atr_pct = max(abs(_row_value("atr_pct")), 0.002)
+        realized_range_5m = (float(bar_5m.get("high", close_5m) or close_5m) - float(bar_5m.get("low", close_5m) or close_5m)) / max(close_5m, 0.01)
+        volatility_expansion = self._clamp(
+            (realized_range_5m / max(atr_pct * 0.35, 0.0015)) - 1.0,
+            -1.0,
+            1.5,
+        )
+        volatility_signed = volatility_expansion * (
+            1.0 if (flow_medium["price_return"] >= 0 or vwap_bias >= 0) else -1.0
+        )
+
+        opening_high = float(state.get("opening_range_high", close_5m) or close_5m)
+        opening_low = float(state.get("opening_range_low", close_5m) or close_5m)
+        opening_range_complete = bool(state.get("opening_range_complete", False))
+        orb_long = 1.0 if opening_range_complete and close_5m > (opening_high * 1.0007) else 0.0
+        orb_short = 1.0 if opening_range_complete and close_5m < (opening_low * 0.9993) else 0.0
+        orb_retest_long = 1.0 if (
+            orb_long
+            and flow_short["low"] <= (opening_high * 1.002)
+            and flow_short["ofi"] > 0.04
+            and close_5m > opening_high
+        ) else 0.0
+        orb_retest_short = 1.0 if (
+            orb_short
+            and flow_short["high"] >= (opening_low * 0.998)
+            and flow_short["ofi"] < -0.04
+            and close_5m < opening_low
+        ) else 0.0
+
+        sweep_long = 1.0 if (
+            flow_short["low"] < (prior_low * 0.9994)
+            and close_5m > prior_low
+            and (flow_short["ofi"] > 0.03 or book_pressure > 0.10)
+            and ret_1m > -0.0005
+        ) else 0.0
+        sweep_short = 1.0 if (
+            flow_short["high"] > (prior_high * 1.0006)
+            and close_5m < prior_high
+            and (flow_short["ofi"] < -0.03 or book_pressure < -0.10)
+            and ret_1m < 0.0005
+        ) else 0.0
+
+        vwap_pullback_buffer = max(close_5m * atr_pct * self._day_trade_vwap_pullback_atr_mult, close_5m * 0.0008)
+        vwap_pullback_long = 1.0 if (
+            close_5m > session_vwap
+            and vwap_slope >= -0.02
+            and abs(flow_short["low"] - session_vwap) <= vwap_pullback_buffer
+            and flow_short["ofi"] > 0.02
+            and ret_1m > -0.0003
+        ) else 0.0
+        vwap_pullback_short = 1.0 if (
+            close_5m < session_vwap
+            and vwap_slope <= 0.02
+            and abs(flow_short["high"] - session_vwap) <= vwap_pullback_buffer
+            and flow_short["ofi"] < -0.02
+            and ret_1m < 0.0003
+        ) else 0.0
+
+        orderflow_long = self._clamp(
+            (
+                (max(flow_short["ofi"], 0.0) * 1.20)
+                + max(flow_medium["delta_norm"], 0.0)
+                + (max(book_pressure, 0.0) * 0.42)
+            ) * 2.0,
+            0.0,
+            1.0,
+        )
+        orderflow_short = self._clamp(
+            (
+                (max(-flow_short["ofi"], 0.0) * 1.20)
+                + max(-flow_medium["delta_norm"], 0.0)
+                + (max(-book_pressure, 0.0) * 0.42)
+            ) * 2.0,
+            0.0,
+            1.0,
+        )
+
+        momentum_long = self._clamp(
+            (orb_retest_long * 0.55)
+            + (max(vwap_bias, 0.0) * 0.16)
+            + (max(flow_medium["price_return"], 0.0) / 0.0045 * 0.18)
+            + (max(volume_spike - 1.0, 0.0) * 0.12),
+            0.0,
+            1.0,
+        )
+        momentum_short = self._clamp(
+            (orb_retest_short * 0.55)
+            + (max(-vwap_bias, 0.0) * 0.16)
+            + (max(-flow_medium["price_return"], 0.0) / 0.0045 * 0.18)
+            + (max(volume_spike - 1.0, 0.0) * 0.12),
+            0.0,
+            1.0,
+        )
+        news_long = self._clamp((max(news_boost, 0.0) * 0.55) + (max(volume_spike - 1.0, 0.0) * 0.12), 0.0, 1.0)
+        news_short = self._clamp((max(-news_boost, 0.0) * 0.55) + (max(volume_spike - 1.0, 0.0) * 0.12), 0.0, 1.0)
+
+        trend_score = self._clamp(
+            (0.35 * vwap_bias)
+            + (0.25 * flow_short["ofi"] * 1.6)
+            + (0.20 * flow_medium["delta_norm"] * 1.4)
+            + (0.12 * book_pressure)
+            + (0.20 * volatility_signed),
+            -1.5,
+            1.5,
+        )
+
+        regime = "neutral"
+        if trend_score >= 0.45:
+            regime = "trend_up"
+        elif trend_score <= -0.45:
+            regime = "trend_down"
+        elif sweep_long >= 0.55:
+            regime = "mean_revert_long"
+        elif sweep_short >= 0.55:
+            regime = "mean_revert_short"
+
+        long_score = (
+            (0.30 * momentum_long)
+            + (0.25 * sweep_long)
+            + (0.20 * vwap_pullback_long)
+            + (0.15 * orderflow_long)
+            + (0.10 * news_long)
+        )
+        short_score = (
+            (0.30 * momentum_short)
+            + (0.25 * sweep_short)
+            + (0.20 * vwap_pullback_short)
+            + (0.15 * orderflow_short)
+            + (0.10 * news_short)
+        )
+        if regime == "trend_up":
+            long_score += (max(trend_score, 0.0) * 0.18) + (vwap_pullback_long * 0.08)
+            short_score *= 0.72
+        elif regime == "trend_down":
+            short_score += (max(-trend_score, 0.0) * 0.18) + (vwap_pullback_short * 0.08)
+            long_score *= 0.72
+        elif regime == "mean_revert_long":
+            long_score += sweep_long * 0.18
+            short_score *= 0.82
+        elif regime == "mean_revert_short":
+            short_score += sweep_short * 0.18
+            long_score *= 0.82
+
+        if not trade_window_active:
+            long_score *= 0.82
+            short_score *= 0.82
+            legacy_score *= 0.88
+
+        ensemble_net = long_score - short_score
+        intraday_score = self._clamp((legacy_score * 0.38) + (ensemble_net * 2.05) + (trend_score * 0.45), -2.5, 2.5)
+
+        setup_scores = {
+            "opening_range_momentum": max(momentum_long, momentum_short),
+            "liquidity_sweep_reversal": max(sweep_long, sweep_short),
+            "vwap_pullback_continuation": max(vwap_pullback_long, vwap_pullback_short),
+            "orderflow_confirmation": max(orderflow_long, orderflow_short),
+            "news_volatility": max(news_long, news_short),
+        }
+        dominant_setup = "hybrid_intraday"
+        if setup_scores and max(setup_scores.values()) >= 0.05:
+            dominant_setup = max(setup_scores, key=setup_scores.get)
+        direction = "neutral"
+        if intraday_score >= self._day_trade_intraday_score_threshold and long_score >= self._day_trade_ensemble_threshold:
+            direction = "buy"
+        elif intraday_score <= -self._day_trade_intraday_score_threshold and short_score >= self._day_trade_ensemble_threshold:
+            direction = "sell"
+
+        confidence = self._clamp(
+            max(abs(ensemble_net), min(abs(trend_score), 1.0) * 0.85, abs(legacy_score) / 2.2),
+            0.0,
+            0.99,
+        )
+        confidence = self._clamp(confidence * (1.04 if trade_window_active else 0.92), 0.0, 0.99)
+
+        base_stop_pct = self._clamp(atr_pct * 100.0 * 0.65, 0.35, 1.8)
+        if dominant_setup == "liquidity_sweep_reversal":
+            if direction == "buy":
+                sweep_span_pct = abs((close_5m - flow_short["low"]) / max(close_5m, 0.01)) * 100.0
+            elif direction == "sell":
+                sweep_span_pct = abs((flow_short["high"] - close_5m) / max(close_5m, 0.01)) * 100.0
+            else:
+                sweep_span_pct = 0.0
+            base_stop_pct = self._clamp(max(0.30, sweep_span_pct * 1.15), 0.30, 1.40)
+        elif dominant_setup == "vwap_pullback_continuation":
+            base_stop_pct = self._clamp(base_stop_pct * 0.85, 0.30, 1.45)
+        elif dominant_setup == "opening_range_momentum":
+            base_stop_pct = self._clamp(base_stop_pct * 0.95, 0.35, 1.60)
+        reward_multiple = 2.2 if regime in {"trend_up", "trend_down"} else 1.7
+        take_profit_pct = self._clamp(base_stop_pct * reward_multiple, max(base_stop_pct * 1.4, 0.70), 4.50)
+
+        note_parts: List[str] = [f"{regime.replace('_', ' ')}"]
+        if dominant_setup:
+            note_parts.append(dominant_setup.replace("_", " "))
+        if opening_range_complete and (orb_retest_long or orb_retest_short):
+            note_parts.append("opening range retest")
+        if vwap_pullback_long or vwap_pullback_short:
+            note_parts.append("VWAP reclaim")
+        if sweep_long or sweep_short:
+            note_parts.append("liquidity sweep")
+        if abs(flow_short["ofi"]) >= 0.05:
+            note_parts.append(f"OFI {flow_short['ofi']:+.2f}")
+        if depth_available and abs(book_pressure) >= 0.08:
+            note_parts.append(f"book {book_pressure:+.2f}")
+        if volume_spike >= 1.35:
+            note_parts.append(f"RVOL {volume_spike:.1f}x")
+        if news_boost >= self._day_trade_news_boost_threshold:
+            note_parts.append("official/news catalyst")
+        if not trade_window_active:
+            note_parts.append("outside prime trade window")
+
+        return {
+            "score": round(intraday_score, 4),
+            "direction": direction,
+            "confidence": round(confidence, 4),
+            "regime": regime,
+            "setup": dominant_setup,
+            "ensemble_long": round(long_score, 4),
+            "ensemble_short": round(short_score, 4),
+            "trend_score": round(trend_score, 4),
+            "order_flow_imbalance": round(flow_short["ofi"], 4),
+            "delta_slope": round(flow_medium["delta_norm"], 4),
+            "book_imbalance": round(depth_book_imbalance, 4),
+            "top_book_imbalance": round(top_book_imbalance, 4),
+            "book_pressure": round(book_pressure, 4),
+            "microprice_bias": round(microprice_bias, 4),
+            "depth_available": depth_available,
+            "session_vwap": round(session_vwap, 4),
+            "vwap_bias": round(vwap_bias, 4),
+            "vwap_slope": round(vwap_slope, 4),
+            "volume_spike": round(volume_spike, 3),
+            "ret_1m": round(ret_1m, 5),
+            "ret_5m": round(ret_5m, 5),
+            "ret_15m": round(ret_15m, 5),
+            "range_position": round(range_pos, 4),
+            "tick_count": int(bar_5m.get("tick_count", 0) or 0),
+            "news_boost": round(news_boost, 4),
+            "opening_range_high": round(opening_high, 4),
+            "opening_range_low": round(opening_low, 4),
+            "trade_window_active": trade_window_active,
+            "session_age_minutes": round(session_age_minutes, 1),
+            "minutes_to_close": round(minutes_to_close, 1),
+            "risk_adjustments": {
+                "stop_loss_pct": round(base_stop_pct, 2),
+                "take_profit_pct": round(take_profit_pct, 2),
+                "trailing_stop_pct": round(self._day_trade_trail_stop_pct * 100.0, 2),
+                "entry_note": " | ".join(note_parts),
+            },
+            "note": " | ".join(note_parts),
+        }
+
+    def _apply_day_trading_overlay(self, symbol: str, latest_row, scored: Dict[str, float]) -> None:
+        overlay = self._compute_intraday_overlay(symbol, latest_row)
+        if not overlay:
+            return
+
+        base_score = float(scored.get("final_score", 0.0) or 0.0)
+        base_direction = str(scored.get("direction", "neutral") or "neutral")
+        overlay_direction = str(overlay.get("direction", "neutral") or "neutral")
+        overlay_confidence = float(overlay.get("confidence", 0.0) or 0.0)
+        combined_score = (
+            base_score * (1.0 - self._day_trade_intraday_weight)
+            + float(overlay.get("score", 0.0)) * self._day_trade_intraday_weight
+        )
+        if overlay_direction != "neutral":
+            should_override = (
+                base_direction == overlay_direction
+                or base_direction == "neutral"
+                or abs(base_score) < 0.18
+                or overlay_confidence >= 0.58
+                or float(overlay.get("news_boost", 0.0) or 0.0) >= self._day_trade_news_boost_threshold
+            )
+            if should_override:
+                scored["direction"] = overlay_direction
+                scored["confidence"] = round(max(float(scored.get("confidence", 0.0) or 0.0), overlay_confidence), 4)
+                scored["conviction_score"] = round(
+                    min(10.0, max(float(scored.get("conviction_score", 0.0) or 0.0), overlay_confidence * 10.0)),
+                    1,
+                )
+        elif str(scored.get("direction", "neutral")) == "neutral" and abs(combined_score) >= (
+            self._day_trade_intraday_score_threshold * 0.75
+        ):
+            scored["direction"] = "buy" if combined_score > 0 else "sell"
+            scored["confidence"] = round(max(float(scored.get("confidence", 0.0) or 0.0), overlay_confidence * 0.85), 4)
+            scored["conviction_score"] = round(min(10.0, float(scored["confidence"]) * 10.0), 1)
+
+        scored["final_score"] = round(combined_score, 4)
+        scored["intraday_overlay"] = overlay
+
+    def _build_crypto_intraday_signal(self, symbol: str) -> Optional[Dict]:
+        try:
+            from core.realtime_engine import DEPTH_BUFFER, PRICE_BUFFER
+        except Exception:
+            return None
+
+        latest_tick = PRICE_BUFFER.latest(symbol)
+        if latest_tick is None or float(getattr(latest_tick, "price", 0.0) or 0.0) <= 0:
+            return None
+
+        tick_age_seconds = max(0.0, (datetime.now(timezone.utc) - latest_tick.timestamp).total_seconds())
+        if tick_age_seconds > self._crypto_signal_stale_seconds:
+            return None
+
+        depth_snapshot = DEPTH_BUFFER.latest(symbol) or {}
+        overlay = self._compute_intraday_overlay(symbol, latest_row=None)
+        if not overlay:
+            best_bid = float(depth_snapshot.get("best_bid", 0.0) or getattr(latest_tick, "bid", 0.0) or 0.0)
+            best_ask = float(depth_snapshot.get("best_ask", 0.0) or getattr(latest_tick, "ask", 0.0) or 0.0)
+            bid_qty = float(depth_snapshot.get("best_bid_qty", 0.0) or 0.0)
+            ask_qty = float(depth_snapshot.get("best_ask_qty", 0.0) or 0.0)
+            if best_bid <= 0 or best_ask <= 0:
+                return None
+            book_imbalance = (bid_qty - ask_qty) / max(bid_qty + ask_qty, 1e-6)
+            spread_pct = ((best_ask - best_bid) / ((best_bid + best_ask) / 2.0)) * 100.0
+            confidence = self._clamp(
+                0.22 + min(abs(book_imbalance) * 1.85, 0.42) + max(0.0, (0.08 - spread_pct)) * 2.0,
+                0.18,
+                0.84,
+            )
+            direction = "buy" if book_imbalance >= 0.04 else "sell" if book_imbalance <= -0.04 else "neutral"
+            overlay = {
+                "direction": direction,
+                "confidence": round(confidence, 4),
+                "setup": "depth_imbalance_breakout" if direction != "neutral" else "quote_balance_watch",
+                "book_pressure": round(book_imbalance, 4),
+                "book_imbalance": round(book_imbalance, 4),
+                "trend_score": round(book_imbalance * 0.75, 4),
+                "volume_spike": 1.0,
+                "score": round(book_imbalance * 1.9, 4),
+                "news_boost": 0.0,
+                "order_flow_imbalance": round(book_imbalance * 0.85, 4),
+                "vwap_bias": 0.0,
+                "ret_5m": 0.0,
+                "trade_window_active": True,
+                "risk_adjustments": {
+                    "stop_loss_pct": 0.7,
+                    "take_profit_pct": 1.5,
+                    "trailing_stop_pct": round(self._day_trade_trail_stop_pct * 100.0, 2),
+                },
+                "note": "Depth snapshot fallback",
+            }
+
+        best_bid = float(depth_snapshot.get("best_bid", 0.0) or overlay.get("best_bid", 0.0) or 0.0)
+        best_ask = float(depth_snapshot.get("best_ask", 0.0) or overlay.get("best_ask", 0.0) or 0.0)
+        depth_updated_at = depth_snapshot.get("updated_at")
+        depth_age_seconds = None
+        if depth_updated_at:
+            try:
+                depth_age_seconds = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - datetime.fromisoformat(str(depth_updated_at))).total_seconds(),
+                )
+            except Exception:
+                depth_age_seconds = None
+
+        direction = str(overlay.get("direction", "neutral") or "neutral")
+        setup = str(overlay.get("setup", "hybrid_intraday") or "hybrid_intraday")
+        book_pressure = float(overlay.get("book_pressure", 0.0) or 0.0)
+        book_imbalance = float(overlay.get("book_imbalance", 0.0) or 0.0)
+        trend_score = float(overlay.get("trend_score", 0.0) or 0.0)
+        volume_spike = float(overlay.get("volume_spike", 1.0) or 1.0)
+        score_value = float(overlay.get("score", 0.0) or 0.0)
+
+        trend_factor = self._clamp((trend_score * 0.75) + (book_pressure * 0.20), -1.0, 1.0)
+        momentum_factor = self._clamp(score_value / 1.8, -1.0, 1.0)
+        mean_revert_factor = 0.0
+        if setup == "liquidity_sweep_reversal":
+            mean_revert_factor = 0.70 if direction == "buy" else (-0.70 if direction == "sell" else 0.0)
+        volume_factor = self._clamp(((volume_spike - 1.0) / 1.75) + (abs(book_imbalance) * 0.20), -1.0, 1.0)
+        sentiment_factor = self._clamp(float(overlay.get("news_boost", 0.0) or 0.0) * 0.35, -1.0, 1.0)
+        orderflow_factor = self._clamp(
+            (float(overlay.get("order_flow_imbalance", 0.0) or 0.0) * 1.25) + (book_pressure * 0.35),
+            -1.0,
+            1.0,
+        )
+
+        factor_scores = {
+            "trend": round(trend_factor, 4),
+            "momentum": round(momentum_factor, 4),
+            "mean_revert": round(mean_revert_factor, 4),
+            "volume": round(volume_factor, 4),
+            "sentiment": round(sentiment_factor, 4),
+            "earnings_propagation": 0.0,
+            "close_reversal": round(orderflow_factor * 0.35, 4),
+        }
+        factor_weights = {
+            "trend": 0.28,
+            "momentum": 0.24,
+            "mean_revert": 0.16,
+            "volume": 0.14,
+            "sentiment": 0.08,
+            "earnings_propagation": 0.0,
+            "close_reversal": 0.10,
+        }
+
+        stop_loss_pct = float(overlay.get("risk_adjustments", {}).get("stop_loss_pct", 0.9) or 0.9)
+        take_profit_pct = float(overlay.get("risk_adjustments", {}).get("take_profit_pct", 1.8) or 1.8)
+        trailing_stop_pct = float(
+            overlay.get("risk_adjustments", {}).get("trailing_stop_pct", self._day_trade_trail_stop_pct * 100.0)
+            or (self._day_trade_trail_stop_pct * 100.0)
+        )
+        risk_reward_ratio = round(take_profit_pct / max(stop_loss_pct, 0.05), 3)
+
+        confidence = self._clamp(float(overlay.get("confidence", 0.0) or 0.0), 0.0, 0.99)
+        conviction_score = round(
+            min(10.0, max(confidence * 10.0, abs(score_value) * 4.2, abs(book_pressure) * 5.0)),
+            1,
+        )
+        model_agreement = round(
+            self._clamp(
+                (abs(trend_factor) * 0.35)
+                + (abs(orderflow_factor) * 0.35)
+                + (min(abs(score_value), 2.0) / 2.0 * 0.30),
+                0.0,
+                1.0,
+            ),
+            4,
+        )
+
+        regime = "normal"
+        regime_multiplier = 0.95
+        if volume_spike >= 2.6 or abs(float(overlay.get("ret_5m", 0.0) or 0.0)) >= 0.015:
+            regime = "stressed"
+            regime_multiplier = 0.70
+        elif volume_spike <= 0.85 and abs(float(overlay.get("ret_5m", 0.0) or 0.0)) <= 0.0025:
+            regime = "calm"
+            regime_multiplier = 1.05
+
+        driver_direction = "bullish" if direction == "buy" else ("bearish" if direction == "sell" else "mixed")
+        top_drivers = [
+            {"feature": "Order Book Pressure", "impact": round(book_pressure, 4), "direction": driver_direction},
+            {"feature": "Session VWAP Bias", "impact": round(float(overlay.get("vwap_bias", 0.0) or 0.0), 4), "direction": driver_direction},
+            {"feature": "Relative Volume", "impact": round(volume_factor, 4), "direction": "bullish" if volume_factor >= 0 else "bearish"},
+        ]
+        if setup == "liquidity_sweep_reversal":
+            top_drivers.append({"feature": "Liquidity Sweep", "impact": round(mean_revert_factor, 4), "direction": driver_direction})
+
+        signal = {
+            "symbol": symbol,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "signal": direction,
+            "confidence": round(confidence, 4),
+            "conviction_score": conviction_score,
+            "ensemble_score": round(score_value, 4),
+            "regime": regime,
+            "regime_multiplier": regime_multiplier,
+            "factor_scores": factor_scores,
+            "factor_weights": factor_weights,
+            "model_agreement": model_agreement,
+            "model_breakdown": factor_scores,
+            "top_drivers": top_drivers,
+            "waterfall_data": [],
+            "macro_warnings": [],
+            "risk_parameters": {
+                "stop_loss_pct": round(stop_loss_pct, 2),
+                "take_profit_pct": round(take_profit_pct, 2),
+                "trailing_stop_pct": round(trailing_stop_pct, 2),
+                "risk_reward_ratio": risk_reward_ratio,
+                "entry_note": str(overlay.get("note", "") or ""),
+            },
+            "intraday_overlay": {
+                **overlay,
+                "market": "CRYPTO",
+                "best_bid": round(best_bid, 8) if best_bid > 0 else None,
+                "best_ask": round(best_ask, 8) if best_ask > 0 else None,
+                "spread_pct": round((((best_ask - best_bid) / ((best_bid + best_ask) / 2.0)) * 100.0), 5)
+                if best_bid > 0 and best_ask > 0
+                else None,
+                "tick_age_seconds": round(tick_age_seconds, 2),
+                "depth_age_seconds": round(depth_age_seconds, 2) if depth_age_seconds is not None else None,
+                "signal_age_seconds": round(max(tick_age_seconds, depth_age_seconds or 0.0), 2),
+            },
+            "signal_style": "crypto_depth_intraday",
+            "xgb_alignment": None,
+        }
+        return self._decorate_signal(symbol, signal, lane_override="crypto")
+
+    def _refresh_crypto_signals(self, latest_feature_rows: Optional[Dict[str, pd.Series]] = None) -> int:
+        if not (self._crypto_depth_enabled and self._crypto_symbols):
+            return 0
+
+        broker = self._components.get("broker")
+        held_symbols = {
+            str(getattr(position, "symbol", "") or "")
+            for position in getattr(broker, "positions", {}).values()
+            if getattr(position, "quantity", 0) > 0
+        } if broker else set()
+        latest_feature_rows = latest_feature_rows or {}
+        updated = 0
+
+        for symbol in self._crypto_symbols:
+            try:
+                signal = self._build_crypto_intraday_signal(symbol)
+            except Exception as exc:
+                logger.warning(f"Crypto signal build failed for {symbol}: {exc}")
+                continue
+            if signal is None:
+                if symbol not in held_symbols and symbol not in latest_feature_rows:
+                    self._signal_store.pop(symbol, None)
+                continue
+            self._signal_store[symbol] = signal
+            updated += 1
+
+        return updated
+
+    def _get_portfolio_correlation_snapshot(self, symbol: str, broker) -> Dict[str, float]:
+        import pandas as pd
+
+        base = self._get_recent_return_series(symbol, self._auto_trade_corr_lookback_days)
+        if base is None:
+            return {"avg_abs_corr": 0.0, "max_abs_corr": 0.0, "sample_size": 0}
+
+        correlations = []
+        seen_symbols = set()
+        for _, position, held_symbol, _, _ in self._iter_open_positions(broker):
+            if held_symbol == symbol or held_symbol in seen_symbols:
+                continue
+            seen_symbols.add(held_symbol)
+            peer = self._get_recent_return_series(held_symbol, self._auto_trade_corr_lookback_days)
+            if peer is None:
+                continue
+            aligned = pd.concat([base, peer], axis=1, join="inner").dropna()
+            if len(aligned) < 15:
+                continue
+            corr = aligned.iloc[:, 0].corr(aligned.iloc[:, 1])
+            if pd.notna(corr):
+                correlations.append(abs(float(corr)))
+
+        if not correlations:
+            return {"avg_abs_corr": 0.0, "max_abs_corr": 0.0, "sample_size": 0}
+
+        return {
+            "avg_abs_corr": round(sum(correlations) / len(correlations), 4),
+            "max_abs_corr": round(max(correlations), 4),
+            "sample_size": len(correlations),
+        }
+
+    def _get_signal_score(self, signal: dict) -> float:
+        intraday = signal.get("intraday_overlay", {}) if isinstance(signal, dict) else {}
+        intraday_bonus = 0.0
+        if isinstance(intraday, dict) and intraday:
+            intraday_bonus = float(intraday.get("score", 0.0)) * 3.0 + float(intraday.get("confidence", 0.0))
+        construction = signal.get("portfolio_construction", {}) if isinstance(signal, dict) else {}
+        if isinstance(construction, dict) and construction:
+            return round(
+                float(construction.get("portfolio_score", 0.0))
+                + float(construction.get("target_position_pct", 0.0)) * 100.0,
+                4,
+            ) + intraday_bonus
+        meta = signal.get("meta_decision", {}) if isinstance(signal, dict) else {}
+        if isinstance(meta, dict) and meta:
+            return round(
+                float(meta.get("rank_score", 0.0)) * 10.0
+                + float(meta.get("take_probability", 0.0)) * 2.0,
+                4,
+            ) + intraday_bonus
+        conviction = float(signal.get("conviction_score", 0.0))
+        regime_multiplier = float(signal.get("regime_multiplier", 1.0))
+        model_agreement = float(signal.get("model_agreement", 0.0))
+        factor_scores = signal.get("factor_scores", {}) or {}
+        event_edge = abs(float(factor_scores.get("earnings_propagation", 0.0))) + abs(
+            float(factor_scores.get("close_reversal", 0.0))
+        )
+        xgb_alignment = signal.get("xgb_alignment")
+        alignment_bonus = 0.4 if xgb_alignment == "confirmed" else 0.0
+        return round(
+            (conviction * regime_multiplier) + (event_edge * 2.5) + model_agreement + alignment_bonus + intraday_bonus,
+            4,
+        )
+
+    def _record_execution_event(
+        self,
+        symbol: str,
+        action: str,
+        status: str,
+        reason: str,
+        signal: Optional[Dict] = None,
+        position_key: Optional[str] = None,
+        score: Optional[float] = None,
+        conviction: Optional[float] = None,
+        sector: Optional[str] = None,
+        details: Optional[Dict] = None,
+    ):
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "action": action,
+            "status": status,
+            "reason": reason,
+        }
+        resolved_signal = signal if isinstance(signal, dict) else {}
+        if not resolved_signal:
+            resolved_signal = self._signal_store.get(symbol, {}) if isinstance(self._signal_store.get(symbol), dict) else {}
+        if not resolved_signal and position_key and position_key in self._position_plans:
+            signal = {
+                "lane": self._position_plans[position_key].get("lane"),
+                "setup_id": self._position_plans[position_key].get("setup_id"),
+                "market": self._position_plans[position_key].get("market"),
+                "signal_style": self._position_plans[position_key].get("signal_style"),
+                "intraday_overlay": {
+                    "setup": self._position_plans[position_key].get("setup_id"),
+                    "regime": self._position_plans[position_key].get("entry_regime"),
+                },
+            }
+            resolved_signal = signal
+        lane_meta = self._signal_lane_meta(symbol, resolved_signal)
+        event.update(
+            {
+                "lane": lane_meta.get("lane"),
+                "lane_label": lane_meta.get("lane_label"),
+                "market": lane_meta.get("market"),
+                "setup_id": lane_meta.get("setup_id"),
+                "time_bucket": lane_meta.get("time_bucket"),
+                "position_key": position_key or self._position_key(symbol, lane_meta.get("lane")),
+            }
+        )
+        if score is not None:
+            event["score"] = round(float(score), 4)
+        if conviction is not None:
+            event["conviction"] = round(float(conviction), 2)
+        if sector:
+            event["sector"] = sector
+        if isinstance(details, dict):
+            for key, value in details.items():
+                if value in (None, "", [], {}):
+                    continue
+                event[key] = value
+        self._execution_trace.append(event)
+        if len(self._execution_trace) > self._execution_trace_limit:
+            del self._execution_trace[: len(self._execution_trace) - self._execution_trace_limit]
+
+    def _broker_result_details(self, result: Optional[Dict]) -> Dict:
+        if not isinstance(result, dict):
+            return {}
+        payload: Dict[str, object] = {
+            "broker_status": result.get("status"),
+        }
+        trade = result.get("trade") if isinstance(result.get("trade"), dict) else {}
+        if trade:
+            payload.update(
+                {
+                    "filled_quantity": trade.get("quantity"),
+                    "requested_quantity": trade.get("requested_quantity", trade.get("quantity")),
+                    "fill_price": trade.get("fill_price"),
+                    "slippage_pct": trade.get("slippage_pct"),
+                    "fill_ratio": trade.get("fill_ratio"),
+                    "partial_fill": trade.get("partial_fill"),
+                    "simulated_latency_ms": trade.get("simulated_latency_ms"),
+                    "broker_market": trade.get("market"),
+                }
+            )
+        shadow = result.get("shadow") if isinstance(result.get("shadow"), dict) else {}
+        if shadow:
+            payload["shadow_status"] = shadow.get("status")
+            payload["shadow_reason"] = shadow.get("reason")
+            payload["shadow_broker"] = shadow.get("broker")
+        return {k: v for k, v in payload.items() if v not in (None, "", [], {})}
+
+    def _capture_execution_reconciliation(
+        self,
+        symbol: str,
+        action: str,
+        signal: Optional[Dict],
+        result: Optional[Dict],
+        *,
+        position_key: Optional[str] = None,
+    ) -> None:
+        details = self._broker_result_details(result)
+        if not details:
+            return
+        resolved_signal = signal if isinstance(signal, dict) else {}
+        lane_meta = self._signal_lane_meta(symbol, resolved_signal)
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "action": action,
+            "position_key": position_key or self._position_key(symbol, lane_meta.get("lane")),
+            "lane": lane_meta.get("lane"),
+            **details,
+        }
+        self._execution_reconciliation.append(row)
+        if len(self._execution_reconciliation) > self._execution_trace_limit:
+            del self._execution_reconciliation[: len(self._execution_reconciliation) - self._execution_trace_limit]
+
+    def _persist_feature_store(
+        self,
+        feature_matrices: Dict[str, object],
+        force: bool = False,
+        updated_symbols: Optional[List[str]] = None,
+    ):
+        if not self._feature_store_enabled:
+            return
+        now = time.time()
+        if not force and (now - self._last_feature_store_save_ts) < self._feature_store_save_seconds:
+            return
+
+        self._feature_store_dir.mkdir(parents=True, exist_ok=True)
+        saved = 0
+        candidates = updated_symbols if updated_symbols else list(feature_matrices.keys())
+        for symbol in candidates:
+            frame = feature_matrices.get(symbol)
+            if frame is None or getattr(frame, "empty", True):
+                continue
+            if not isinstance(frame, pd.DataFrame):
+                continue
+            try:
+                path = self._feature_store_dir / f"{symbol}.parquet"
+                frame.sort_index().to_parquet(path)
+                saved += 1
+            except Exception as exc:
+                logger.warning(f"Feature store save failed for {symbol}: {exc}")
+
+        if saved:
+            self._last_feature_store_save_ts = now
+            logger.info(f"Feature store updated: {saved} symbols saved to {self._feature_store_dir}")
+
+    def _maybe_auto_retrain(self):
+        if not self._auto_retrain_on_start:
+            return
+
+        retrain_script = Path(__file__).resolve().parent / "retrain_institutional_models.py"
+        if not retrain_script.exists():
+            logger.warning("Auto retrain skipped: retrain_institutional_models.py not found")
+            return
+
+        if self._auto_retrain_only_if_new_data:
+            feature_files = sorted(self._feature_store_dir.glob("*.parquet")) if self._feature_store_dir.exists() else []
+            if not feature_files:
+                logger.info("Auto retrain skipped: no feature-store parquet files found yet")
+                return
+
+            checkpoint_dir = Path(__file__).resolve().parent / "models" / "checkpoints"
+            checkpoint_refs = [
+                checkpoint_dir / "xgboost_retrain_report.json",
+                checkpoint_dir / "meta_walkforward_report.json",
+                checkpoint_dir / "xgboost_model.json",
+                checkpoint_dir / "meta_take_model.joblib",
+            ]
+            existing_refs = [p for p in checkpoint_refs if p.exists()]
+            if existing_refs:
+                last_retrain_ts = max(p.stat().st_mtime for p in existing_refs)
+                updated_files = [p for p in feature_files if p.stat().st_mtime > last_retrain_ts]
+                if len(updated_files) < self._auto_retrain_min_updated_files:
+                    logger.info(
+                        f"Auto retrain skipped: only {len(updated_files)} feature files newer than last retrain "
+                        f"(need {self._auto_retrain_min_updated_files})"
+                    )
+                    return
+                logger.info(
+                    f"Auto retrain triggered: {len(updated_files)} feature files newer than last retrain"
+                )
+            else:
+                logger.info("Auto retrain triggered: no prior retrain checkpoints found")
+
+        logger.info("Auto retrain starting before live system boot")
+        env = os.environ.copy()
+        env["RUN_XGB_OPTUNA"] = "1" if self._auto_retrain_use_optuna else "0"
+        try:
+            subprocess.run(
+                [sys.executable, str(retrain_script)],
+                cwd=str(retrain_script.parent),
+                env=env,
+                check=True,
+                timeout=self._auto_retrain_timeout_seconds,
+            )
+            logger.info("Auto retrain completed successfully")
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                f"Auto retrain timed out after {self._auto_retrain_timeout_seconds}s; continuing startup"
+            )
+        except subprocess.CalledProcessError as exc:
+            logger.warning(f"Auto retrain failed with exit code {exc.returncode}; continuing startup")
+        except Exception as exc:
+            logger.warning(f"Auto retrain failed unexpectedly: {exc}; continuing startup")
+
+    def _refresh_portfolio_overlay(self) -> Dict:
+        target = self._components.get("portfolio_overlay")
+        if not isinstance(target, dict):
+            target = {}
+            self._components["portfolio_overlay"] = target
+        broker = self._components.get("broker")
+        lane_allocator = self._refresh_lane_allocator(broker)
+        governor = self._refresh_governor_state(broker)
+
+        if not self._portfolio_optimizer_enabled:
+            target.clear()
+            for signal in self._signal_store.values():
+                if isinstance(signal, dict):
+                    signal["portfolio_construction"] = {}
+                    lane = str(signal.get("lane") or "normal").lower()
+                    signal["lane_allocator"] = lane_allocator.get(lane, {})
+                    signal["governor_state"] = governor.get(lane, {})
+            return {}
+
+        price_recent = (
+            self._components.get("live_price_data", {}).get("price_daily_recent")
+            or self._components.get("price_data", {}).get("price_daily_recent", {})
+        )
+        if not broker or not price_recent:
+            return {}
+
+        from core.portfolio_construction import InstitutionalPortfolioConstructor
+
+        constructor = InstitutionalPortfolioConstructor(
+            lookback_days=self._auto_trade_corr_lookback_days,
+            gross_target_pct=self._portfolio_optimizer_gross_target_pct,
+            max_names=self._portfolio_optimizer_max_names,
+            min_weight=self._portfolio_optimizer_min_weight,
+            max_weight=min(self._portfolio_optimizer_max_weight, self._auto_trade_max_position_pct),
+            covariance_shrinkage=self._portfolio_optimizer_covariance_shrinkage,
+            factor_penalty=self._portfolio_optimizer_factor_penalty,
+            beta_penalty=self._portfolio_optimizer_beta_penalty,
+            target_beta=self._portfolio_optimizer_target_beta,
+        )
+        overlay = constructor.construct(self._signal_store, broker, price_recent)
+        target.clear()
+        if isinstance(overlay, dict):
+            target.update(overlay)
+        target["lane_allocator"] = lane_allocator
+        target["governor"] = governor
+
+        allocations = target.get("allocations", {})
+        for symbol, signal in self._signal_store.items():
+            if not isinstance(signal, dict):
+                continue
+            allocation = allocations.get(symbol, {})
+            signal["portfolio_construction"] = allocation
+            signal["portfolio_overlay_summary"] = target.get("summary", {})
+            signal["target_weight"] = allocation.get("target_weight", 0.0)
+            signal["target_position_pct"] = allocation.get("target_position_pct", 0.0)
+            signal["residual_alpha_score"] = allocation.get("residual_alpha_score", 0.0)
+            signal["beta_exposure"] = allocation.get("beta", 0.0)
+            signal["portfolio_score"] = allocation.get("portfolio_score", 0.0)
+            lane = str(signal.get("lane") or "normal").lower()
+            signal["lane_allocator"] = lane_allocator.get(lane, {})
+            signal["governor_state"] = governor.get(lane, {})
+            if isinstance(signal.get("normal_lane_signal"), dict):
+                signal["normal_lane_signal"]["portfolio_construction"] = allocation
+                signal["normal_lane_signal"]["portfolio_overlay_summary"] = target.get("summary", {})
+                signal["normal_lane_signal"]["target_weight"] = allocation.get("target_weight", 0.0)
+                signal["normal_lane_signal"]["target_position_pct"] = allocation.get("target_position_pct", 0.0)
+                signal["normal_lane_signal"]["residual_alpha_score"] = allocation.get("residual_alpha_score", 0.0)
+                signal["normal_lane_signal"]["beta_exposure"] = allocation.get("beta", 0.0)
+                signal["normal_lane_signal"]["portfolio_score"] = allocation.get("portfolio_score", 0.0)
+                signal["normal_lane_signal"]["lane_allocator"] = lane_allocator.get("normal", {})
+                signal["normal_lane_signal"]["governor_state"] = governor.get("normal", {})
+        return dict(target)
+
+    def _refresh_meta_model_status(self) -> Dict:
+        import json
+
+        from models.institutional_retraining import META_REPORT_PATH, TrainedMetaModel
+
+        status = {
+            "active": False,
+            "source": "heuristic_only",
+        }
+
+        if META_REPORT_PATH.exists():
+            try:
+                report = json.loads(META_REPORT_PATH.read_text(encoding="utf-8"))
+                walk_forward = report.get("walk_forward", {}) if isinstance(report, dict) else {}
+                summary = walk_forward.get("summary", {}) if isinstance(walk_forward, dict) else {}
+                status.update(
+                    {
+                        "rows": report.get("rows"),
+                        "positive_labels": report.get("positive_labels"),
+                        "feature_count": report.get("feature_count"),
+                        "walk_forward_status": walk_forward.get("status"),
+                        "mean_precision": summary.get("mean_precision"),
+                        "mean_recall": summary.get("mean_recall"),
+                        "mean_coverage_pct": summary.get("mean_coverage_pct"),
+                        "mean_taken_edge_pct": summary.get("mean_taken_edge_pct"),
+                        "mean_taken_drawdown_pct": summary.get("mean_taken_drawdown_pct"),
+                        "mean_taken_hit_rate_pct": summary.get("mean_taken_hit_rate_pct"),
+                        "deployment_rules": report.get("deployment_rules", {}),
+                    }
+                )
+            except Exception as exc:
+                status["note"] = f"meta report read failed: {exc}"
+
+        active_model = TrainedMetaModel.load()
+        if active_model is not None:
+            status["active"] = True
+            status["source"] = "trained_meta"
+            status["decision_threshold"] = active_model.decision_threshold
+            status["min_expected_edge_pct"] = active_model.min_expected_edge_pct
+            status["min_edge_ratio"] = active_model.min_edge_ratio
+
+        target = self._components.get("meta_model_status")
+        if not isinstance(target, dict):
+            target = {}
+            self._components["meta_model_status"] = target
+        target.clear()
+        target.update(status)
+        return dict(target)
+
+    def _refresh_learning_status(self) -> Dict:
+        import json
+
+        from models.institutional_retraining import META_REPORT_PATH, XGB_REPORT_PATH
+
+        feature_files = sorted(self._feature_store_dir.glob("*.parquet")) if self._feature_store_dir.exists() else []
+        status = {
+            "enabled": self._model_learning_enabled,
+            "learning_refresh_seconds": self._model_learning_refresh_seconds,
+            "feature_store_files": len(feature_files),
+            "feature_store_path": str(self._feature_store_dir),
+            "retrain_in_progress": self._model_learning_in_progress,
+            "last_check_at": datetime.fromtimestamp(self._last_model_learning_ts, tz=timezone.utc).isoformat()
+            if self._last_model_learning_ts
+            else None,
+        }
+
+        if XGB_REPORT_PATH.exists():
+            try:
+                xgb_report = json.loads(XGB_REPORT_PATH.read_text(encoding="utf-8"))
+                status["xgb_last_retrain_at"] = datetime.fromtimestamp(XGB_REPORT_PATH.stat().st_mtime, tz=timezone.utc).isoformat()
+                status["xgb_validation_accuracy"] = xgb_report.get("validation_accuracy")
+                status["xgb_validation_rows"] = xgb_report.get("validation_rows")
+                status["xgb_features"] = xgb_report.get("n_features")
+            except Exception as exc:
+                status["xgb_error"] = str(exc)
+
+        if META_REPORT_PATH.exists():
+            try:
+                meta_report = json.loads(META_REPORT_PATH.read_text(encoding="utf-8"))
+                summary = ((meta_report.get("walk_forward") or {}).get("summary") or {})
+                status["meta_last_retrain_at"] = datetime.fromtimestamp(META_REPORT_PATH.stat().st_mtime, tz=timezone.utc).isoformat()
+                status["meta_precision"] = summary.get("mean_precision")
+                status["meta_coverage_pct"] = summary.get("mean_coverage_pct")
+                status["meta_edge_pct"] = summary.get("mean_taken_edge_pct")
+                status["meta_hit_rate_pct"] = summary.get("mean_taken_hit_rate_pct")
+            except Exception as exc:
+                status["meta_error"] = str(exc)
+
+        target = self._components.get("learning_status")
+        if not isinstance(target, dict):
+            target = {}
+            self._components["learning_status"] = target
+        target.clear()
+        target.update(status)
+        return dict(target)
+
+    def _maybe_periodic_retrain(self, feature_matrices: Dict[str, object]) -> None:
+        if not self._model_learning_enabled or self._model_learning_in_progress:
+            return
+        now = time.time()
+        if self._last_model_learning_ts and (now - self._last_model_learning_ts) < self._model_learning_refresh_seconds:
+            return
+        if not feature_matrices:
+            return
+
+        self._last_model_learning_ts = now
+        self._model_learning_in_progress = True
+        self._refresh_learning_status()
+
+        def _run_retrain(local_feature_matrices: Dict[str, object]):
+            try:
+                logger.info("Periodic model-learning retrain started")
+                report = self.retrain_institutional_models(
+                    feature_matrices=local_feature_matrices,
+                    run_optuna=self._auto_retrain_use_optuna,
+                )
+                logger.info("Periodic model-learning retrain completed")
+                target = self._components.get("learning_status")
+                if not isinstance(target, dict):
+                    target = {}
+                    self._components["learning_status"] = target
+                target["last_runtime_retrain_at"] = datetime.now(timezone.utc).isoformat()
+                target["last_runtime_report"] = report
+                self._runtime_refresh_models = True
+                self._refresh_meta_model_status()
+            except Exception as exc:
+                logger.warning(f"Periodic model-learning retrain failed: {exc}")
+                target = self._components.get("learning_status")
+                if not isinstance(target, dict):
+                    target = {}
+                    self._components["learning_status"] = target
+                target["last_runtime_error"] = str(exc)
+            finally:
+                self._model_learning_in_progress = False
+                self._refresh_learning_status()
+
+        threading.Thread(
+            target=_run_retrain,
+            args=(feature_matrices,),
+            daemon=True,
+            name="model-learning-retrain",
+        ).start()
+
+    def _row_backtest_score(self, row) -> float:
+        import math
+
+        def _f(name: str, default: float = 0.0) -> float:
+            val = row.get(name, default)
+            try:
+                fv = float(val)
+            except Exception:
+                return default
+            if math.isnan(fv):
+                return default
+            return fv
+
+        earnings = _f("earnings_propagation_signal")
+        reversal = _f("close_reversal_signal")
+        momentum = _f("momentum_composite")
+        trend = _f("trend_composite")
+        sentiment = _f("compound_score")
+        vol_penalty = abs(_f("vol_regime"))
+        score = (
+            (2.2 * earnings)
+            + (1.8 * reversal)
+            + (0.9 * momentum)
+            + (0.7 * trend)
+            + (0.4 * sentiment)
+            - (0.4 * vol_penalty)
+        )
+        return float(score)
+
+    def _simulate_overlay_backtest(
+        self,
+        feature_matrices: Dict[str, object],
+        lookback_days: int,
+        constrained: bool = True,
+    ) -> Dict:
+        import pandas as pd
+
+        from pipeline.universe import get_sector, is_leader_symbol
+
+        trade_cost_pct = self._execution_backtest_tx_cost_bps / 10_000.0
+        entry_score = self._execution_backtest_entry_score
+        exit_score = self._execution_backtest_exit_score
+        hold_days = self._execution_backtest_min_hold_days if constrained else 1
+        max_positions = self._auto_trade_max_open_positions if constrained else max(5, self._auto_trade_max_open_positions * 2)
+        max_sector_positions = self._auto_trade_max_sector_positions if constrained else max(8, self._auto_trade_max_sector_positions * 4)
+
+        symbol_frames = {}
+        latest_end = None
+        for symbol, frame in feature_matrices.items():
+            if frame is None or getattr(frame, "empty", True):
+                continue
+            if "close" not in frame.columns:
+                continue
+            ordered = frame.sort_index()
+            if ordered.empty:
+                continue
+            if latest_end is None or ordered.index[-1] > latest_end:
+                latest_end = ordered.index[-1]
+            symbol_frames[symbol] = ordered
+
+        if not symbol_frames or latest_end is None:
+            return {"error": "insufficient_feature_history"}
+
+        if len(symbol_frames) > self._execution_backtest_symbol_limit:
+            ranked_symbols = sorted(
+                symbol_frames.keys(),
+                key=lambda sym: len(symbol_frames[sym]),
+                reverse=True,
+            )[: self._execution_backtest_symbol_limit]
+            symbol_frames = {sym: symbol_frames[sym] for sym in ranked_symbols}
+
+        start_cutoff = latest_end - pd.Timedelta(days=lookback_days)
+        date_set = set()
+        for frame in symbol_frames.values():
+            date_set.update([idx for idx in frame.index if idx >= start_cutoff])
+        dates = sorted(date_set)
+        if len(dates) < 15:
+            return {"error": "not_enough_days"}
+
+        positions: Dict[str, int] = {}
+        returns = []
+        turnover = 0
+
+        for i in range(1, len(dates) - 1):
+            day = dates[i]
+            next_day = dates[i + 1]
+            candidates: List[Tuple[float, str]] = []
+            day_returns = []
+            sector_counts: Dict[str, int] = {}
+            exits = 0
+            entries = 0
+
+            for symbol in list(positions.keys()):
+                frame = symbol_frames.get(symbol)
+                if frame is None or day not in frame.index or next_day not in frame.index:
+                    continue
+                row = frame.loc[day]
+                score = self._row_backtest_score(row)
+                positions[symbol] += 1
+                if positions[symbol] >= hold_days and score < exit_score:
+                    del positions[symbol]
+                    exits += 1
+                    continue
+                sector = get_sector(symbol)
+                sector_counts[sector] = sector_counts.get(sector, 0) + 1
+                c0 = float(frame.loc[day]["close"])
+                c1 = float(frame.loc[next_day]["close"])
+                if c0 > 0:
+                    day_returns.append((c1 / c0) - 1.0)
+
+            for symbol, frame in symbol_frames.items():
+                if symbol in positions:
+                    continue
+                if day not in frame.index:
+                    continue
+                row = frame.loc[day]
+                score = self._row_backtest_score(row)
+                if score < entry_score:
+                    continue
+                candidates.append((score, symbol))
+
+            candidates.sort(key=lambda t: t[0], reverse=True)
+            for score, symbol in candidates:
+                if len(positions) >= max_positions:
+                    break
+                sector = get_sector(symbol)
+                if sector_counts.get(sector, 0) >= max_sector_positions:
+                    continue
+                positions[symbol] = 0
+                entries += 1
+                sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
+            turnover += entries + exits
+            gross = sum(day_returns) / len(day_returns) if day_returns else 0.0
+            tx_penalty = trade_cost_pct * max(0, entries + exits)
+            returns.append({"date": next_day, "ret": gross - tx_penalty})
+
+        if not returns:
+            return {"error": "no_returns"}
+
+        rets = pd.Series(
+            [item["ret"] for item in returns],
+            index=pd.DatetimeIndex([item["date"] for item in returns]),
+            dtype=float,
+        )
+        equity = (1.0 + rets).cumprod() * 100_000.0
+        from core.backtesting import PerformanceMetrics
+
+        metrics = PerformanceMetrics.full_report(rets, equity)
+        return {
+            "metrics": metrics,
+            "days": len(rets),
+            "avg_daily_turnover": round(turnover / max(len(rets), 1), 2),
+            "constrained": constrained,
+        }
+
+    def _maybe_refresh_execution_backtest(self, feature_matrices: Dict[str, object]):
+        if not self._execution_backtest_enabled:
+            return
+        now = time.time()
+        if self._execution_backtest_running:
+            return
+        if (now - self._last_execution_backtest_ts) < self._execution_backtest_interval_seconds:
+            return
+
+        self._execution_backtest_running = True
+        self._last_execution_backtest_ts = now
+
+        def _refresh():
+            try:
+                constrained = self._simulate_overlay_backtest(
+                    feature_matrices=feature_matrices,
+                    lookback_days=self._execution_backtest_lookback_days,
+                    constrained=True,
+                )
+                baseline = self._simulate_overlay_backtest(
+                    feature_matrices=feature_matrices,
+                    lookback_days=self._execution_backtest_lookback_days,
+                    constrained=False,
+                )
+                constrained_m = constrained.get("metrics", {}) if isinstance(constrained, dict) else {}
+                baseline_m = baseline.get("metrics", {}) if isinstance(baseline, dict) else {}
+                uplift = {
+                    "total_return_pct": round(
+                        float(constrained_m.get("total_return_pct", 0.0))
+                        - float(baseline_m.get("total_return_pct", 0.0)),
+                        2,
+                    ),
+                    "sharpe_ratio": round(
+                        float(constrained_m.get("sharpe_ratio", 0.0))
+                        - float(baseline_m.get("sharpe_ratio", 0.0)),
+                        3,
+                    ),
+                    "max_drawdown_pct": round(
+                        float(constrained_m.get("max_drawdown_pct", 0.0))
+                        - float(baseline_m.get("max_drawdown_pct", 0.0)),
+                        2,
+                    ),
+                }
+                payload = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "lookback_days": self._execution_backtest_lookback_days,
+                    "overlay": constrained,
+                    "baseline": baseline,
+                    "uplift": uplift,
+                }
+                target = self._components.get("execution_backtest")
+                if isinstance(target, dict):
+                    target.clear()
+                    target.update(payload)
+                else:
+                    self._components["execution_backtest"] = payload
+                logger.info(
+                    "Execution backtest refreshed: overlay return "
+                    f"{constrained_m.get('total_return_pct', 'n/a')}% vs baseline "
+                    f"{baseline_m.get('total_return_pct', 'n/a')}%"
+                )
+            except Exception as exc:
+                logger.warning(f"Execution backtest refresh failed: {exc}")
+            finally:
+                self._execution_backtest_running = False
+
+        threading.Thread(target=_refresh, daemon=True, name="execution-backtest-refresh").start()
+
+    def _get_position_age_seconds(self, position) -> float:
+        opened_at = getattr(position, "opened_at", None)
+        if opened_at is None:
+            return float(self._auto_trade_min_hold_seconds)
+        return max(0.0, (datetime.now(timezone.utc) - opened_at).total_seconds())
+
+    def _compute_position_size(
+        self,
+        signal: dict,
+        current_price: float,
+        broker,
+        corr_snapshot: Optional[Dict[str, float]] = None,
+    ) -> float:
+        lane = str(signal.get("lane") or "normal").lower()
+        lane_config = self._lane_config(lane)
+        risk = signal.get("risk_parameters", {}) or {}
+        meta = signal.get("meta_decision", {}) if isinstance(signal, dict) else {}
+        construction = signal.get("portfolio_construction", {}) if isinstance(signal, dict) else {}
+        lane_allocator = signal.get("lane_allocator", {}) if isinstance(signal.get("lane_allocator"), dict) else {}
+        governor_size_multiplier = self._safe_number(signal.get("governor_size_multiplier"), 1.0)
+        execution_size_multiplier = self._safe_number(signal.get("execution_size_multiplier"), 1.0)
+        suggested_pct = float(risk.get("suggested_position_size_pct", 0.0)) / 100.0
+        stop_loss_pct = float(risk.get("stop_loss_pct", 2.0)) / 100.0
+        portfolio_target_pct = float(construction.get("target_position_pct", 0.0) or 0.0)
+        if portfolio_target_pct > 0:
+            target_pct = portfolio_target_pct
+        else:
+            target_pct = max(lane_config.get("base_position_pct", self._auto_trade_base_position_pct), suggested_pct)
+        target_pct = min(target_pct, lane_config.get("max_position_pct", self._auto_trade_max_position_pct))
+        if portfolio_target_pct <= 0 and isinstance(meta, dict) and meta:
+            target_pct *= float(meta.get("size_multiplier", 1.0) or 1.0)
+        target_pct *= self._safe_number(lane_allocator.get("size_multiplier"), 1.0)
+        target_pct *= governor_size_multiplier
+        target_pct *= execution_size_multiplier
+        if corr_snapshot and corr_snapshot.get("sample_size", 0) > 0:
+            avg_corr = float(corr_snapshot.get("avg_abs_corr", 0.0))
+            if avg_corr > self._auto_trade_target_avg_correlation:
+                corr_span = max(0.01, 1.0 - self._auto_trade_target_avg_correlation)
+                excess = min(1.0, (avg_corr - self._auto_trade_target_avg_correlation) / corr_span)
+                corr_scale = max(self._auto_trade_correlation_size_floor, 1.0 - excess)
+                target_pct *= corr_scale
+        regime_value = signal.get("regime")
+        stressed = False
+        if isinstance(regime_value, dict):
+            stressed = str(regime_value.get("volatility", "")).lower() in {"stressed", "crisis"}
+        else:
+            stressed = str(regime_value or "").lower() in {"stressed", "crisis", "risk-off"}
+        if stressed:
+            target_pct *= self._auto_trade_stress_position_mult
+
+        max_position_value = broker.portfolio_value * target_pct
+        intraday = signal.get("intraday_overlay", {}) if isinstance(signal.get("intraday_overlay"), dict) else {}
+        trade_window_active = bool(intraday.get("trade_window_active", True))
+        risk_per_trade_pct = lane_config.get("risk_per_trade_pct", self._day_trade_risk_per_trade_pct if self._day_trading_mode else 0.01)
+        if lane in {"day", "crypto"} and not trade_window_active:
+            risk_per_trade_pct *= 0.75
+        risk_budget_value = broker.portfolio_value * risk_per_trade_pct
+        stop_risk_value = current_price * max(stop_loss_pct, 0.01)
+        risk_units = risk_budget_value / max(stop_risk_value, 0.01)
+        size_from_target = max_position_value / current_price
+        size_from_cash = max(broker.cash, 0.0) / current_price
+        lane_target_pct = self._safe_number(lane_allocator.get("target_capital_pct"), 0.0)
+        lane_current_pct = self._safe_number(lane_allocator.get("current_exposure_pct"), 0.0)
+        lane_headroom_value = broker.portfolio_value * max(0.0, (lane_target_pct * 1.05) - lane_current_pct)
+        size_from_lane_budget = (lane_headroom_value / current_price) if lane_headroom_value > 0 else 0.0
+        sizing_inputs = [size_from_target, risk_units, size_from_cash]
+        if lane_target_pct > 0:
+            sizing_inputs.append(size_from_lane_budget)
+        quantity = min(sizing_inputs)
+        if lane == "crypto":
+            if (quantity * current_price) < self._crypto_min_notional_usd:
+                return 0.0
+            if current_price >= 10_000:
+                step = 0.0001
+            elif current_price >= 1_000:
+                step = 0.001
+            elif current_price >= 100:
+                step = 0.01
+            elif current_price >= 1:
+                step = 0.1
+            else:
+                step = 1.0
+            quantity = math.floor(max(quantity, 0.0) / step) * step
+            return round(max(quantity, 0.0), 6)
+        return float(max(int(quantity), 0))
+
+    def _can_enter_position(self, symbol: str, lane: Optional[str] = None) -> bool:
+        lane_key = self._cooldown_key(symbol, lane)
+        lane_config = self._lane_config(str(lane or "normal").lower())
+        last_trade_ts = self._last_trade_timestamps.get(lane_key, 0.0)
+        return (time.time() - last_trade_ts) >= lane_config.get("cooldown_seconds", self._auto_trade_cooldown_seconds)
+
+    def _record_trade_timestamp(self, symbol: str, lane: Optional[str] = None):
+        self._last_trade_timestamps[self._cooldown_key(symbol, lane)] = time.time()
+
+    def _select_replacement_candidate(self, broker, lane: Optional[str] = None) -> Optional[Tuple[str, float]]:
+        weakest_position_key = None
+        weakest_score = None
+        target_lane = str(lane or "").lower()
+        for position_key, position, symbol, symbol_lane, plan in self._iter_open_positions(broker):
+            if target_lane and symbol_lane != target_lane:
+                continue
+            min_hold_seconds = int(plan.get("min_hold_seconds") or self._lane_config(symbol_lane).get("min_hold_seconds", self._auto_trade_min_hold_seconds))
+            if self._get_position_age_seconds(position) < min_hold_seconds:
+                continue
+            signal = self._get_lane_signal(symbol, symbol_lane)
+            score = self._get_signal_score(signal)
+            if signal.get("signal") != "buy":
+                score -= 2.0
+            if weakest_score is None or score < weakest_score:
+                weakest_position_key = position_key
+                weakest_score = score
+        if weakest_position_key is None or weakest_score is None:
+            return None
+        return weakest_position_key, weakest_score
+
+    def _close_position(
+        self,
+        symbol: str,
+        reason: str,
+        signal_source: str = "EventMultiFactor",
+        position_key: Optional[str] = None,
+    ) -> bool:
+        broker = self._components.get("broker")
+        if not broker:
+            return False
+
+        from core.paper_trading import Order, OrderSide
+        resolved_position_key = position_key
+        if not resolved_position_key or resolved_position_key not in getattr(broker, "positions", {}):
+            matches = [
+                key
+                for key, position, held_symbol, _, _ in self._iter_open_positions(broker)
+                if held_symbol == symbol
+            ]
+            if len(matches) != 1:
+                return False
+            resolved_position_key = matches[0]
+
+        existing = broker.positions.get(resolved_position_key)
+        if not existing or existing.quantity <= 0:
+            return False
+
+        current_price = self._get_latest_close(symbol)
+        if current_price is None:
+            return False
+
+        plan = self._position_plans.get(resolved_position_key, {})
+        lane = str(plan.get("lane") or "normal").lower()
+        signal = self._get_lane_signal(symbol, lane)
+        exit_signal = {
+            **(signal if isinstance(signal, dict) else {}),
+            "lane": plan.get("lane") or (signal.get("lane") if isinstance(signal, dict) else None),
+            "setup_id": plan.get("setup_id") or (signal.get("setup_id") if isinstance(signal, dict) else None),
+            "market": plan.get("market") or (signal.get("market") if isinstance(signal, dict) else None),
+            "signal_style": plan.get("signal_style") or (signal.get("signal_style") if isinstance(signal, dict) else None),
+            "intraday_overlay": {
+                **((signal.get("intraday_overlay", {}) if isinstance(signal, dict) else {}) or {}),
+                "setup": plan.get("setup_id") or ((signal.get("intraday_overlay", {}) if isinstance(signal, dict) else {}).get("setup")),
+                "regime": plan.get("entry_regime") or ((signal.get("intraday_overlay", {}) if isinstance(signal, dict) else {}).get("regime")),
+            },
+        }
+        lane_meta = self._signal_lane_meta(symbol, exit_signal, lane_override=plan.get("lane"))
+        order = Order(
+            symbol=symbol,
+            side=OrderSide.SELL,
+            quantity=existing.quantity,
+            position_key=resolved_position_key,
+            signal_source=signal_source,
+            metadata={
+                **self._build_order_metadata(symbol, exit_signal, action="sell", reason=reason),
+                "exit_reason": reason,
+                "entry_reason": plan.get("entry_reason"),
+                "entry_regime": plan.get("entry_regime"),
+                "entry_time_bucket": plan.get("entry_time_bucket"),
+                "scenario_label": lane_meta.get("lane_label"),
+                "signal_key": resolved_position_key,
+                "position_key": resolved_position_key,
+            },
+        )
+        result = broker.submit_order(order, current_price)
+        if result["status"] == "filled":
+            self._position_plans.pop(resolved_position_key, None)
+            self._record_trade_timestamp(symbol, lane)
+            self._capture_execution_reconciliation(symbol, "sell", exit_signal, result, position_key=resolved_position_key)
+            self._record_execution_event(
+                symbol,
+                "sell",
+                "filled",
+                reason,
+                signal=exit_signal,
+                position_key=resolved_position_key,
+                details=self._broker_result_details(result),
+            )
+            logger.info(f"AUTO-SELL: {symbol} x{existing.quantity} @ ${current_price:.2f} | {reason}")
+            return True
+        self._capture_execution_reconciliation(symbol, "sell", exit_signal, result, position_key=resolved_position_key)
+        self._record_execution_event(
+            symbol,
+            "sell",
+            "rejected",
+            result.get("reason", "broker_reject"),
+            signal=exit_signal,
+            position_key=resolved_position_key,
+            details=self._broker_result_details(result),
+        )
+        return False
+
+    def _manage_open_positions(self, broker, current_prices: Dict[str, float]) -> None:
+        for position_key, position, symbol, lane, plan in list(self._iter_open_positions(broker)):
+            current_price = current_prices.get(position_key) or current_prices.get(symbol)
+            if current_price is None:
+                continue
+
+            signal = self._get_lane_signal(symbol, lane)
+            if not isinstance(signal, dict):
+                signal = {}
+            meta = signal.get("meta_decision", {}) if isinstance(signal.get("meta_decision"), dict) else {}
+            construction = signal.get("portfolio_construction", {}) if isinstance(signal.get("portfolio_construction"), dict) else {}
+            intraday = signal.get("intraday_overlay", {}) if isinstance(signal.get("intraday_overlay"), dict) else {}
+            age_seconds = self._get_position_age_seconds(position)
+            lane_config = self._lane_config(lane)
+            stop_loss_pct = float(plan.get("stop_loss_pct", 2.0)) / 100.0
+            take_profit_pct = float(plan.get("take_profit_pct", stop_loss_pct * 2.5 * 100)) / 100.0
+            stop_price = position.avg_cost * (1 - stop_loss_pct)
+            take_profit_price = position.avg_cost * (1 + take_profit_pct)
+
+            if lane_config.get("force_exit_seconds", 0) > 0 and age_seconds >= lane_config.get("force_exit_seconds", 0):
+                self._close_position(symbol, "time exit", position_key=position_key)
+                continue
+            if current_price <= stop_price:
+                self._close_position(symbol, "stop loss hit", position_key=position_key)
+                continue
+            if current_price >= take_profit_price:
+                self._close_position(symbol, "take profit hit", position_key=position_key)
+                continue
+
+            if lane == "day":
+                peak_price = max(float(plan.get("peak_price", position.avg_cost) or position.avg_cost), current_price)
+                plan["peak_price"] = peak_price
+                trail_stop_pct = float(plan.get("trailing_stop_pct", self._day_trade_trail_stop_pct * 100.0)) / 100.0
+                trail_trigger = max(stop_loss_pct * 0.60, trail_stop_pct)
+                if peak_price >= position.avg_cost * (1 + trail_trigger):
+                    trailing_stop_price = peak_price * (1 - trail_stop_pct)
+                    if current_price <= trailing_stop_price:
+                        self._close_position(symbol, "adaptive trailing stop", position_key=position_key)
+                        continue
+                if age_seconds >= max(120.0, lane_config.get("min_hold_seconds", self._auto_trade_min_hold_seconds) * 0.50):
+                    if intraday.get("direction") == "sell" and float(intraday.get("score", 0.0) or 0.0) <= -0.10:
+                        self._close_position(symbol, "intraday regime flip", position_key=position_key)
+                        continue
+                    if (
+                        str(plan.get("entry_setup", "")) == "opening_range_momentum"
+                        and float(intraday.get("order_flow_imbalance", 0.0) or 0.0) < -0.04
+                        and current_price < float(intraday.get("session_vwap", current_price) or current_price)
+                    ):
+                        self._close_position(symbol, "opening range failure", position_key=position_key)
+                        continue
+                    if (
+                        str(plan.get("entry_setup", "")) == "vwap_pullback_continuation"
+                        and float(intraday.get("vwap_bias", 0.0) or 0.0) < -0.08
+                        and intraday.get("direction") == "sell"
+                    ):
+                        self._close_position(symbol, "VWAP continuation failure", position_key=position_key)
+                        continue
+                    if (
+                        str(plan.get("entry_setup", "")) == "liquidity_sweep_reversal"
+                        and intraday.get("direction") == "sell"
+                        and float(intraday.get("order_flow_imbalance", 0.0) or 0.0) < -0.02
+                    ):
+                        self._close_position(symbol, "sweep reversal failed", position_key=position_key)
+                        continue
+
+            if lane == "crypto":
+                crypto_filter = self._crypto_execution_filter(signal)
+                signal["execution_filter"] = crypto_filter
+                if not crypto_filter.get("allow", True):
+                    self._close_position(
+                        symbol,
+                        str(crypto_filter.get("reason", "crypto_execution_filter")),
+                        signal_source="CryptoMicrostructure",
+                        position_key=position_key,
+                    )
+                    continue
+
+            if (
+                age_seconds >= lane_config.get("min_hold_seconds", self._auto_trade_min_hold_seconds)
+                and construction
+                and float(construction.get("target_position_pct", 0.0) or 0.0)
+                < (lane_config.get("base_position_pct", self._auto_trade_base_position_pct) * 0.25)
+            ):
+                self._close_position(symbol, "optimizer deallocated", position_key=position_key)
+                continue
+
+            conviction = float(signal.get("conviction_score", 0.0) or 0.0)
+            direction = signal.get("signal")
+            exit_floor = 4.6 if lane == "day" else 4.2 if lane == "crypto" else 5.8
+            should_exit = direction == "sell" or conviction < exit_floor
+            if lane == "day" and intraday.get("direction") == "sell":
+                should_exit = True
+            if isinstance(meta, dict) and meta:
+                should_exit = should_exit or (
+                    meta.get("take_trade") is False and float(meta.get("take_probability", 0.0) or 0.0) < 0.45
+                )
+            if age_seconds >= lane_config.get("min_hold_seconds", self._auto_trade_min_hold_seconds) and should_exit:
+                self._close_position(symbol, "signal decay", position_key=position_key)
+
+    def _build_lane_candidates(self) -> Dict[str, List[Tuple[float, str, Dict, float]]]:
+        from pipeline.universe import is_leader_symbol
+
+        candidates_by_lane: Dict[str, List[Tuple[float, str, Dict, float]]] = defaultdict(list)
+        for lane, symbol, signal in self._iter_lane_signal_items():
+            if not isinstance(signal, dict):
+                continue
+
+            lane = str(lane or signal.get("lane") or "normal").lower()
+            lane_config = self._lane_config(lane)
+            leader_symbol = lane in {"normal", "day"} and is_leader_symbol(symbol)
+            meta = signal.get("meta_decision", {}) if isinstance(signal.get("meta_decision"), dict) else {}
+            construction = signal.get("portfolio_construction", {}) if isinstance(signal.get("portfolio_construction"), dict) else {}
+            intraday = signal.get("intraday_overlay", {}) if isinstance(signal.get("intraday_overlay"), dict) else {}
+            conviction = float(signal.get("conviction_score", 0.0) or 0.0)
+            take_probability = float(meta.get("take_probability", signal.get("take_probability", 0.0)) or 0.0)
+            rank_score = float(meta.get("rank_score", signal.get("rank_score", 0.0)) or 0.0)
+            portfolio_target_pct = float(construction.get("target_position_pct", 0.0) or 0.0)
+            lane_min_conviction = lane_config.get("min_conviction", self._auto_trade_min_conviction)
+            min_conviction = min(lane_min_conviction, self._auto_trade_leader_min_conviction) if leader_symbol else lane_min_conviction
+            leader_override = (
+                leader_symbol
+                and take_probability >= self._auto_trade_leader_min_take_probability
+                and rank_score >= self._auto_trade_leader_min_rank_score
+            )
+            position_key = str(signal.get("signal_key") or self._position_key(symbol, lane))
+
+            governor_decision = self._governor_decision(signal)
+            signal["governor_decision"] = governor_decision
+            signal["governor_size_multiplier"] = self._safe_number(governor_decision.get("size_multiplier"), 1.0)
+            if not governor_decision.get("allow", True):
+                self._record_execution_event(
+                    symbol,
+                    "buy",
+                    "skipped",
+                    str(governor_decision.get("reason", "governor_block")),
+                    signal=signal,
+                    position_key=position_key,
+                    score=rank_score,
+                    conviction=conviction,
+                )
+                continue
+
+            execution_filter = {"allow": True, "reason": "active", "size_multiplier": 1.0}
+            if lane == "crypto":
+                execution_filter = self._crypto_execution_filter(signal)
+                signal["execution_filter"] = execution_filter
+                if not execution_filter.get("allow", True):
+                    self._record_execution_event(
+                        symbol,
+                        "buy",
+                        "skipped",
+                        str(execution_filter.get("reason", "crypto_execution_filter")),
+                        signal=signal,
+                        position_key=position_key,
+                        score=rank_score,
+                        conviction=conviction,
+                    )
+                    continue
+            signal["execution_size_multiplier"] = self._safe_number(execution_filter.get("size_multiplier"), 1.0)
+
+            if signal.get("signal") != "buy":
+                continue
+            if conviction < min_conviction and not leader_override:
+                self._record_execution_event(
+                    symbol,
+                    "buy",
+                    "skipped",
+                    "weak_conviction",
+                    signal=signal,
+                    position_key=position_key,
+                    score=rank_score,
+                    conviction=conviction,
+                )
+                continue
+            if meta and take_probability < lane_config.get("min_take_probability", 0.0) and not leader_override:
+                self._record_execution_event(
+                    symbol,
+                    "buy",
+                    "skipped",
+                    "low_take_probability",
+                    signal=signal,
+                    position_key=position_key,
+                    score=rank_score,
+                    conviction=conviction,
+                )
+                continue
+
+            zero_weight_fallback = (
+                construction
+                and portfolio_target_pct <= 0
+                and self._auto_trade_zero_weight_fallback_enabled
+                and (bool(meta.get("take_trade", False)) or leader_override)
+                and take_probability >= self._auto_trade_zero_weight_min_take_probability
+                and rank_score >= self._auto_trade_zero_weight_min_rank_score
+                and conviction >= (min_conviction * (0.8 if leader_symbol else 0.9))
+            )
+            intraday_daytrade_override = (
+                lane == "day"
+                and portfolio_target_pct <= 0
+                and take_probability >= 0.48
+                and conviction >= (min_conviction * 0.9)
+                and float(intraday.get("confidence", 0.0) or 0.0) >= 0.48
+                and intraday.get("direction") == "buy"
+            )
+            if construction and portfolio_target_pct <= 0 and not (zero_weight_fallback or intraday_daytrade_override):
+                self._record_execution_event(
+                    symbol,
+                    "buy",
+                    "skipped",
+                    "optimizer_zero_weight",
+                    signal=signal,
+                    position_key=position_key,
+                    score=float(construction.get("portfolio_score", 0.0)),
+                    conviction=conviction,
+                )
+                continue
+            if meta and not meta.get("take_trade", False):
+                self._record_execution_event(
+                    symbol,
+                    "buy",
+                    "skipped",
+                    str(meta.get("reason", "meta_skip")),
+                    signal=signal,
+                    position_key=position_key,
+                    score=rank_score,
+                    conviction=conviction,
+                )
+                continue
+            if lane == "day":
+                trade_window_active = bool(intraday.get("trade_window_active", True))
+                exceptional_signal = (
+                    float(intraday.get("confidence", 0.0) or 0.0) >= 0.78
+                    or take_probability >= 0.68
+                    or float(intraday.get("news_boost", 0.0) or 0.0) >= self._day_trade_news_boost_threshold
+                )
+                if not trade_window_active and not exceptional_signal:
+                    self._record_execution_event(
+                        symbol,
+                        "buy",
+                        "skipped",
+                        "midday_chop_filter",
+                        signal=signal,
+                        position_key=position_key,
+                        score=float(intraday.get("score", 0.0) or 0.0),
+                        conviction=conviction,
+                    )
+                    continue
+
+            current_price = self._get_latest_close(symbol)
+            if current_price is None:
+                continue
+            candidates_by_lane[lane].append((self._get_signal_score(signal), symbol, signal, current_price))
+        return candidates_by_lane
+
+    def _execute_lane_entries(self, broker, candidates_by_lane: Dict[str, List[Tuple[float, str, Dict, float]]]) -> None:
+        from core.paper_trading import Order, OrderSide
+        from pipeline.universe import get_sector
+
+        lane_sector_counts: Dict[str, Dict[str, int]] = defaultdict(dict)
+        lane_open_counts: Dict[str, int] = defaultdict(int)
+        for _, _, symbol, lane, _ in self._iter_open_positions(broker):
+            sector = get_sector(symbol)
+            lane_sector_counts[lane][sector] = lane_sector_counts[lane].get(sector, 0) + 1
+            lane_open_counts[lane] += 1
+
+        for lane in self._lane_engine_order:
+            lane_config = self._lane_config(lane)
+            replacement_margin = self._auto_trade_replace_margin * (0.5 if lane in {"day", "crypto"} else 1.0)
+            ranked_candidates = sorted(candidates_by_lane.get(lane, []), key=lambda item: item[0], reverse=True)
+            ranked_candidates = ranked_candidates[: lane_config.get("top_k", self._auto_trade_top_k)]
+            new_positions = 0
+            sector_counts = lane_sector_counts[lane]
+
+            for score, symbol, signal, current_price in ranked_candidates:
+                position_key = str(signal.get("signal_key") or self._position_key(symbol, lane))
+                if new_positions >= lane_config.get("max_new_per_cycle", self._auto_trade_max_new_per_cycle):
+                    self._record_execution_event(symbol, "buy", "skipped", "cycle_entry_limit", signal=signal, position_key=position_key, score=score)
+                    break
+                if broker.has_open_position(position_key=position_key):
+                    self._record_execution_event(symbol, "buy", "skipped", "already_in_portfolio", signal=signal, position_key=position_key, score=score)
+                    continue
+                if not self._can_enter_position(symbol, lane=lane):
+                    self._record_execution_event(symbol, "buy", "skipped", "cooldown_active", signal=signal, position_key=position_key, score=score)
+                    continue
+
+                sector = get_sector(symbol)
+                open_positions = lane_open_counts.get(lane, 0)
+                corr_snapshot = self._get_portfolio_correlation_snapshot(symbol, broker)
+                signal["portfolio_fit"] = corr_snapshot
+                if sector_counts.get(sector, 0) >= lane_config.get("sector_cap", self._auto_trade_max_sector_positions):
+                    self._record_execution_event(
+                        symbol,
+                        "buy",
+                        "skipped",
+                        "sector_cap_reached",
+                        signal=signal,
+                        position_key=position_key,
+                        score=score,
+                        sector=sector,
+                    )
+                    continue
+                if (
+                    corr_snapshot.get("sample_size", 0) > 0
+                    and corr_snapshot.get("max_abs_corr", 0.0) >= lane_config.get("pair_corr_cap", self._auto_trade_max_pair_correlation)
+                ):
+                    self._record_execution_event(
+                        symbol,
+                        "buy",
+                        "skipped",
+                        "correlation_cap_reached",
+                        signal=signal,
+                        position_key=position_key,
+                        score=score,
+                        conviction=float(signal.get("conviction_score", 0.0)),
+                        sector=sector,
+                    )
+                    continue
+
+                if open_positions >= lane_config.get("max_open_positions", self._auto_trade_max_open_positions):
+                    replacement = self._select_replacement_candidate(broker, lane=lane)
+                    if not replacement:
+                        self._record_execution_event(
+                            symbol,
+                            "buy",
+                            "skipped",
+                            "portfolio_full_no_replacement",
+                            signal=signal,
+                            position_key=position_key,
+                            score=score,
+                        )
+                        break
+                    weakest_position_key, weakest_score = replacement
+                    if score < (weakest_score + replacement_margin):
+                        self._record_execution_event(
+                            symbol,
+                            "buy",
+                            "skipped",
+                            "not_better_than_weakest",
+                            signal=signal,
+                            position_key=position_key,
+                            score=score,
+                        )
+                        continue
+                    weakest_position = broker.positions.get(weakest_position_key)
+                    weakest_symbol = str(getattr(weakest_position, "symbol", weakest_position_key) or weakest_position_key)
+                    if not self._close_position(
+                        weakest_symbol,
+                        f"rotating into stronger idea {symbol}",
+                        position_key=weakest_position_key,
+                    ):
+                        self._record_execution_event(
+                            symbol,
+                            "buy",
+                            "skipped",
+                            "rotation_close_failed",
+                            signal=signal,
+                            position_key=position_key,
+                            score=score,
+                        )
+                        continue
+                    weakest_sector = get_sector(weakest_symbol)
+                    sector_counts[weakest_sector] = max(0, sector_counts.get(weakest_sector, 1) - 1)
+                    lane_open_counts[lane] = max(0, lane_open_counts.get(lane, 1) - 1)
+
+                position_size = self._compute_position_size(signal, current_price, broker, corr_snapshot=corr_snapshot)
+                min_position_size = 0.0001 if lane == "crypto" else 1.0
+                if position_size < min_position_size:
+                    self._record_execution_event(
+                        symbol,
+                        "buy",
+                        "skipped",
+                        "position_size_too_small",
+                        signal=signal,
+                        position_key=position_key,
+                        score=score,
+                    )
+                    continue
+
+                lane_meta = self._signal_lane_meta(symbol, signal, lane_override=lane)
+                signal_source = {
+                    "normal": "NormalTrading",
+                    "day": "DayTrading",
+                    "crypto": "CryptoMicrostructure",
+                }.get(lane_meta.get("lane"), "EventMultiFactor")
+                order = Order(
+                    symbol=symbol,
+                    side=OrderSide.BUY,
+                    quantity=position_size,
+                    position_key=position_key,
+                    signal_source=signal_source,
+                    metadata={
+                        **self._build_order_metadata(symbol, signal, action="buy", reason="ranked_entry"),
+                        "entry_reason": "ranked_entry",
+                        "scenario_label": lane_meta.get("lane_label"),
+                        "signal_key": position_key,
+                        "position_key": position_key,
+                        "underlying_symbol": symbol,
+                    },
+                )
+                result = broker.submit_order(order, current_price)
+                if result["status"] != "filled":
+                    self._capture_execution_reconciliation(symbol, "buy", signal, result, position_key=position_key)
+                    self._record_execution_event(
+                        symbol,
+                        "buy",
+                        "rejected",
+                        result.get("reason", "broker_reject"),
+                        signal=signal,
+                        position_key=position_key,
+                        score=score,
+                        details=self._broker_result_details(result),
+                    )
+                    continue
+
+                risk = signal.get("risk_parameters", {}) or {}
+                intraday = signal.get("intraday_overlay", {}) if isinstance(signal.get("intraday_overlay"), dict) else {}
+                self._position_plans[position_key] = {
+                    "symbol": symbol,
+                    "signal_key": position_key,
+                    "stop_loss_pct": float(risk.get("stop_loss_pct", 2.0)),
+                    "take_profit_pct": float(risk.get("take_profit_pct", 5.0)),
+                    "entry_score": score,
+                    "sector": sector,
+                    "entry_setup": str(intraday.get("setup", "") or ""),
+                    "entry_regime": str(intraday.get("regime", "") or ""),
+                    "setup_id": str(signal.get("setup_id") or intraday.get("setup", "") or "event_multifactor"),
+                    "lane": str(signal.get("lane") or lane_meta.get("lane") or lane),
+                    "market": str(signal.get("market") or lane_meta.get("market") or self._market_code_for_symbol(symbol)),
+                    "signal_style": str(signal.get("signal_style") or ""),
+                    "entry_reason": "ranked_entry",
+                    "entry_time_bucket": str(signal.get("time_bucket") or lane_meta.get("time_bucket") or "unknown"),
+                    "min_hold_seconds": int(lane_config.get("min_hold_seconds", self._auto_trade_min_hold_seconds)),
+                    "trailing_stop_pct": float(risk.get("trailing_stop_pct", self._day_trade_trail_stop_pct * 100.0)),
+                    "peak_price": float(current_price),
+                }
+                sector_counts[sector] = sector_counts.get(sector, 0) + 1
+                lane_open_counts[lane] = lane_open_counts.get(lane, 0) + 1
+                self._record_trade_timestamp(symbol, lane)
+                self._capture_execution_reconciliation(symbol, "buy", signal, result, position_key=position_key)
+                self._record_execution_event(
+                    symbol,
+                    "buy",
+                    "filled",
+                    "ranked_entry",
+                    signal=signal,
+                    position_key=position_key,
+                    score=score,
+                    conviction=float(signal.get("conviction_score", 0.0)),
+                    sector=sector,
+                    details=self._broker_result_details(result),
+                )
+                new_positions += 1
+                logger.info(
+                    f"AUTO-BUY: {symbol} [{lane}] x{position_size} @ ${current_price:.2f} | "
+                    f"score {score:.2f} | sector {sector}"
+                )
+
+    def _auto_trade(self):
+        broker = self._components.get("broker")
+        if not broker:
+            return
+        current_prices = {}
+        for position_key, _, symbol, _, _ in self._iter_open_positions(broker):
+            current_price = self._get_latest_close(symbol)
+            if current_price is not None:
+                current_prices[position_key] = current_price
+                current_prices[symbol] = current_price
+        if current_prices:
+            broker.update_prices(current_prices)
+
+        self._refresh_portfolio_overlay()
+        self._manage_open_positions(broker, current_prices)
+        self._execute_lane_entries(broker, self._build_lane_candidates())
+
+    def _start_dashboard(self, port: int):
+        from core.realtime_engine import PRICE_BUFFER
+        from dashboard.app import create_app
+
+        app, socketio = create_app(
+            price_buffer=PRICE_BUFFER,
+            paper_broker=self._components.get("broker"),
+            signal_store=self._signal_store,
+            stress_results=self._components.get("stress_results", {}),
+            execution_trace=self._components.get("execution_trace"),
+            execution_backtest=self._components.get("execution_backtest"),
+            execution_reconciliation=self._components.get("execution_reconciliation"),
+            portfolio_overlay=self._components.get("portfolio_overlay"),
+            meta_model_status=self._components.get("meta_model_status"),
+            learning_status=self._components.get("learning_status"),
+            security_suite=self._components.get("security"),
+        )
+        logger.info(f"\n{'=' * 52}")
+        logger.info(f"  Dashboard : http://localhost:{port}")
+        logger.info(f"  Camera    : http://localhost:{port}/video_feed")
+        logger.info(f"{'=' * 52}\n")
+        socketio.run(app, host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+    def _data_pipeline_loop(self):
+        from pipeline.earnings_collector import EarningsEventPipeline
+        from pipeline.price_collector import PriceDataPipeline
+
+        target_symbols = self._get_target_symbols()
+        earnings_pipeline = EarningsEventPipeline(pit_db=self._components.get("pit_db"))
+        last_price_refresh = 0.0
+        last_sentiment_refresh = 0.0
+        last_earnings_refresh = 0.0
+        last_altdata_refresh = 0.0
+
+        while self._running:
+            try:
+                now = time.time()
+                refreshed = []
+
+                if not self._components.get("price_data") or (now - last_price_refresh) >= self._price_refresh_seconds:
+                    self._components["price_data"] = PriceDataPipeline(symbols=target_symbols).run_incremental_update()
+                    last_price_refresh = now
+                    self._data_versions["prices"] += 1
+                    refreshed.append("prices")
+
+                if not self._components.get("sentiment_data") or (now - last_sentiment_refresh) >= self._sentiment_refresh_seconds:
+                    self._components["sentiment_data"] = self._collect_sentiment_batched(symbols=target_symbols, days_back=3, save=True)
+                    last_sentiment_refresh = now
+                    self._data_versions["sentiment"] += 1
+                    refreshed.append("sentiment")
+
+                if not self._components.get("earnings_data") or (now - last_earnings_refresh) >= self._earnings_refresh_seconds:
+                    self._components["earnings_data"] = earnings_pipeline.run(symbols=target_symbols, save=True)
+                    last_earnings_refresh = now
+                    self._data_versions["earnings"] += 1
+                    refreshed.append("earnings")
+
+                if not self._components.get("altdata_data") or (now - last_altdata_refresh) >= self._altdata_refresh_seconds:
+                    self._components["altdata_data"] = self._collect_altdata(symbols=target_symbols)
+                    last_altdata_refresh = now
+                    self._data_versions["altdata"] += 1
+                    refreshed.append("altdata")
+
+                if refreshed:
+                    self._components["data_versions"] = dict(self._data_versions)
+                    logger.info(
+                        f"Data pipeline refresh complete for {len(target_symbols)} symbols in {self._universe_mode} mode "
+                        f"({', '.join(refreshed)})"
+                    )
+            except Exception as exc:
+                logger.error(f"Data pipeline error: {exc}")
+            time.sleep(30)
+
+    def _latest_live_tick(self, symbol: str):
+        if not self._live_feature_overlay_enabled:
+            return None
+        try:
+            from core.realtime_engine import PRICE_BUFFER
+        except Exception:
+            return None
+
+        tick = PRICE_BUFFER.latest(symbol)
+        if tick is None:
+            return None
+        price = float(getattr(tick, "price", 0.0) or 0.0)
+        tick_ts = getattr(tick, "timestamp", None)
+        if price <= 0 or not isinstance(tick_ts, datetime):
+            return None
+        try:
+            age_seconds = max(0.0, (datetime.now(timezone.utc) - tick_ts.astimezone(timezone.utc)).total_seconds())
+        except Exception:
+            return None
+        if age_seconds > self._live_signal_max_tick_age_seconds:
+            return None
+        return tick
+
+    def _mark_price_frame_live(self, symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
+        if not self._live_feature_overlay_enabled or frame is None or frame.empty:
+            return frame
+
+        tick = self._latest_live_tick(symbol)
+        if tick is None:
+            return frame
+
+        try:
+            base = frame.copy().sort_index()
+            if "adj_close" not in base.columns and "close" in base.columns:
+                base["adj_close"] = base["close"]
+
+            tick_ts = tick.timestamp.astimezone(timezone.utc)
+            live_day = pd.Timestamp(tick_ts.replace(tzinfo=None)).normalize()
+            last_index = pd.Timestamp(base.index[-1])
+            if last_index.tzinfo is not None:
+                last_index = last_index.tz_localize(None)
+            last_day = last_index.normalize()
+
+            live_price = float(getattr(tick, "price", 0.0) or 0.0)
+            tick_volume = max(0.0, float(getattr(tick, "volume", 0.0) or 0.0))
+            state = self._get_intraday_state_snapshot(symbol)
+            session_open = self._safe_number(state.get("session_open_price"), live_price)
+            session_high = self._safe_number(state.get("session_high"), live_price)
+            session_low = self._safe_number(state.get("session_low"), live_price)
+            session_volume = max(self._safe_number(state.get("session_volume"), 0.0), tick_volume)
+
+            if last_day == live_day:
+                row = base.iloc[-1].copy()
+                open_px = self._safe_number(row.get("open"), session_open if session_open > 0 else live_price)
+                prior_high = self._safe_number(row.get("high"), open_px if open_px > 0 else live_price)
+                prior_low = self._safe_number(row.get("low"), open_px if open_px > 0 else live_price)
+                prior_volume = self._safe_number(row.get("volume"), 0.0)
+                row["open"] = open_px
+                row["high"] = max(prior_high, session_high, live_price)
+                row["low"] = min(
+                    value
+                    for value in (prior_low, session_low if session_low > 0 else live_price, live_price)
+                    if value > 0
+                )
+                row["close"] = live_price
+                if "adj_close" in base.columns:
+                    row["adj_close"] = live_price
+                row["volume"] = max(prior_volume, session_volume)
+                base.iloc[-1] = row
+                return base
+
+            prior_close = self._safe_number(base["close"].iloc[-1], live_price)
+            open_px = session_open if session_open > 0 else (prior_close if prior_close > 0 else live_price)
+            high_px = max(open_px, session_high if session_high > 0 else live_price, live_price)
+            low_candidates = [value for value in (open_px, session_low if session_low > 0 else None, live_price) if value and value > 0]
+            low_px = min(low_candidates) if low_candidates else live_price
+            row = {
+                "open": open_px,
+                "high": high_px,
+                "low": low_px,
+                "close": live_price,
+                "volume": max(session_volume, tick_volume),
+                "adj_close": live_price,
+            }
+            base.loc[live_day] = row
+            return base.sort_index()
+        except Exception as exc:
+            logger.debug(f"Live price mark failed for {symbol}: {exc}")
+            return frame
+
+    def _build_live_price_inputs(self, price_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+        if not self._live_feature_overlay_enabled or not price_data:
+            return price_data
+
+        live_inputs: Dict[str, pd.DataFrame] = {}
+        live_marks = 0
+        for symbol, frame in price_data.items():
+            marked = self._mark_price_frame_live(symbol, frame)
+            live_inputs[symbol] = marked
+            if marked is not frame:
+                live_marks += 1
+
+        target = self._components.get("live_price_data")
+        if not isinstance(target, dict):
+            target = {}
+            self._components["live_price_data"] = target
+        target.clear()
+        target["price_daily_recent"] = live_inputs
+        target["generated_at"] = datetime.now(timezone.utc).isoformat()
+        target["live_marks"] = live_marks
+        return live_inputs
+
+    def _build_feature_signature(self, symbol: str, features, earnings_events) -> str:
+        latest = features.iloc[-1]
+        latest_ts = str(features.index[-1]) if len(features.index) else "na"
+        parts = [
+            latest_ts,
+            f"{float(latest.get('close', 0.0)):.4f}",
+            f"{float(latest.get('volume', 0.0)):.0f}",
+            f"{float(latest.get('compound_score', 0.0)):.4f}",
+            f"{float(latest.get('official_event_signal', 0.0)):.4f}",
+            f"{float(latest.get('earnings_propagation_signal', 0.0)):.4f}",
+            f"{float(latest.get('close_reversal_signal', 0.0)):.4f}",
+            f"{float(latest.get('travel_activity_change', 0.0)):.4f}",
+        ]
+        if earnings_events is not None and not getattr(earnings_events, "empty", True):
+            sym_events = earnings_events[earnings_events["symbol"] == symbol]
+            if not sym_events.empty:
+                event_row = sym_events.sort_values("reported_date").iloc[-1]
+                parts.append(str(event_row.get("reported_date")))
+                parts.append(f"{float(event_row.get('surprise_pct') or 0.0):.3f}")
+
+        live_tick = self._latest_live_tick(symbol)
+        if live_tick is not None:
+            parts.append(str(live_tick.timestamp.astimezone(timezone.utc).isoformat()))
+            parts.append(f"{float(getattr(live_tick, 'price', 0.0) or 0.0):.4f}")
+            parts.append(f"{float(getattr(live_tick, 'bid', 0.0) or 0.0):.4f}")
+            parts.append(f"{float(getattr(live_tick, 'ask', 0.0) or 0.0):.4f}")
+
+        intraday_state = self._get_intraday_state_snapshot(symbol)
+        if intraday_state:
+            parts.append(str(intraday_state.get("session_key") or ""))
+            parts.append(str(intraday_state.get("last_tick_ts") or ""))
+            parts.append(f"{self._safe_number(intraday_state.get('session_volume'), 0.0):.0f}")
+            parts.append(f"{self._safe_number(intraday_state.get('cum_delta'), 0.0):.1f}")
+            parts.append(f"{self._safe_number(intraday_state.get('last_price'), 0.0):.4f}")
+
+        try:
+            from core.realtime_engine import DEPTH_BUFFER
+
+            depth_snapshot = DEPTH_BUFFER.latest(symbol) or {}
+        except Exception:
+            depth_snapshot = {}
+        if depth_snapshot:
+            parts.append(str(depth_snapshot.get("updated_at") or ""))
+            parts.append(f"{self._safe_number(depth_snapshot.get('best_bid'), 0.0):.6f}")
+            parts.append(f"{self._safe_number(depth_snapshot.get('best_ask'), 0.0):.6f}")
+        return "|".join(parts)
+
+    def _run_stress_tests(self):
+        try:
+            from core.signal_engine_v2 import RegimeAwareStressTester
+
+            tester = RegimeAwareStressTester()
+            results = tester.run_regime_aware_stress_tests()
+            target = self._components.get("stress_results")
+            if not isinstance(target, dict):
+                target = {}
+                self._components["stress_results"] = target
+            target.clear()
+            if isinstance(results, dict):
+                target.update(results)
+            summary = results.get("summary", {})
+            logger.info(
+                f"Stress tests: Grade {summary.get('overall_grade')} | "
+                f"{summary.get('stress_tests_passed')} passed | "
+                f"Avg protection: {summary.get('avg_crisis_protection_pct')}%"
+            )
+        except Exception as exc:
+            logger.error(f"Stress test error: {exc}")
+            target = self._components.get("stress_results")
+            if isinstance(target, dict):
+                target.clear()
+            else:
+                self._components["stress_results"] = {}
+
+    def retrain_institutional_models(self, feature_matrices: Optional[Dict[str, object]] = None, run_optuna: bool = False) -> Dict:
+        from models.institutional_retraining import InstitutionalTrainingPipeline
+        from pipeline.feature_engineering import FeaturePipeline
+
+        if feature_matrices is None:
+            price_data = self._components.get("price_data", {}).get("price_daily_recent", {})
+            if not price_data:
+                raise ValueError("No price data loaded. Run the data pipeline before retraining models.")
+            feature_matrices = FeaturePipeline().build_feature_matrix(
+                price_data=price_data,
+                sentiment_data=self._components.get("sentiment_data", {}).get("symbol_sentiment_daily"),
+                earnings_data=self._components.get("earnings_data", {}).get("earnings_events"),
+                altdata_data=self._components.get("altdata_data", {}).get("symbol_altdata_daily"),
+            )
+
+        trainer = InstitutionalTrainingPipeline(
+            xgb_horizon=max(1, int(os.getenv("XGB_RETRAIN_HORIZON_DAYS", "5"))),
+            meta_horizon=max(1, int(os.getenv("META_MODEL_HORIZON_DAYS", "5"))),
+            meta_take_threshold=float(os.getenv("META_MODEL_TAKE_THRESHOLD", "0.58")),
+            meta_walk_forward_folds=max(2, int(os.getenv("META_MODEL_WALKFORWARD_FOLDS", "4"))),
+        )
+        return trainer.train_all(feature_matrices, run_optuna=run_optuna)
+
+    def _inference_loop(self):
+        import xgboost as xgb
+
+        from core.explainability import SignalExplainer
+        from core.signal_engine_v2 import MetaDecisionEngine, MultiFactorScorer
+        from pipeline.feature_bridge import FeatureBridge
+        from pipeline.feature_engineering import FeaturePipeline
+
+        scorer = MultiFactorScorer()
+        explainer = SignalExplainer()
+        bridge = FeatureBridge()
+        xgb_path = Path("models/checkpoints/xgboost_model.json")
+        meta_engine = MetaDecisionEngine()
+        self._components["meta_engine"] = meta_engine
+        self._refresh_meta_model_status()
+        self._refresh_learning_status()
+        xgb_model = None
+        xgb_mtime = 0.0
+        meta_mtime = 0.0
+        class_map = {0: "sell", 1: "neutral", 2: "buy"}
+
+        def _reload_runtime_models(force: bool = False):
+            nonlocal xgb_model, xgb_mtime, meta_engine, meta_mtime
+            current_xgb_mtime = xgb_path.stat().st_mtime if xgb_path.exists() else 0.0
+            meta_report_path = Path("models/checkpoints/meta_walkforward_report.json")
+            current_meta_mtime = meta_report_path.stat().st_mtime if meta_report_path.exists() else 0.0
+            should_reload_xgb = force or self._runtime_refresh_models or current_xgb_mtime != xgb_mtime
+            should_reload_meta = force or self._runtime_refresh_models or current_meta_mtime != meta_mtime
+
+            if should_reload_xgb:
+                if xgb_path.exists():
+                    try:
+                        try:
+                            xgb_jobs = int(float(os.getenv("XGB_N_JOBS") or os.getenv("MAX_CPU_THREADS") or 2))
+                        except Exception:
+                            xgb_jobs = 2
+                        reloaded = xgb.XGBClassifier(n_jobs=max(1, xgb_jobs))
+                        reloaded.load_model(str(xgb_path))
+                        xgb_model = reloaded
+                        xgb_mtime = current_xgb_mtime
+                        logger.info("XGBoost model loaded successfully")
+                    except Exception as exc:
+                        logger.warning(f"XGBoost load failed: {exc}")
+                else:
+                    xgb_model = None
+                    xgb_mtime = 0.0
+
+            if should_reload_meta:
+                meta_engine = MetaDecisionEngine()
+                self._components["meta_engine"] = meta_engine
+                meta_mtime = current_meta_mtime
+                self._refresh_meta_model_status()
+                self._refresh_learning_status()
+
+            if self._runtime_refresh_models and (should_reload_xgb or should_reload_meta):
+                self._runtime_refresh_models = False
+
+        _reload_runtime_models(force=True)
+
+        while self._running:
+            try:
+                _reload_runtime_models()
+                price_data = self._components.get("price_data", {})
+                if not price_data:
+                    time.sleep(60)
+                    continue
+
+                daily_prices = price_data.get("price_daily_recent", {})
+                if not daily_prices:
+                    time.sleep(60)
+                    continue
+
+                current_versions = dict(self._data_versions)
+                sources_changed = any(
+                    current_versions.get(k, 0) != self._last_inference_versions.get(k, 0) for k in current_versions
+                )
+                prices_changed = current_versions.get("prices", 0) != self._last_inference_versions.get("prices", 0)
+                earnings_changed = current_versions.get("earnings", 0) != self._last_inference_versions.get("earnings", 0)
+
+                feature_cache = self._components.get("feature_matrices")
+                if not isinstance(feature_cache, dict):
+                    feature_cache = {}
+                    self._components["feature_matrices"] = feature_cache
+
+                event_feature_map = self._components.get("event_feature_map")
+                if not isinstance(event_feature_map, dict):
+                    event_feature_map = {}
+                    self._components["event_feature_map"] = event_feature_map
+
+                if prices_changed or earnings_changed or not event_feature_map:
+                    try:
+                        from pipeline.event_alpha import build_event_feature_matrices
+
+                        event_feature_map.clear()
+                        event_feature_map.update(
+                            build_event_feature_matrices(
+                                price_data=daily_prices,
+                                earnings_events=self._components.get("earnings_data", {}).get("earnings_events"),
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning(f"Event alpha refresh failed: {exc}")
+
+                symbols_to_rebuild: List[str] = []
+                if sources_changed:
+                    symbols_to_rebuild = list(daily_prices.keys())
+                else:
+                    for symbol in daily_prices.keys():
+                        if symbol not in feature_cache:
+                            symbols_to_rebuild.append(symbol)
+                            continue
+                        tick = self._latest_live_tick(symbol)
+                        tick_ts = tick.timestamp.astimezone(timezone.utc).isoformat() if tick is not None else ""
+                        prev_ts = self._last_seen_tick_ts.get(symbol, "")
+                        if tick_ts != prev_ts:
+                            symbols_to_rebuild.append(symbol)
+                        self._last_seen_tick_ts[symbol] = tick_ts
+
+                if symbols_to_rebuild:
+                    tail_rows = max(0, int(float(os.getenv("FEATURE_ENGINEERING_TAIL_ROWS", "0") or 0)))
+                    reversal_tail_rows = max(30, int(float(os.getenv("EVENT_REVERSAL_TAIL_ROWS", "80") or 80)))
+                    price_subset: Dict[str, pd.DataFrame] = {}
+
+                    for symbol in symbols_to_rebuild:
+                        frame = daily_prices.get(symbol)
+                        if frame is None or getattr(frame, "empty", True):
+                            continue
+                        tick = self._latest_live_tick(symbol)
+                        self._last_seen_tick_ts[symbol] = (
+                            tick.timestamp.astimezone(timezone.utc).isoformat() if tick is not None else ""
+                        )
+                        working = self._mark_price_frame_live(symbol, frame)
+                        if tail_rows > 0 and len(working) > tail_rows:
+                            working = working.tail(tail_rows)
+                        price_subset[symbol] = working
+
+                        # Update only the latest close-reversal columns when a live overlay is active.
+                        try:
+                            if self._live_feature_overlay_enabled:
+                                from pipeline.event_alpha import compute_close_reversal_features
+
+                                rev = compute_close_reversal_features(working.tail(reversal_tail_rows))
+                                if rev is not None and not getattr(rev, "empty", True):
+                                    last_idx = pd.Timestamp(working.index[-1])
+                                    last_rev = rev.iloc[-1]
+                                    existing = event_feature_map.get(symbol)
+                                    if existing is None or getattr(existing, "empty", True):
+                                        existing = pd.DataFrame(index=pd.DatetimeIndex(pd.to_datetime(working.index)))
+                                    if last_idx not in existing.index:
+                                        existing.loc[last_idx] = {col: 0.0 for col in existing.columns}
+                                    for col in (
+                                        "close_reversal_signal",
+                                        "close_reversal_strength",
+                                        "event_move_strength",
+                                        "event_day_extreme",
+                                    ):
+                                        if col not in existing.columns:
+                                            existing[col] = 0.0
+                                        existing.at[last_idx, col] = float(last_rev.get(col, 0.0) or 0.0)
+                                    event_feature_map[symbol] = existing
+                        except Exception:
+                            pass
+
+                    if price_subset:
+                        refreshed = FeaturePipeline().build_feature_matrix(
+                            price_data=price_subset,
+                            sentiment_data=self._components.get("sentiment_data", {}).get("symbol_sentiment_daily"),
+                            earnings_data=self._components.get("earnings_data", {}).get("earnings_events"),
+                            altdata_data=self._components.get("altdata_data", {}).get("symbol_altdata_daily"),
+                            event_feature_map=event_feature_map,
+                        )
+                        for symbol, features in refreshed.items():
+                            if features is None or getattr(features, "empty", True):
+                                continue
+                            feature_cache[symbol] = features
+
+                feature_matrices = feature_cache
+                self._persist_feature_store(feature_matrices, updated_symbols=symbols_to_rebuild)
+                self._maybe_periodic_retrain(feature_matrices)
+
+                updated_symbols = 0
+                earnings_events = self._components.get("earnings_data", {}).get("earnings_events")
+                latest_feature_rows = self._components.get("latest_feature_rows")
+                if not isinstance(latest_feature_rows, dict):
+                    latest_feature_rows = {}
+                    self._components["latest_feature_rows"] = latest_feature_rows
+
+                for symbol in symbols_to_rebuild:
+                    features = feature_matrices.get(symbol)
+                    if features is None or getattr(features, "empty", True):
+                        latest_feature_rows.pop(symbol, None)
+                        continue
+                    latest_feature_rows[symbol] = features.iloc[-1]
+
+                self._last_inference_versions = current_versions
+
+                for symbol in symbols_to_rebuild:
+                    features = feature_matrices.get(symbol)
+                    if features is None or features.empty:
+                        continue
+
+                    signature = self._build_feature_signature(symbol, features, earnings_events)
+                    if self._last_feature_signature.get(symbol) == signature:
+                        continue
+
+                    latest_row = features.iloc[-1]
+                    scored = scorer.score(latest_row, symbol=symbol)
+                    base_scored = {
+                        "final_score": float(scored.get("final_score", 0.0) or 0.0),
+                        "direction": str(scored.get("direction", "neutral") or "neutral"),
+                        "confidence": float(scored.get("confidence", 0.0) or 0.0),
+                        "conviction_score": float(scored.get("conviction_score", 0.0) or 0.0),
+                        "regime": str(scored.get("regime", "normal") or "normal"),
+                        "regime_multiplier": float(scored.get("regime_multiplier", 1.0) or 1.0),
+                        "factor_scores": dict(scored.get("factor_scores", {}) or {}),
+                        "factor_weights": dict(scored.get("factor_weights", {}) or {}),
+                        "xgb_alignment": scored.get("xgb_alignment"),
+                    }
+                    self._apply_day_trading_overlay(symbol, latest_row, scored)
+
+                    if xgb_model is not None and bridge._feature_cols is not None:
+                        try:
+                            ohlcv = daily_prices.get(symbol)
+                            if ohlcv is not None and self._live_feature_overlay_enabled:
+                                ohlcv = self._mark_price_frame_live(symbol, ohlcv)
+                            X = bridge.prepare_latest(features, ohlcv)
+                            if X is not None:
+                                pred_class = int(xgb_model.predict(X)[0])
+                                pred_proba = xgb_model.predict_proba(X)[0]
+                                xgb_direction = class_map.get(pred_class, "neutral")
+                                xgb_confidence = float(max(pred_proba))
+                                event_edge = max(
+                                    abs(scored["factor_scores"].get("earnings_propagation", 0)),
+                                    abs(scored["factor_scores"].get("close_reversal", 0)),
+                                )
+                                if xgb_confidence > 0.60:
+                                    if xgb_direction == scored["direction"] and xgb_direction != "neutral":
+                                        blended_conf = min(1.0, (scored["confidence"] * 0.45) + (xgb_confidence * 0.55))
+                                        scored["confidence"] = round(blended_conf, 4)
+                                        scored["conviction_score"] = round(min(10, blended_conf * 10), 1)
+                                        scored["xgb_alignment"] = "confirmed"
+                                    elif xgb_confidence > 0.80 and abs(scored["final_score"]) < 0.22 and event_edge < 0.35:
+                                        scored["direction"] = xgb_direction
+                                        scored["confidence"] = xgb_confidence
+                                        scored["conviction_score"] = round(min(10, xgb_confidence * 10), 1)
+                                        scored["xgb_alignment"] = "override_weak_signal"
+                                    else:
+                                        scored["xgb_alignment"] = "non_blocking_disagreement"
+                        except Exception as exc:
+                            logger.debug(f"XGBoost inference error for {symbol}: {exc}")
+
+                    feature_names = [c for c in features.columns if features[c].dtype != object]
+
+                    def _build_signal_payload(scored_payload: Dict, signal_style: str, lane_override: Optional[str] = None) -> Dict:
+                        built = explainer.explain_prediction(
+                            symbol=symbol,
+                            features=features.iloc[[-1]],
+                            model_predictions=scored_payload["factor_scores"],
+                            ensemble_score=scored_payload["final_score"],
+                            feature_names=feature_names,
+                        )
+                        built["signal"] = scored_payload["direction"]
+                        built["confidence"] = scored_payload["confidence"]
+                        built["conviction_score"] = scored_payload["conviction_score"]
+                        built["regime"] = scored_payload["regime"]
+                        built["regime_multiplier"] = scored_payload["regime_multiplier"]
+                        built["factor_scores"] = scored_payload["factor_scores"]
+                        built["factor_weights"] = scored_payload["factor_weights"]
+                        built["xgb_alignment"] = scored_payload.get("xgb_alignment")
+                        built["intraday_overlay"] = scored_payload.get("intraday_overlay", {})
+                        if (
+                            signal_style == "day_trade_intraday"
+                            and isinstance(built.get("risk_parameters"), dict)
+                            and isinstance(built["intraday_overlay"], dict)
+                        ):
+                            risk_adjustments = built["intraday_overlay"].get("risk_adjustments", {})
+                            if isinstance(risk_adjustments, dict) and risk_adjustments:
+                                built["risk_parameters"] = {
+                                    **built["risk_parameters"],
+                                    **risk_adjustments,
+                                }
+                        built["signal_style"] = signal_style
+                        return self._decorate_signal(symbol, built, lane_override=lane_override)
+
+                    signal = _build_signal_payload(
+                        scored,
+                        "day_trade_intraday" if self._day_trading_mode else "swing_event",
+                        lane_override="day" if self._day_trading_mode else "normal",
+                    )
+                    if self._day_trading_mode:
+                        signal["normal_lane_signal"] = _build_signal_payload(
+                            base_scored,
+                            "swing_event",
+                            lane_override="normal",
+                        )
+                    self._signal_store[symbol] = signal
+                    self._last_feature_signature[symbol] = signature
+                    updated_symbols += 1
+
+                updated_symbols += self._refresh_crypto_signals(latest_feature_rows)
+
+                meta_decisions = meta_engine.evaluate_universe(self._signal_store, feature_rows=latest_feature_rows)
+                for symbol, meta in meta_decisions.items():
+                    signal = self._signal_store.get(symbol)
+                    if not isinstance(signal, dict):
+                        continue
+                    signal["meta_decision"] = meta
+                    signal["trade_eligible"] = meta.get("take_trade", False)
+                    signal["take_probability"] = meta.get("take_probability", 0.0)
+                    signal["skip_probability"] = meta.get("skip_probability", 1.0)
+                    signal["expected_edge_pct"] = meta.get("expected_edge_pct", 0.0)
+                    signal["expected_drawdown_pct"] = meta.get("expected_drawdown_pct", 0.0)
+                    signal["rank_score"] = meta.get("rank_score", 0.0)
+                    signal["rank_percentile"] = meta.get("rank_percentile", 0.0)
+                    signal["size_multiplier"] = meta.get("size_multiplier", 0.0)
+                    signal["meta_source"] = meta.get("source", "heuristic")
+                    normal_signal = signal.get("normal_lane_signal")
+                    if isinstance(normal_signal, dict):
+                        normal_meta = meta_engine.evaluate_universe(
+                            {symbol: normal_signal},
+                            feature_rows={symbol: latest_feature_rows.get(symbol)} if symbol in latest_feature_rows else {},
+                        ).get(symbol, {})
+                        normal_signal["meta_decision"] = normal_meta
+                        normal_signal["trade_eligible"] = normal_meta.get("take_trade", False)
+                        normal_signal["take_probability"] = normal_meta.get("take_probability", 0.0)
+                        normal_signal["skip_probability"] = normal_meta.get("skip_probability", 1.0)
+                        normal_signal["expected_edge_pct"] = normal_meta.get("expected_edge_pct", 0.0)
+                        normal_signal["expected_drawdown_pct"] = normal_meta.get("expected_drawdown_pct", 0.0)
+                        normal_signal["rank_score"] = normal_meta.get("rank_score", 0.0)
+                        normal_signal["rank_percentile"] = normal_meta.get("rank_percentile", 0.0)
+                        normal_signal["size_multiplier"] = normal_meta.get("size_multiplier", 0.0)
+                        normal_signal["meta_source"] = normal_meta.get("source", "heuristic")
+
+                self._auto_trade()
+                self._maybe_refresh_execution_backtest(feature_matrices)
+
+                buys = sum(1 for s in self._signal_store.values() if s.get("signal") == "buy")
+                sells = sum(1 for s in self._signal_store.values() if s.get("signal") == "sell")
+                holds = len(self._signal_store) - buys - sells
+                logger.info(f"Signals: {buys} BUY | {sells} SELL | {holds} HOLD | {updated_symbols} updated")
+            except Exception as exc:
+                logger.error(f"Inference loop error: {exc}")
+            time.sleep(self._inference_refresh_seconds)
+
+
+if __name__ == "__main__":
+    from pipeline.alerts_scheduler import setup_production_logging
+
+    setup_production_logging(log_dir=os.getenv("LOG_DIR", "logs"))
+    print("Starting Macro Intelligence System...")
+
+    def _env_flag(name: str, default: bool) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    MacroIntelligenceSystem().start(
+        run_dashboard=_env_flag("RUN_DASHBOARD", True),
+        run_realtime=_env_flag("RUN_REALTIME", True),
+        run_backtest=_env_flag("RUN_BACKTEST", False),
+        run_security=_env_flag("RUN_SECURITY", False),
+        dashboard_port=int(os.getenv("DASHBOARD_PORT", "5050")),
+    )

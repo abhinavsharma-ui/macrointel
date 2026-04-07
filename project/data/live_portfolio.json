@@ -1,0 +1,14 @@
+{
+  "broker": "Manual import",
+  "updated_at": "2026-04-06T00:00:00+05:30",
+  "note": "Replace this template with holdings exported from your actual broker.",
+  "summary": {
+    "portfolio_value": 0,
+    "cash": 0,
+    "holdings_value": 0,
+    "positions_value": 0,
+    "open_positions": 0,
+    "day_pnl": 0
+  },
+  "positions": []
+}
