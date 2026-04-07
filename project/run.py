@@ -2,9 +2,13 @@
 Master system orchestrator for the Macro Intelligence project.
 """
 
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
+load_dotenv(ROOT / ".env.example", override=False)
 
 import os
 
@@ -21,7 +25,6 @@ import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -39,6 +42,11 @@ def _get_primary_env_value(*env_names: str) -> str:
             if value:
                 return value
     return ""
+
+
+def _resolve_root_path(path_value: str) -> Path:
+    path = Path(path_value)
+    return path if path.is_absolute() else ROOT / path
 
 
 class MacroIntelligenceSystem:
@@ -61,16 +69,19 @@ class MacroIntelligenceSystem:
             logger.warning(f"Invalid UNIVERSE_MODE '{self._universe_mode}', defaulting to full")
             self._universe_mode = "full"
         self._day_trading_mode = (
-            os.getenv("DAY_TRADING_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+            os.getenv("DAY_TRADING_MODE", "1").strip().lower() in {"1", "true", "yes", "on"}
             or self._universe_mode.startswith("daytrade")
         )
         self._day_trade_force_daytrade_universe = (
-            os.getenv("DAY_TRADE_FORCE_DAYTRADE_UNIVERSE", "1").strip().lower() in {"1", "true", "yes", "on"}
+            os.getenv("DAY_TRADE_FORCE_DAYTRADE_UNIVERSE", "0").strip().lower() in {"1", "true", "yes", "on"}
         )
-        self._crypto_depth_enabled = os.getenv("CRYPTO_DEPTH_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self._crypto_depth_enabled = os.getenv("CRYPTO_DEPTH_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
         self._crypto_symbols = [
             symbol.strip().upper()
-            for symbol in os.getenv("CRYPTO_DEPTH_SYMBOLS", "SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT").replace(";", ",").split(",")
+            for symbol in os.getenv(
+                "CRYPTO_DEPTH_SYMBOLS",
+                "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT,BNBUSDT,AVAXUSDT",
+            ).replace(";", ",").split(",")
             if symbol.strip()
         ]
         self._crypto_signal_stale_seconds = max(15, int(os.getenv("CRYPTO_SIGNAL_STALE_SECONDS", "45")))
@@ -92,6 +103,8 @@ class MacroIntelligenceSystem:
             int(os.getenv("EMERGENCY_RETRAIN_COOLDOWN_SECONDS", "3600")),
         )
         self._signal_halflife_exit_ratio = min(0.95, max(0.10, float(os.getenv("DAY_SIGNAL_HALFLIFE_EXIT_RATIO", "0.60"))))
+        self._event_window_mode = os.getenv("EVENT_WINDOW_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self._event_window_days = max(1, int(os.getenv("EVENT_WINDOW_DAYS", "3")))
         if (
             self._day_trading_mode
             and self._day_trade_force_daytrade_universe
@@ -107,13 +120,13 @@ class MacroIntelligenceSystem:
         self._earnings_refresh_seconds = max(1800, int(os.getenv("EARNINGS_REFRESH_SECONDS", "21600")))
         self._altdata_refresh_seconds = max(900, int(os.getenv("ALTDATA_REFRESH_SECONDS", "3600")))
         self._inference_refresh_seconds = max(15, int(os.getenv("INFERENCE_REFRESH_SECONDS", "120")))
-        self._auto_trade_min_conviction = max(0.0, float(os.getenv("AUTO_TRADE_MIN_CONVICTION", "7.4")))
-        self._auto_trade_top_k = max(1, int(os.getenv("AUTO_TRADE_TOP_K", "12")))
-        self._auto_trade_max_new_per_cycle = max(1, int(os.getenv("AUTO_TRADE_MAX_NEW_PER_CYCLE", "3")))
-        self._auto_trade_max_open_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "12")))
-        self._auto_trade_max_sector_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_SECTOR_POSITIONS", "3")))
-        self._auto_trade_cooldown_seconds = max(0, int(os.getenv("AUTO_TRADE_COOLDOWN_SECONDS", "1800")))
-        self._auto_trade_min_hold_seconds = max(0, int(os.getenv("AUTO_TRADE_MIN_HOLD_SECONDS", "14400")))
+        self._auto_trade_min_conviction = max(0.0, float(os.getenv("AUTO_TRADE_MIN_CONVICTION", "2.8")))
+        self._auto_trade_top_k = max(1, int(os.getenv("AUTO_TRADE_TOP_K", "48")))
+        self._auto_trade_max_new_per_cycle = max(1, int(os.getenv("AUTO_TRADE_MAX_NEW_PER_CYCLE", "12")))
+        self._auto_trade_max_open_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "24")))
+        self._auto_trade_max_sector_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_SECTOR_POSITIONS", "6")))
+        self._auto_trade_cooldown_seconds = max(0, int(os.getenv("AUTO_TRADE_COOLDOWN_SECONDS", "120")))
+        self._auto_trade_min_hold_seconds = max(0, int(os.getenv("AUTO_TRADE_MIN_HOLD_SECONDS", "300")))
         self._day_trade_force_exit_seconds = max(300, int(os.getenv("DAY_TRADE_FORCE_EXIT_SECONDS", "3600")))
         self._day_trade_min_tick_count = max(6, int(os.getenv("DAY_TRADE_MIN_TICK_COUNT", "14")))
         self._day_trade_intraday_score_threshold = max(
@@ -170,13 +183,13 @@ class MacroIntelligenceSystem:
             float(os.getenv("AUTO_TRADE_MAX_POSITION_PCT", "0.08")),
         )
         self._auto_trade_leader_min_conviction = max(
-            0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_CONVICTION", "4.2"))
+            0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_CONVICTION", "2.4"))
         )
         self._auto_trade_leader_min_take_probability = min(
-            0.99, max(0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_TAKE_PROBABILITY", "0.57")))
+            0.99, max(0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_TAKE_PROBABILITY", "0.34")))
         )
         self._auto_trade_leader_min_rank_score = max(
-            0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_RANK_SCORE", "0.85"))
+            0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_RANK_SCORE", "0.45"))
         )
         self._auto_trade_zero_weight_fallback_enabled = (
             os.getenv("AUTO_TRADE_ZERO_WEIGHT_FALLBACK_ENABLED", "1").strip().lower()
@@ -184,12 +197,12 @@ class MacroIntelligenceSystem:
         )
         self._auto_trade_zero_weight_min_take_probability = min(
             0.99,
-            max(0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_TAKE_PROBABILITY", "0.58"))),
+            max(0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_TAKE_PROBABILITY", "0.36"))),
         )
         self._auto_trade_zero_weight_min_rank_score = max(
-            0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_RANK_SCORE", "0.95"))
+            0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_RANK_SCORE", "0.45"))
         )
-        self._auto_trade_replace_margin = max(0.1, float(os.getenv("AUTO_TRADE_REPLACE_MARGIN", "0.8")))
+        self._auto_trade_replace_margin = max(0.1, float(os.getenv("AUTO_TRADE_REPLACE_MARGIN", "0.1")))
         self._auto_trade_stress_position_mult = min(
             1.0,
             max(0.1, float(os.getenv("AUTO_TRADE_STRESS_POSITION_MULT", "0.6"))),
@@ -234,7 +247,9 @@ class MacroIntelligenceSystem:
         self._portfolio_optimizer_target_beta = float(os.getenv("PORTFOLIO_OPTIMIZER_TARGET_BETA", "0.10"))
         self._feature_store_enabled = os.getenv("FEATURE_STORE_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
         self._feature_store_save_seconds = max(300, int(os.getenv("FEATURE_STORE_SAVE_SECONDS", "1800")))
-        self._feature_store_dir = Path(os.getenv("FEATURE_STORE_DIR", "data/features"))
+        self._feature_store_dir = _resolve_root_path(os.getenv("FEATURE_STORE_DIR", "data/features"))
+        self._event_intel_enabled = os.getenv("EVENT_INTEL_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
+        self._event_intel_dir = _resolve_root_path(os.getenv("EVENT_INTEL_DIR", "data/event_intel"))
         self._auto_retrain_on_start = os.getenv("AUTO_RETRAIN_ON_START", "1").strip().lower() not in {"0", "false", "off"}
         self._auto_retrain_only_if_new_data = os.getenv("AUTO_RETRAIN_ONLY_IF_NEW_DATA", "1").strip().lower() not in {"0", "false", "off"}
         self._auto_retrain_min_updated_files = max(1, int(os.getenv("AUTO_RETRAIN_MIN_UPDATED_FILES", "5")))
@@ -355,7 +370,7 @@ class MacroIntelligenceSystem:
         )
         self._crypto_scalper_min_take_probability = min(
             0.99,
-            max(0.0, float(os.getenv("CRYPTO_SCALPER_MIN_TAKE_PROBABILITY", "0.50"))),
+            max(0.0, float(os.getenv("CRYPTO_SCALPER_MIN_TAKE_PROBABILITY", "0.32"))),
         )
         self._crypto_obi_min_lifetime_ms = max(50.0, float(os.getenv("CRYPTO_OBI_MIN_LIFETIME_MS", "200")))
         self._crypto_obi_max_updates_per_second = max(
@@ -383,19 +398,19 @@ class MacroIntelligenceSystem:
         )
         self._lane_engine_config = {
             "normal": {
-                "top_k": max(1, int(os.getenv("NORMAL_LANE_TOP_K", "18"))),
-                "max_new_per_cycle": max(1, int(os.getenv("NORMAL_LANE_MAX_NEW_PER_CYCLE", "3"))),
-                "max_open_positions": max(1, int(os.getenv("NORMAL_LANE_MAX_OPEN_POSITIONS", "10"))),
-                "cooldown_seconds": max(60, int(os.getenv("NORMAL_LANE_COOLDOWN_SECONDS", "1800"))),
-                "min_hold_seconds": max(300, int(os.getenv("NORMAL_LANE_MIN_HOLD_SECONDS", "14400"))),
+                "top_k": max(1, int(os.getenv("NORMAL_LANE_TOP_K", "56"))),
+                "max_new_per_cycle": max(1, int(os.getenv("NORMAL_LANE_MAX_NEW_PER_CYCLE", "10"))),
+                "max_open_positions": max(1, int(os.getenv("NORMAL_LANE_MAX_OPEN_POSITIONS", "24"))),
+                "cooldown_seconds": max(60, int(os.getenv("NORMAL_LANE_COOLDOWN_SECONDS", "300"))),
+                "min_hold_seconds": max(300, int(os.getenv("NORMAL_LANE_MIN_HOLD_SECONDS", "1800"))),
                 "force_exit_seconds": 0,
                 "risk_per_trade_pct": min(0.02, max(0.001, float(os.getenv("NORMAL_LANE_RISK_PER_TRADE_PCT", "0.0075")))),
                 "base_position_pct": max(0.005, float(os.getenv("NORMAL_LANE_BASE_POSITION_PCT", "0.04"))),
                 "max_position_pct": max(0.01, float(os.getenv("NORMAL_LANE_MAX_POSITION_PCT", "0.10"))),
-                "min_conviction": max(0.0, float(os.getenv("NORMAL_LANE_MIN_CONVICTION", str(self._auto_trade_min_conviction)))),
-                "min_take_probability": min(0.99, max(0.0, float(os.getenv("NORMAL_LANE_MIN_TAKE_PROBABILITY", "0.52")))),
-                "sector_cap": max(1, int(os.getenv("NORMAL_LANE_MAX_SECTOR_POSITIONS", "4"))),
-                "pair_corr_cap": min(0.98, max(0.10, float(os.getenv("NORMAL_LANE_MAX_PAIR_CORRELATION", "0.84")))),
+                "min_conviction": max(0.0, float(os.getenv("NORMAL_LANE_MIN_CONVICTION", "3.0"))),
+                "min_take_probability": min(0.99, max(0.0, float(os.getenv("NORMAL_LANE_MIN_TAKE_PROBABILITY", "0.36")))),
+                "sector_cap": max(1, int(os.getenv("NORMAL_LANE_MAX_SECTOR_POSITIONS", "8"))),
+                "pair_corr_cap": min(0.98, max(0.10, float(os.getenv("NORMAL_LANE_MAX_PAIR_CORRELATION", "0.94")))),
             },
             "day": {
                 "top_k": max(1, int(os.getenv("DAY_LANE_TOP_K", str(self._auto_trade_top_k)))),
@@ -408,24 +423,24 @@ class MacroIntelligenceSystem:
                 "base_position_pct": max(0.005, float(os.getenv("DAY_LANE_BASE_POSITION_PCT", str(self._auto_trade_base_position_pct)))),
                 "max_position_pct": max(0.005, float(os.getenv("DAY_LANE_MAX_POSITION_PCT", str(self._auto_trade_max_position_pct)))),
                 "min_conviction": max(0.0, float(os.getenv("DAY_LANE_MIN_CONVICTION", str(self._auto_trade_min_conviction)))),
-                "min_take_probability": min(0.99, max(0.0, float(os.getenv("DAY_LANE_MIN_TAKE_PROBABILITY", "0.46")))),
+                "min_take_probability": min(0.99, max(0.0, float(os.getenv("DAY_LANE_MIN_TAKE_PROBABILITY", "0.32")))),
                 "sector_cap": max(1, int(os.getenv("DAY_LANE_MAX_SECTOR_POSITIONS", str(self._auto_trade_max_sector_positions + 1)))),
                 "pair_corr_cap": min(0.98, max(0.10, float(os.getenv("DAY_LANE_MAX_PAIR_CORRELATION", str(min(0.92, self._auto_trade_max_pair_correlation + 0.08)))))),
             },
             "crypto": {
-                "top_k": max(1, int(os.getenv("CRYPTO_LANE_TOP_K", "16"))),
-                "max_new_per_cycle": max(1, int(os.getenv("CRYPTO_LANE_MAX_NEW_PER_CYCLE", "6"))),
-                "max_open_positions": max(1, int(os.getenv("CRYPTO_LANE_MAX_OPEN_POSITIONS", "8"))),
-                "cooldown_seconds": max(5, int(os.getenv("CRYPTO_LANE_COOLDOWN_SECONDS", "45"))),
-                "min_hold_seconds": max(15, int(os.getenv("CRYPTO_LANE_MIN_HOLD_SECONDS", "90"))),
-                "force_exit_seconds": max(0, int(os.getenv("CRYPTO_LANE_FORCE_EXIT_SECONDS", "900"))),
+                "top_k": max(1, int(os.getenv("CRYPTO_LANE_TOP_K", "32"))),
+                "max_new_per_cycle": max(1, int(os.getenv("CRYPTO_LANE_MAX_NEW_PER_CYCLE", "12"))),
+                "max_open_positions": max(1, int(os.getenv("CRYPTO_LANE_MAX_OPEN_POSITIONS", "16"))),
+                "cooldown_seconds": max(5, int(os.getenv("CRYPTO_LANE_COOLDOWN_SECONDS", "15"))),
+                "min_hold_seconds": max(15, int(os.getenv("CRYPTO_LANE_MIN_HOLD_SECONDS", "45"))),
+                "force_exit_seconds": max(0, int(os.getenv("CRYPTO_LANE_FORCE_EXIT_SECONDS", "1800"))),
                 "risk_per_trade_pct": min(0.02, max(0.001, float(os.getenv("CRYPTO_LANE_RISK_PER_TRADE_PCT", "0.004")))),
-                "base_position_pct": max(0.0025, float(os.getenv("CRYPTO_LANE_BASE_POSITION_PCT", "0.02"))),
-                "max_position_pct": max(0.005, float(os.getenv("CRYPTO_LANE_MAX_POSITION_PCT", "0.04"))),
-                "min_conviction": max(0.0, float(os.getenv("CRYPTO_LANE_MIN_CONVICTION", "4.0"))),
+                "base_position_pct": max(0.0025, float(os.getenv("CRYPTO_LANE_BASE_POSITION_PCT", "0.025"))),
+                "max_position_pct": max(0.005, float(os.getenv("CRYPTO_LANE_MAX_POSITION_PCT", "0.05"))),
+                "min_conviction": max(0.0, float(os.getenv("CRYPTO_LANE_MIN_CONVICTION", "2.8"))),
                 "min_take_probability": self._crypto_scalper_min_take_probability,
-                "sector_cap": max(1, int(os.getenv("CRYPTO_LANE_MAX_SECTOR_POSITIONS", "8"))),
-                "pair_corr_cap": min(0.99, max(0.10, float(os.getenv("CRYPTO_LANE_MAX_PAIR_CORRELATION", "0.92")))),
+                "sector_cap": max(1, int(os.getenv("CRYPTO_LANE_MAX_SECTOR_POSITIONS", "12"))),
+                "pair_corr_cap": min(0.99, max(0.10, float(os.getenv("CRYPTO_LANE_MAX_PAIR_CORRELATION", "0.98")))),
             },
         }
         self._last_feature_signature: Dict[str, str] = {}
@@ -454,6 +469,8 @@ class MacroIntelligenceSystem:
         self._components["feature_matrices"] = {}
         self._components["event_feature_map"] = {}
         self._components["data_versions"] = dict(self._data_versions)
+        if self._event_window_mode:
+            self._apply_event_window_mode()
 
     def _get_target_symbols(self, market: str = "full") -> List[str]:
         from pipeline.universe import get_universe
@@ -474,6 +491,134 @@ class MacroIntelligenceSystem:
         if mode in {"core", "full", "us", "nse", "daytrade", "daytrade_us", "daytrade_nse"}:
             return get_universe(mode)
         return get_universe("full")
+
+    def _apply_event_window_mode(self) -> None:
+        self._day_trading_mode = True
+        self._crypto_depth_enabled = True
+        if not self._crypto_symbols:
+            self._crypto_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+        self._price_refresh_seconds = min(
+            self._price_refresh_seconds,
+            max(120, int(os.getenv("EVENT_WINDOW_PRICE_REFRESH_SECONDS", "300"))),
+        )
+        self._sentiment_refresh_seconds = min(
+            self._sentiment_refresh_seconds,
+            max(300, int(os.getenv("EVENT_WINDOW_SENTIMENT_REFRESH_SECONDS", "900"))),
+        )
+        self._earnings_refresh_seconds = min(
+            self._earnings_refresh_seconds,
+            max(1800, int(os.getenv("EVENT_WINDOW_EARNINGS_REFRESH_SECONDS", "7200"))),
+        )
+        self._altdata_refresh_seconds = min(
+            self._altdata_refresh_seconds,
+            max(900, int(os.getenv("EVENT_WINDOW_ALTDATA_REFRESH_SECONDS", "1800"))),
+        )
+        self._inference_refresh_seconds = min(
+            self._inference_refresh_seconds,
+            max(5, int(os.getenv("EVENT_WINDOW_INFERENCE_REFRESH_SECONDS", "10"))),
+        )
+        self._poll_interval_seconds = min(
+            self._poll_interval_seconds,
+            max(5, int(os.getenv("EVENT_WINDOW_POLL_INTERVAL_SECONDS", "5"))),
+        )
+        self._poll_batch_size = max(
+            self._poll_batch_size,
+            max(20, int(os.getenv("EVENT_WINDOW_POLL_BATCH_SIZE", "40"))),
+        )
+        self._sentiment_pause_seconds = min(
+            self._sentiment_pause_seconds,
+            max(0.0, float(os.getenv("EVENT_WINDOW_SENTIMENT_BATCH_PAUSE_SECONDS", "0.25"))),
+        )
+        self._feature_store_save_seconds = min(
+            self._feature_store_save_seconds,
+            max(60, int(os.getenv("EVENT_WINDOW_FEATURE_SAVE_SECONDS", "180"))),
+        )
+
+        self._auto_trade_min_conviction = min(
+            self._auto_trade_min_conviction,
+            max(0.0, float(os.getenv("EVENT_WINDOW_MIN_CONVICTION", "2.2"))),
+        )
+        self._auto_trade_top_k = max(
+            self._auto_trade_top_k,
+            max(24, int(os.getenv("EVENT_WINDOW_TOP_K", "96"))),
+        )
+        self._auto_trade_max_new_per_cycle = max(
+            self._auto_trade_max_new_per_cycle,
+            max(6, int(os.getenv("EVENT_WINDOW_MAX_NEW_PER_CYCLE", "24"))),
+        )
+        self._auto_trade_max_open_positions = max(
+            self._auto_trade_max_open_positions,
+            max(8, int(os.getenv("EVENT_WINDOW_MAX_OPEN_POSITIONS", "42"))),
+        )
+        self._auto_trade_max_sector_positions = max(
+            self._auto_trade_max_sector_positions,
+            max(4, int(os.getenv("EVENT_WINDOW_MAX_SECTOR_POSITIONS", "12"))),
+        )
+        self._auto_trade_cooldown_seconds = min(
+            self._auto_trade_cooldown_seconds,
+            max(0, int(os.getenv("EVENT_WINDOW_COOLDOWN_SECONDS", "20"))),
+        )
+        self._auto_trade_leader_min_conviction = min(
+            self._auto_trade_leader_min_conviction,
+            max(0.0, float(os.getenv("EVENT_WINDOW_LEADER_MIN_CONVICTION", "2.0"))),
+        )
+        self._auto_trade_leader_min_take_probability = min(
+            self._auto_trade_leader_min_take_probability,
+            min(0.99, max(0.0, float(os.getenv("EVENT_WINDOW_LEADER_MIN_TAKE_PROBABILITY", "0.30")))),
+        )
+        self._auto_trade_leader_min_rank_score = min(
+            self._auto_trade_leader_min_rank_score,
+            max(0.0, float(os.getenv("EVENT_WINDOW_LEADER_MIN_RANK_SCORE", "0.40"))),
+        )
+        self._auto_trade_zero_weight_min_take_probability = min(
+            self._auto_trade_zero_weight_min_take_probability,
+            min(0.99, max(0.0, float(os.getenv("EVENT_WINDOW_ZERO_WEIGHT_MIN_TAKE_PROBABILITY", "0.32")))),
+        )
+        self._auto_trade_zero_weight_min_rank_score = min(
+            self._auto_trade_zero_weight_min_rank_score,
+            max(0.0, float(os.getenv("EVENT_WINDOW_ZERO_WEIGHT_MIN_RANK_SCORE", "0.40"))),
+        )
+        self._auto_trade_replace_margin = min(
+            self._auto_trade_replace_margin,
+            max(0.02, float(os.getenv("EVENT_WINDOW_REPLACE_MARGIN", "0.05"))),
+        )
+
+        self._lane_base_allocations.update(
+            {
+                "normal": max(0.05, float(os.getenv("EVENT_WINDOW_NORMAL_BASE_ALLOC_PCT", "0.32"))),
+                "day": max(0.05, float(os.getenv("EVENT_WINDOW_DAY_BASE_ALLOC_PCT", "0.42"))),
+                "crypto": max(0.05, float(os.getenv("EVENT_WINDOW_CRYPTO_BASE_ALLOC_PCT", "0.26"))),
+            }
+        )
+
+        normal_cfg = self._lane_engine_config["normal"]
+        normal_cfg["top_k"] = max(normal_cfg["top_k"], int(os.getenv("EVENT_WINDOW_NORMAL_TOP_K", "72")))
+        normal_cfg["max_new_per_cycle"] = max(normal_cfg["max_new_per_cycle"], int(os.getenv("EVENT_WINDOW_NORMAL_MAX_NEW", "14")))
+        normal_cfg["max_open_positions"] = max(normal_cfg["max_open_positions"], int(os.getenv("EVENT_WINDOW_NORMAL_MAX_OPEN", "30")))
+        normal_cfg["min_conviction"] = min(normal_cfg["min_conviction"], float(os.getenv("EVENT_WINDOW_NORMAL_MIN_CONVICTION", "2.7")))
+        normal_cfg["min_take_probability"] = min(normal_cfg["min_take_probability"], float(os.getenv("EVENT_WINDOW_NORMAL_MIN_TAKE_PROBABILITY", "0.33")))
+
+        day_cfg = self._lane_engine_config["day"]
+        day_cfg["top_k"] = max(day_cfg["top_k"], int(os.getenv("EVENT_WINDOW_DAY_TOP_K", "96")))
+        day_cfg["max_new_per_cycle"] = max(day_cfg["max_new_per_cycle"], int(os.getenv("EVENT_WINDOW_DAY_MAX_NEW", "24")))
+        day_cfg["max_open_positions"] = max(day_cfg["max_open_positions"], int(os.getenv("EVENT_WINDOW_DAY_MAX_OPEN", "42")))
+        day_cfg["cooldown_seconds"] = min(day_cfg["cooldown_seconds"], int(os.getenv("EVENT_WINDOW_DAY_COOLDOWN_SECONDS", "15")))
+        day_cfg["min_hold_seconds"] = min(day_cfg["min_hold_seconds"], int(os.getenv("EVENT_WINDOW_DAY_MIN_HOLD_SECONDS", "120")))
+        day_cfg["min_conviction"] = min(day_cfg["min_conviction"], float(os.getenv("EVENT_WINDOW_DAY_MIN_CONVICTION", "2.2")))
+        day_cfg["min_take_probability"] = min(day_cfg["min_take_probability"], float(os.getenv("EVENT_WINDOW_DAY_MIN_TAKE_PROBABILITY", "0.28")))
+
+        crypto_cfg = self._lane_engine_config["crypto"]
+        crypto_cfg["top_k"] = max(crypto_cfg["top_k"], int(os.getenv("EVENT_WINDOW_CRYPTO_TOP_K", "48")))
+        crypto_cfg["max_new_per_cycle"] = max(crypto_cfg["max_new_per_cycle"], int(os.getenv("EVENT_WINDOW_CRYPTO_MAX_NEW", "18")))
+        crypto_cfg["max_open_positions"] = max(crypto_cfg["max_open_positions"], int(os.getenv("EVENT_WINDOW_CRYPTO_MAX_OPEN", "20")))
+        crypto_cfg["cooldown_seconds"] = min(crypto_cfg["cooldown_seconds"], int(os.getenv("EVENT_WINDOW_CRYPTO_COOLDOWN_SECONDS", "8")))
+        crypto_cfg["min_hold_seconds"] = min(crypto_cfg["min_hold_seconds"], int(os.getenv("EVENT_WINDOW_CRYPTO_MIN_HOLD_SECONDS", "30")))
+        crypto_cfg["min_conviction"] = min(crypto_cfg["min_conviction"], float(os.getenv("EVENT_WINDOW_CRYPTO_MIN_CONVICTION", "2.2")))
+        crypto_cfg["min_take_probability"] = min(crypto_cfg["min_take_probability"], float(os.getenv("EVENT_WINDOW_CRYPTO_MIN_TAKE_PROBABILITY", "0.24")))
+        self._crypto_scalper_min_take_probability = min(
+            self._crypto_scalper_min_take_probability,
+            crypto_cfg["min_take_probability"],
+        )
 
     def _chunk_symbols(self, symbols: List[str], batch_size: int) -> List[List[str]]:
         return [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
@@ -533,6 +678,35 @@ class MacroIntelligenceSystem:
         pipeline = OpenSkyTravelFactorPipeline()
         return pipeline.run(symbols=symbols)
 
+    def _refresh_event_intelligence(self) -> Dict:
+        if not self._event_intel_enabled:
+            return {}
+        sentiment_payload = self._components.get("sentiment_data")
+        if not isinstance(sentiment_payload, dict) or not sentiment_payload.get("headlines"):
+            return {}
+        try:
+            from pipeline.event_intel import build_event_intelligence
+
+            event_payload = build_event_intelligence(
+                sentiment_payload=sentiment_payload,
+                signal_store=self._signal_store,
+                output_dir=self._event_intel_dir,
+                universe_mode=self._universe_mode,
+            )
+            self._components["event_intel"] = event_payload
+            summary = event_payload.get("summary", {}) if isinstance(event_payload, dict) else {}
+            logger.info(
+                "Event intelligence refreshed: %s/%s symbols with news | %s official catalysts | saved to %s",
+                summary.get("symbols_with_news", 0),
+                summary.get("symbols_covered", 0),
+                summary.get("official_symbols", 0),
+                self._event_intel_dir,
+            )
+            return event_payload
+        except Exception as exc:
+            logger.warning(f"Event intelligence refresh failed: {exc}")
+            return {}
+
     def start(
         self,
         run_dashboard: bool = True,
@@ -554,11 +728,22 @@ class MacroIntelligenceSystem:
         except Exception:
             pass
         logger.info(f"Universe mode: {self._universe_mode}")
+        if self._event_window_mode:
+            logger.info(
+                "Event window mode: active | %s-day high-volatility preset | event digests -> %s",
+                self._event_window_days,
+                self._event_intel_dir,
+            )
         if self._day_trading_mode:
             logger.info(
                 "Day trading mode: active | "
                 f"force exit {self._day_trade_force_exit_seconds}s | "
                 f"intraday threshold {self._day_trade_intraday_score_threshold:.2f}"
+            )
+        if self._crypto_depth_enabled and self._crypto_symbols:
+            logger.info(
+                "Crypto scalper mode: active | "
+                f"{len(self._crypto_symbols)} symbols | stale cutoff {self._crypto_signal_stale_seconds}s"
             )
         logger.info(f"Price provider order: {os.getenv('PRICE_PROVIDER_ORDER', 'yfinance,finnhub,alpha_vantage,twelve_data')}")
         logger.info(
@@ -4126,6 +4311,7 @@ class MacroIntelligenceSystem:
                     self._components["sentiment_data"] = self._collect_sentiment_batched(symbols=target_symbols, days_back=3, save=True)
                     last_sentiment_refresh = now
                     self._data_versions["sentiment"] += 1
+                    self._refresh_event_intelligence()
                     refreshed.append("sentiment")
 
                 if not self._components.get("earnings_data") or (now - last_earnings_refresh) >= self._earnings_refresh_seconds:
@@ -4141,6 +4327,8 @@ class MacroIntelligenceSystem:
                     refreshed.append("altdata")
 
                 if refreshed:
+                    if self._event_intel_enabled and self._components.get("sentiment_data") and not self._components.get("event_intel"):
+                        self._refresh_event_intelligence()
                     self._components["data_versions"] = dict(self._data_versions)
                     logger.info(
                         f"Data pipeline refresh complete for {len(target_symbols)} symbols in {self._universe_mode} mode "

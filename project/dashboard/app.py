@@ -37,8 +37,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).parent.parent
+load_dotenv(ROOT / ".env")
+load_dotenv(ROOT / ".env.example", override=False)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -532,6 +535,55 @@ def create_app(
 
         return payload
 
+    def _build_symbol_chart(symbol: str, window_seconds: int, max_points: int) -> Dict[str, Any]:
+        symbol = str(symbol or "").strip().upper()
+        latest = _latest_price_payload(symbol)
+        points: List[Dict[str, Any]] = []
+
+        if price_buffer and symbol:
+            ticks = price_buffer.recent_ticks(symbol, n=max(max_points * 6, 240))
+            if ticks:
+                cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+                recent = [tick for tick in ticks if tick.timestamp >= cutoff]
+                if not recent:
+                    recent = ticks[-max_points:]
+                if len(recent) > max_points:
+                    step = max(1, (len(recent) + max_points - 1) // max_points)
+                    sampled = recent[::step]
+                    if sampled[-1] is not recent[-1]:
+                        sampled.append(recent[-1])
+                    recent = sampled[-max_points:]
+                label_fmt = "%H:%M:%S" if window_seconds <= 900 else "%H:%M" if window_seconds <= 86400 else "%m-%d %H:%M"
+                points = [
+                    {
+                        "time": tick.timestamp.isoformat(),
+                        "label": tick.timestamp.astimezone(timezone.utc).strftime(label_fmt),
+                        "price": round(float(tick.price), 4),
+                        "volume": int(getattr(tick, "volume", 0) or 0),
+                    }
+                    for tick in recent
+                ]
+
+        if not points and latest.get("last_price") is not None:
+            now = datetime.now(timezone.utc)
+            points = [{
+                "time": now.isoformat(),
+                "label": now.strftime("%H:%M:%S"),
+                "price": round(float(latest["last_price"]), 4),
+                "volume": 0,
+            }]
+
+        return {
+            "symbol": symbol,
+            "market": latest.get("market"),
+            "price": latest.get("last_price"),
+            "change_pct": latest.get("price_change_pct"),
+            "points": points,
+            "point_count": len(points),
+            "window_seconds": window_seconds,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
     def _reprice_portfolio_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(snapshot or {})
         positions = []
@@ -848,6 +900,15 @@ def create_app(
         }
         return {"overall": overall, "lanes": lanes}
 
+    def _load_event_intel() -> Dict[str, Any]:
+        try:
+            from pipeline.event_intel import load_latest_event_intelligence
+
+            payload = load_latest_event_intelligence(ROOT / "data" / "event_intel")
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
     # â”€â”€ REST â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @app.route("/")
@@ -906,6 +967,12 @@ def create_app(
             }
         return jsonify({"prices": prices, "active_count": len(prices),
                         "timestamp": datetime.now(timezone.utc).isoformat()})
+
+    @app.route("/api/chart/<symbol>")
+    def get_symbol_chart(symbol):
+        window_seconds = max(60, min(7 * 24 * 3600, int(request.args.get("window", "1800") or 1800)))
+        max_points = max(24, min(480, int(request.args.get("points", "240") or 240)))
+        return jsonify(_build_symbol_chart(symbol, window_seconds, max_points))
 
     @app.route("/api/portfolio")
     def get_portfolio():
@@ -1126,6 +1193,22 @@ def create_app(
     def get_daily_report():
         return jsonify(_build_daily_report())
 
+    @app.route("/api/event-intel")
+    def get_event_intel():
+        payload = _load_event_intel()
+        if payload:
+            return jsonify(payload)
+        return jsonify(
+            {
+                "summary": {"headline_count": 0, "symbols_with_news": 0, "symbols_covered": 0, "official_symbols": 0},
+                "bullets": ["Event intelligence is warming up. A fresh sentiment refresh will create the first report."],
+                "top_headlines": [],
+                "symbol_heat": [],
+                "top_bullish": [],
+                "top_bearish": [],
+            }
+        )
+
     @app.route("/api/health")
     def health():
         buf = price_buffer.stats if price_buffer else {}
@@ -1324,8 +1407,17 @@ body.theme-light{background:
 .quoteLane{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;}
 .quotePrice{font-size:22px;font-family:var(--sans);font-weight:700;}
 .quoteMeta{font-size:10px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap;}
-.tvHost{min-height:420px;background:linear-gradient(180deg, var(--panel2), var(--panel));border:1px solid var(--border);border-radius:16px;overflow:hidden;}
-.tvEmpty{display:flex;align-items:center;justify-content:center;min-height:420px;color:var(--muted);font-size:11px;}
+.tvHost{min-height:420px;background:linear-gradient(180deg, var(--panel2), var(--panel));border:1px solid var(--border);border-radius:16px;overflow:hidden;display:flex;flex-direction:column;}
+.tvEmpty{display:flex;align-items:center;justify-content:center;min-height:420px;color:var(--muted);font-size:11px;padding:16px;text-align:center;}
+.chartToolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px;}
+.chartActions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.chartTab{font-size:10px;padding:5px 9px;border-radius:999px;border:1px solid var(--border2);background:transparent;color:var(--muted);cursor:pointer;font-family:var(--mono);}
+.chartTab.active{color:var(--text);border-color:rgba(56,189,248,.38);background:rgba(56,189,248,.12);}
+.chartLink{font-size:10px;padding:5px 10px;border-radius:999px;border:1px solid rgba(56,189,248,.24);color:var(--blue);text-decoration:none;}
+.chartLink:hover{border-color:rgba(56,189,248,.42);background:rgba(56,189,248,.08);}
+.chartMeta{font-size:10px;color:var(--muted);}
+.chartCanvasWrap{position:relative;flex:1;min-height:420px;padding:12px;}
+.chartCanvasWrap canvas{width:100% !important;height:100% !important;}
 .wr{display:flex;align-items:center;gap:7px;margin-bottom:4px;}
 .wl{width:150px;font-size:10px;color:var(--muted);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .wt{flex:1;height:16px;background:var(--bg4);border-radius:2px;position:relative;overflow:hidden;}
@@ -1488,11 +1580,21 @@ body.theme-light{background:
           <div class="quoteGrid" id="qgrid"><div class="empty" style="grid-column:1/-1">Loading market board...</div></div>
         </div>
         <div class="card">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div class="chartToolbar">
             <div class="ct2" style="margin-bottom:0">Selected symbol chart</div>
-            <div class="pill" id="tvsym">Select a signal</div>
+            <div class="chartActions">
+              <button class="chartTab active" data-window="5m" onclick="setSymbolChartWindow('5m')">5m</button>
+              <button class="chartTab" data-window="30m" onclick="setSymbolChartWindow('30m')">30m</button>
+              <button class="chartTab" data-window="2h" onclick="setSymbolChartWindow('2h')">2h</button>
+              <button class="chartTab" data-window="1d" onclick="setSymbolChartWindow('1d')">1d</button>
+              <a id="tvopen" class="chartLink" href="#" target="_blank" rel="noopener noreferrer">open external</a>
+            </div>
           </div>
-          <div id="tvchart" class="tvHost"><div class="tvEmpty">Select a signal to load a TradingView chart</div></div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+            <div class="pill" id="tvsym">Select a signal</div>
+            <div class="chartMeta" id="tvmeta">Market-board clicks update this live chart instantly.</div>
+          </div>
+          <div id="tvchart" class="tvHost"><div class="tvEmpty">Select a market-board symbol to load the live chart.</div></div>
         </div>
       </div>
     </div>
@@ -1627,6 +1729,33 @@ body.theme-light{background:
         </div>
       </div>
       <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div class="ct2" style="margin-bottom:0">Event intelligence</div>
+          <div class="pill" id="evstamp">warming</div>
+        </div>
+        <div id="evbullets" class="small">Waiting for the first event-news digest...</div>
+        <div style="display:grid;grid-template-columns:1.3fr .9fr;gap:12px;margin-top:12px">
+          <div class="card" style="padding:10px;background:var(--bg3)">
+            <div class="ct2" style="margin-bottom:8px">Top headlines</div>
+            <div class="ptw" style="max-height:260px">
+              <table class="pt">
+                <thead><tr><th>Symbol</th><th>Headline</th><th>Score</th></tr></thead>
+                <tbody id="evheadlines"><tr><td colspan="3" style="color:var(--muted);padding:12px">No headlines yet</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card" style="padding:10px;background:var(--bg3)">
+            <div class="ct2" style="margin-bottom:8px">Symbol heat</div>
+            <div class="ptw" style="max-height:260px">
+              <table class="pt">
+                <thead><tr><th>Symbol</th><th>Sentiment</th><th>News</th><th>Lane</th></tr></thead>
+                <tbody id="evsymbols"><tr><td colspan="4" style="color:var(--muted);padding:12px">No symbol heat yet</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
         <div class="ct2">Black swan stress tests - regime-aware</div>
         <div class="sg" id="stg"><div class="empty" style="grid-column:1/-1">Computing...</div></div>
         <div id="stsum" style="font-size:9px;color:var(--muted);margin-top:8px"></div>
@@ -1696,7 +1825,7 @@ body.theme-light{background:
 const SOCKET_AVAILABLE = typeof window.io === 'function';
 const CHART_AVAILABLE = typeof window.Chart !== 'undefined';
 const io_sock = SOCKET_AVAILABLE ? io({transports:['websocket','polling']}) : { on(){}, emit(){} };
-const MARKET_BOARD_LIMIT = 24;
+const MARKET_BOARD_LIMIT = 36;
 const LEADER_SYMBOLS = ['AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','AMD','NFLX','QCOM','AVGO','JPM','WMT','XOM','SPY','QQQ','DIA','IWM','RELIANCE.NS','TCS.NS','INFY.NS'];
 const TV_AMEX_SYMBOLS = new Set(['SPY','DIA','IWM','GLD','SLV','TLT','HYG','VTI','XLF','XLE','XLK','XLY','XLI','XLV','XLP','XLB','XLU']);
 const TV_NYSE_SYMBOLS = new Set(['JPM','BAC','WMT','DIS','KO','JNJ','XOM','CVX','UNH','HD','MCD','NKE','BA','CAT','GS','V','MA','PG','IBM','GE','F','GM','T','VZ','PFE','MRK','ABBV','CRM','ORCL','UBER','SNOW']);
@@ -1724,10 +1853,14 @@ const LANE_LABELS = {
   reports: 'Daily Reports'
 };
 const SIGNAL_LANES = ['normal', 'day', 'crypto'];
-let signals = {}, sel = null, eq = [100000], chart = null, sd = 'conviction', activeLane = 'all', activePage = 'overview', reportData = null, livePrices = {};
+let signals = {}, sel = null, eq = [100000], chart = null, sd = 'conviction', activeLane = 'all', activePage = 'overview', reportData = null, eventIntel = null, livePrices = {};
 let healthSnapshot = {};
-let tvState = { src: '', symbol: '', theme: '', interval: '' };
+const SYMBOL_CHART_WINDOWS = { '5m': 300, '30m': 1800, '2h': 7200, '1d': 86400 };
+let tvState = { symbol: '', window: '30m', fetchedAt: 0 };
 let chartSelection = { symbol: '', signalKey: '', lane: 'normal', market: '', source: 'auto', laneLabel: '' };
+let selectedSymbolChart = null;
+let symbolChartRequestId = 0;
+let symbolChartCache = { symbol: '', window: '', fetchedAt: 0, payload: null };
 
 function setConnectionState(label, color){
   const dot = document.getElementById('cdot');
@@ -1960,6 +2093,18 @@ function tradingViewSymbol(symbol, marketHint=''){
   return clean;
 }
 
+function selectedChartWindowSeconds(){
+  return SYMBOL_CHART_WINDOWS[tvState.window] || SYMBOL_CHART_WINDOWS['30m'];
+}
+
+function setSymbolChartWindow(windowKey){
+  tvState.window = SYMBOL_CHART_WINDOWS[windowKey] ? windowKey : '30m';
+  document.querySelectorAll('.chartTab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.window === tvState.window);
+  });
+  renderTradingViewChart(currentChartSignal() || defaultChartSignal(), true);
+}
+
 function currentChartSignal(){
   if(chartSelection.signalKey && signals[chartSelection.signalKey]){
     return mergeSignalWithLivePrice(signals[chartSelection.signalKey]);
@@ -2038,39 +2183,134 @@ function openSignal(signalKey){
   selectSig(signalKey);
 }
 
-function renderTradingViewChart(signal){
+async function renderTradingViewChart(signal, forceRefresh=false){
   const host = document.getElementById('tvchart');
   const badge = document.getElementById('tvsym');
+  const meta = document.getElementById('tvmeta');
+  const openLink = document.getElementById('tvopen');
   if(!host || !badge) return;
   if(!signal || !signal.symbol){
     badge.textContent = 'Select a signal';
-    host.innerHTML = '<div class="tvEmpty">Select a signal to load a TradingView chart</div>';
-    tvState = { src: '', symbol: '', theme: '', interval: '' };
+    if(meta) meta.textContent = 'Market-board clicks update this live chart instantly.';
+    if(openLink){
+      openLink.href = '#';
+      openLink.textContent = 'open external';
+    }
+    host.innerHTML = '<div class="tvEmpty">Select a market-board symbol to load the live chart.</div>';
+    if(selectedSymbolChart){
+      selectedSymbolChart.destroy();
+      selectedSymbolChart = null;
+    }
+    symbolChartCache = { symbol: '', window: '', fetchedAt: 0, payload: null };
     return;
   }
-  const symbol = tradingViewSymbol(signal.symbol, signal.market || marketHintForSymbol(signal.symbol));
-  if(!symbol){
-    badge.textContent = String(signal.symbol || '').toUpperCase();
-    host.innerHTML = `<div class="tvEmpty">TradingView symbol mapping is not ready for ${badge.textContent}</div>`;
-    tvState = { src: '', symbol: '', theme: '', interval: '' };
-    return;
+
+  const rawSymbol = String(signal.symbol || '').toUpperCase();
+  const mappedSymbol = tradingViewSymbol(rawSymbol, signal.market || marketHintForSymbol(rawSymbol));
+  badge.textContent = rawSymbol;
+  if(openLink){
+    openLink.href = mappedSymbol
+      ? `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(mappedSymbol)}`
+      : `https://finance.yahoo.com/quote/${encodeURIComponent(rawSymbol)}`;
+    openLink.textContent = mappedSymbol ? 'open in TradingView' : 'open external';
   }
-  const interval = signal.lane === 'day' || signal.lane === 'crypto' ? '15' : 'D';
-  const tvTheme = document.body.classList.contains('theme-light') ? 'light' : 'dark';
-  const toolbarBg = tvTheme === 'light' ? '%23f8fafc' : '%23091322';
-  const src = `https://s.tradingview.com/widgetembed/?frameElementId=tvchart_frame&symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&hidesidetoolbar=1&symboledit=1&saveimage=0&toolbarbg=${toolbarBg}&theme=${tvTheme}&style=1&timezone=Etc%2FUTC&withdateranges=1&hideideas=1`;
-  badge.textContent = symbol;
-  if(tvState.src === src){
-    return;
-  }
-  const frame = host.querySelector('iframe');
-  if(frame){
-    frame.src = src;
-    frame.title = `TradingView ${symbol}`;
+
+  const requestId = ++symbolChartRequestId;
+  const now = Date.now();
+  const windowKey = tvState.window;
+  let payload = null;
+  if(
+    !forceRefresh
+    && symbolChartCache.symbol === rawSymbol
+    && symbolChartCache.window === windowKey
+    && (now - symbolChartCache.fetchedAt) < 10000
+  ){
+    payload = symbolChartCache.payload;
   }else{
-    host.innerHTML = `<iframe title="TradingView ${symbol}" src="${src}" style="width:100%;height:420px;border:0" loading="lazy" referrerpolicy="origin"></iframe>`;
+    try{
+      const response = await fetch(`/api/chart/${encodeURIComponent(rawSymbol)}?window=${selectedChartWindowSeconds()}&points=240`);
+      payload = await response.json();
+      symbolChartCache = { symbol: rawSymbol, window: windowKey, fetchedAt: now, payload };
+    }catch(_err){
+      payload = symbolChartCache.symbol === rawSymbol ? symbolChartCache.payload : null;
+    }
   }
-  tvState = { src, symbol, theme: tvTheme, interval };
+  if(requestId !== symbolChartRequestId) return;
+
+  const points = Array.isArray(payload && payload.points) ? payload.points : [];
+  const livePrice = Number(signal.last_price ?? signal.current_price ?? payload?.price);
+  const changePct = Number(signal.price_change_pct ?? payload?.change_pct);
+  const palette = themePalette();
+  const lineColor = Number.isFinite(changePct) ? (changePct >= 0 ? '#22c55e' : '#fb7185') : '#38bdf8';
+
+  if(meta){
+    const windowLabel = Object.entries(SYMBOL_CHART_WINDOWS).find(([, seconds]) => seconds === selectedChartWindowSeconds())?.[0] || windowKey;
+    const pointLabel = points.length ? `${points.length} live points` : 'waiting for live points';
+    meta.textContent = `${windowLabel} • ${pointLabel}${Number.isFinite(changePct) ? ` • ${formatSignedPct(changePct)}` : ''}`;
+  }
+
+  if(!points.length && !Number.isFinite(livePrice)){
+    host.innerHTML = `<div class="tvEmpty">Waiting for live chart data for ${rawSymbol}...</div>`;
+    if(selectedSymbolChart){
+      selectedSymbolChart.destroy();
+      selectedSymbolChart = null;
+    }
+    tvState = { symbol: rawSymbol, window: windowKey, fetchedAt: now };
+    return;
+  }
+
+  if(!host.querySelector('#symbolChartCanvas')){
+    host.innerHTML = '<div class="chartCanvasWrap"><canvas id="symbolChartCanvas"></canvas></div>';
+  }
+  const canvas = host.querySelector('#symbolChartCanvas');
+  if(!canvas || !CHART_AVAILABLE){
+    host.innerHTML = '<div class="tvEmpty">Chart rendering unavailable in this browser.</div>';
+    return;
+  }
+
+  const labels = points.length ? points.map(point => point.label || '') : ['now'];
+  const values = points.length ? points.map(point => Number(point.price || 0)) : [livePrice];
+
+  if(!selectedSymbolChart){
+    selectedSymbolChart = new Chart(canvas.getContext('2d'), {
+      type:'line',
+      data:{
+        labels,
+        datasets:[{
+          label: rawSymbol,
+          data: values,
+          borderColor: lineColor,
+          backgroundColor: palette.area,
+          fill: true,
+          pointRadius: 0,
+          tension: 0.22,
+          borderWidth: 2,
+        }]
+      },
+      options:{
+        responsive:true,
+        maintainAspectRatio:false,
+        animation:false,
+        plugins:{legend:{display:false}, tooltip:{mode:'index', intersect:false}},
+        scales:{
+          x:{ticks:{color: palette.axis, maxTicksLimit: 8}, grid:{color: palette.grid}},
+          y:{ticks:{color: palette.axis}, grid:{color: palette.grid}}
+        }
+      }
+    });
+  }else{
+    selectedSymbolChart.data.labels = labels;
+    selectedSymbolChart.data.datasets[0].data = values;
+    selectedSymbolChart.data.datasets[0].label = rawSymbol;
+    selectedSymbolChart.data.datasets[0].borderColor = lineColor;
+    selectedSymbolChart.data.datasets[0].backgroundColor = palette.area;
+    selectedSymbolChart.options.scales.x.ticks.color = palette.axis;
+    selectedSymbolChart.options.scales.x.grid.color = palette.grid;
+    selectedSymbolChart.options.scales.y.ticks.color = palette.axis;
+    selectedSymbolChart.options.scales.y.grid.color = palette.grid;
+    selectedSymbolChart.update('none');
+  }
+  tvState = { symbol: rawSymbol, window: windowKey, fetchedAt: now };
 }
 
 function updateSelectedPrice(signal){
@@ -2735,6 +2975,45 @@ function renderDailyReport(data){
     : '<tr><td colspan="3" style="color:var(--muted);padding:12px">No time-bucket data yet</td></tr>';
 }
 
+function renderEventIntel(data){
+  eventIntel = data || eventIntel;
+  const stamp = document.getElementById('evstamp');
+  const bullets = document.getElementById('evbullets');
+  const headlinesBody = document.getElementById('evheadlines');
+  const symbolsBody = document.getElementById('evsymbols');
+  if(!stamp || !bullets || !headlinesBody || !symbolsBody || !eventIntel) return;
+  const summary = eventIntel.summary || {};
+  const generatedAt = eventIntel.generated_at ? new Date(eventIntel.generated_at).toLocaleTimeString() : 'warming';
+  stamp.textContent = `${summary.symbols_with_news || 0}/${summary.symbols_covered || 0} symbols • ${generatedAt}`;
+  bullets.innerHTML = (eventIntel.bullets || []).length
+    ? `<ul style="margin:0;padding-left:18px">${eventIntel.bullets.map(item => `<li style="margin:0 0 6px 0">${item}</li>`).join('')}</ul>`
+    : 'Event intelligence is warming up.';
+  const headlineRows = eventIntel.top_headlines || [];
+  headlinesBody.innerHTML = headlineRows.length
+    ? headlineRows.map(item => {
+        const score = Number(item.headline_score || 0);
+        return `<tr>
+          <td style="font-weight:600">${item.symbol || '-'}</td>
+          <td><a href="${item.url || '#'}" target="_blank" rel="noopener noreferrer" style="color:var(--text);text-decoration:none">${item.title || '-'}</a></td>
+          <td style="color:${score >= 4 ? 'var(--green)' : score >= 2 ? 'var(--amber)' : 'var(--muted)'}">${score.toFixed(2)}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="3" style="color:var(--muted);padding:12px">No headlines yet</td></tr>';
+  const symbolRows = eventIntel.symbol_heat || [];
+  symbolsBody.innerHTML = symbolRows.length
+    ? symbolRows.map(item => {
+        const sentiment = Number(item.mean_weighted_sentiment || 0);
+        const sentimentColor = sentiment > 0 ? 'var(--green)' : sentiment < 0 ? 'var(--red)' : 'var(--muted)';
+        return `<tr>
+          <td style="font-weight:600">${item.symbol || '-'}</td>
+          <td style="color:${sentimentColor}">${sentiment >= 0 ? '+' : ''}${sentiment.toFixed(2)}</td>
+          <td>${item.headline_count || 0}</td>
+          <td>${item.lane_label || '-'}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="4" style="color:var(--muted);padding:12px">No symbol heat yet</td></tr>';
+}
+
 function initChart(){
   if(!CHART_AVAILABLE) return;
   const canvas = document.getElementById('eqc');
@@ -3014,6 +3293,10 @@ function refreshDailyReport(){
   fetch('/api/daily-report').then(r => r.json()).then(renderDailyReport).catch(() => {});
 }
 
+function refreshEventIntel(){
+  fetch('/api/event-intel').then(r => r.json()).then(renderEventIntel).catch(() => {});
+}
+
 function refreshHealth(){
   fetch('/api/health').then(r => r.json()).then(d => {
     healthSnapshot = d || {};
@@ -3060,6 +3343,7 @@ refreshExecutionDivergence();
 refreshMetaModel();
 refreshLearningStatus();
 refreshDailyReport();
+refreshEventIntel();
 refreshHealth();
 setInterval(refreshSignals, 10000);
 setInterval(refreshPricesSnapshot, 5000);
@@ -3072,6 +3356,7 @@ setInterval(refreshExecutionDivergence, 7000);
 setInterval(refreshMetaModel, 30000);
 setInterval(refreshLearningStatus, 30000);
 setInterval(refreshDailyReport, 15000);
+setInterval(refreshEventIntel, 30000);
 setInterval(refreshHealth, 10000);
 setInterval(() => fetch('/api/stress-test').then(r => r.json()).then(renderStress).catch(() => {}), 30000);
 </script>
