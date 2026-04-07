@@ -1373,9 +1373,15 @@ body.theme-light{background:
 .lanegrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;}
 .laneCard{background:var(--bg4);border:1px solid var(--border);border-radius:6px;padding:11px;}
 .laneCard.active{border-color:rgba(56,189,248,.32);box-shadow:inset 0 0 0 1px rgba(56,189,248,.12);}
+.laneCard.clickable{cursor:pointer;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease;}
+.laneCard.clickable:hover{transform:translateY(-1px);border-color:rgba(56,189,248,.34);box-shadow:0 10px 24px rgba(2,8,23,.18);}
 .lanel{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;}
 .lanev{font-size:18px;font-family:var(--sans);font-weight:700;}
 .laneSub{font-size:9px;color:var(--muted);margin-top:4px;line-height:1.5;}
+.laneStatRow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);}
+.laneMini{font-size:9px;color:var(--muted);}
+.lanePill{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid var(--border);background:rgba(148,163,184,.08);font-size:9px;color:var(--text);}
+.tvHost iframe{display:block;}
 .returnGrid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;}
 .returnCard{background:var(--bg4);border:1px solid var(--border);border-radius:6px;padding:11px;}
 .returnLabel{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;}
@@ -1447,6 +1453,17 @@ body.theme-light{background:
         <div class="met"><div class="ml">Stress grade</div><div class="mv" style="color:var(--amber)" id="msg">-</div><div class="ms" id="msgs">black swan score</div></div>
         <div class="met"><div class="ml">Meta ML</div><div class="mv" id="mmeta">-</div><div class="ms" id="mmetas">heuristic fallback</div></div>
         <div class="met"><div class="ml">Model learning</div><div class="mv" id="learnv">-</div><div class="ms" id="learns">feature store not ready</div></div>
+      </div>
+      <div class="card" style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div class="ct2" style="margin-bottom:0">Trading Domains</div>
+          <div class="pill" id="laneSummaryPill">cross-lane live view</div>
+        </div>
+        <div class="lanegrid" id="laneOverviewGrid">
+          <div class="laneCard"><div class="lanel">Normal Trading</div><div class="lanev">-</div><div class="laneSub">Waiting for signals</div></div>
+          <div class="laneCard"><div class="lanel">Day Trading</div><div class="lanev">-</div><div class="laneSub">Waiting for signals</div></div>
+          <div class="laneCard"><div class="lanel">Crypto Scalper</div><div class="lanev">-</div><div class="laneSub">Waiting for signals</div></div>
+        </div>
       </div>
       <div class="card" style="margin-bottom:12px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
@@ -1692,8 +1709,10 @@ const LANE_LABELS = {
   crypto: 'Crypto Scalper',
   reports: 'Daily Reports'
 };
+const SIGNAL_LANES = ['normal', 'day', 'crypto'];
 let signals = {}, sel = null, eq = [100000], chart = null, sd = 'conviction', activeLane = 'all', activePage = 'overview', reportData = null, livePrices = {};
 let healthSnapshot = {};
+let tvState = { src: '', symbol: '', theme: '', interval: '' };
 
 function setConnectionState(label, color){
   const dot = document.getElementById('cdot');
@@ -1745,6 +1764,12 @@ function initTheme(){
 
 function toggleTheme(){
   applyTheme(document.body.classList.contains('theme-light') ? 'dark' : 'light');
+}
+
+function openLaneView(lane){
+  activeLane = SIGNAL_LANES.includes(lane) ? lane : 'all';
+  updateLaneTabs();
+  setPage('signals');
 }
 
 function formatMoney(value, digits=2){
@@ -1839,6 +1864,7 @@ function renderTradingViewChart(signal){
   if(!signal || !signal.symbol){
     badge.textContent = 'Select a signal';
     host.innerHTML = '<div class="tvEmpty">Select a signal to load a TradingView chart</div>';
+    tvState = { src: '', symbol: '', theme: '', interval: '' };
     return;
   }
   const symbol = tradingViewSymbol(signal.symbol);
@@ -1847,7 +1873,17 @@ function renderTradingViewChart(signal){
   const toolbarBg = tvTheme === 'light' ? '%23f8fafc' : '%23091322';
   const src = `https://s.tradingview.com/widgetembed/?frameElementId=tvchart_frame&symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&hidesidetoolbar=1&symboledit=1&saveimage=0&toolbarbg=${toolbarBg}&theme=${tvTheme}&style=1&timezone=Etc%2FUTC&withdateranges=1&hideideas=1`;
   badge.textContent = symbol;
-  host.innerHTML = `<iframe title="TradingView ${symbol}" src="${src}" style="width:100%;height:420px;border:0" loading="lazy" referrerpolicy="origin"></iframe>`;
+  if(tvState.src === src){
+    return;
+  }
+  const frame = host.querySelector('iframe');
+  if(frame){
+    frame.src = src;
+    frame.title = `TradingView ${symbol}`;
+  }else{
+    host.innerHTML = `<iframe title="TradingView ${symbol}" src="${src}" style="width:100%;height:420px;border:0" loading="lazy" referrerpolicy="origin"></iframe>`;
+  }
+  tvState = { src, symbol, theme: tvTheme, interval };
 }
 
 function updateSelectedPrice(signal){
@@ -1924,6 +1960,48 @@ function renderMarketBoard(){
   }).join('');
 }
 
+function laneReportMap(){
+  const items = Array.isArray(reportData && reportData.lanes) ? reportData.lanes : [];
+  const map = {};
+  items.forEach(item => {
+    if(item && item.lane){
+      map[item.lane] = item;
+    }
+  });
+  return map;
+}
+
+function renderLaneOverview(){
+  const grid = document.getElementById('laneOverviewGrid');
+  const pill = document.getElementById('laneSummaryPill');
+  if(!grid || !pill) return;
+  const reportMap = laneReportMap();
+  const cards = SIGNAL_LANES.map(lane => {
+    const laneSignals = Object.values(signals).filter(signal => signal.lane === lane);
+    const actionable = laneSignals.filter(isTradeReady);
+    const buys = actionable.filter(signal => signal.signal === 'buy').length;
+    const sells = actionable.filter(signal => signal.signal === 'sell').length;
+    const watch = Math.max(0, laneSignals.length - actionable.length);
+    const laneReport = reportMap[lane] || {};
+    const pnl = Number(laneReport.day_pnl || 0);
+    const status = laneReport.status || (actionable.length ? 'active' : laneSignals.length ? 'warming' : 'standby');
+    const active = activeLane === lane || (activeLane === 'all' && lane === 'normal');
+    const accent = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--text)';
+    return `<div class="laneCard clickable${active ? ' active' : ''}" onclick="openLaneView('${lane}')">
+      <div class="lanel">${LANE_LABELS[lane]}</div>
+      <div class="lanev" style="color:${actionable.length ? 'var(--blue)' : accent}">${actionable.length}</div>
+      <div class="laneSub">${actionable.length} trade-ready • ${laneSignals.length} total signals<br>${buys} buy • ${sells} sell • ${watch} watch</div>
+      <div class="laneStatRow">
+        <span class="lanePill">${status}</span>
+        <span class="laneMini">${laneReport.open_positions || 0} open • day P&amp;L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}</span>
+      </div>
+    </div>`;
+  });
+  const totalActionable = Object.values(signals).filter(isTradeReady).length;
+  pill.textContent = `${totalActionable} trade-ready across 3 domains`;
+  grid.innerHTML = cards.join('');
+}
+
 function normalizeSignal(s){
   if(!s || !s.symbol) return null;
   const dir = s.signal || s.direction || 'neutral';
@@ -1989,6 +2067,7 @@ function setLane(lane){
   activeLane = lane || 'all';
   updateLaneTabs();
   renderSidebar();
+  renderLaneOverview();
   renderDailyReport(reportData);
   if(sel && signals[sel]) renderDetail(signals[sel]);
 }
@@ -2009,6 +2088,7 @@ function applySignals(rows, replace=false){
   const arr = Object.values(signals);
   renderSidebar();
   renderMarketBoard();
+  renderLaneOverview();
   updateMetrics();
   if((!sel || !signals[sel]) && arr.length){
     const preferred = preferredSignal(arr);
@@ -2441,6 +2521,7 @@ function renderDailyReport(data){
       </div>
     </div>`;
   }).join('');
+  renderLaneOverview();
 
   const targetLane = activeLane === 'all' || activeLane === 'reports'
     ? (lanes.find(l => l.lane === 'day') || lanes[0])
@@ -2775,6 +2856,7 @@ function refreshPortfolioSummary(){
 initTheme();
 initChart();
 updateLaneTabs();
+renderLaneOverview();
 setPage(activePage);
 refreshSignals();
 refreshPricesSnapshot();
