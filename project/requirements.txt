@@ -28,7 +28,7 @@ shap>=0.44.0
 
 # ── Finance Data ──────────────────────────────────────────────
 yfinance>=0.2.36          # Free price data fallback (no key needed)
-requests>=2.31.0          # Alpha Vantage + NewsAPI HTTP calls
+requests>=2.31.0          # Alpha Vantage, Polygon, EODHD, Binance, Bybit HTTP calls
 
 # ── Real-Time WebSocket ───────────────────────────────────────
 websocket-client>=1.7.0   # Finnhub WebSocket
@@ -45,6 +45,7 @@ nltk>=3.8.1               # VADER sentiment (fast, rule-based, free)
 
 # ── Utilities ─────────────────────────────────────────────────
 python-dotenv>=1.0.0      # Load .env file automatically
+MetaTrader5>=5.0.45; python_version < "3.13"   # Optional MT5 bridge (best on Python 3.11/3.12)
 
 # ══════════════════════════════════════════════════════════════
 # OPTIONAL — only if you want the full feature set

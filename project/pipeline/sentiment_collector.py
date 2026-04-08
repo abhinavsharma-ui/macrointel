@@ -5,12 +5,14 @@ Free-first multi-source news ingestion with:
   - alias-aware company-name queries
   - Google News RSS fallback
   - official NSE and SEC filings feeds
+  - official Binance / Bybit crypto announcements
   - press-release style search queries
   - optional API providers when keys exist
   - source weighting, dedupe, and low-noise logging
 """
 
 import html
+import json
 import logging
 import os
 import re
@@ -19,13 +21,21 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote_plus, urlparse
 
 import pandas as pd
 import requests
 
-from pipeline.provider_utils import APIKeyPool, FetchOutcome, looks_rate_limited, parse_api_keys, stable_rotate
+from pipeline.provider_utils import (
+    APIKeyPool,
+    FetchOutcome,
+    looks_rate_limited,
+    parse_api_keys,
+    stable_rotate,
+    to_eodhd_symbol,
+    to_polygon_symbol,
+)
 from pipeline.universe import get_company_name, get_market, get_sector, get_symbol_aliases
 
 logger = logging.getLogger(__name__)
@@ -41,18 +51,23 @@ YAHOO_RSS_BASE = "https://feeds.finance.yahoo.com/rss/2.0/headline"
 NEWS_API_BASE = "https://newsapi.org/v2/everything"
 ALPHA_VANTAGE_BASE = "https://www.alphavantage.co/query"
 FINNHUB_COMPANY_NEWS_BASE = "https://finnhub.io/api/v1/company-news"
+POLYGON_NEWS_BASE = "https://api.polygon.io/v2/reference/news"
+EODHD_NEWS_BASE = "https://eodhd.com/api/news"
 GNEWS_BASE = "https://gnews.io/api/v4/search"
 SEC_ATOM_BASE = "https://www.sec.gov/cgi-bin/browse-edgar"
+BINANCE_ANNOUNCEMENTS_API_BASE = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
+BINANCE_ANNOUNCEMENT_DETAIL_BASE = "https://www.binance.com/en/support/announcement/detail/{code}"
+BYBIT_ANNOUNCEMENTS_BASE = "https://announcements.bybit.com/en-US/"
 
 NEWS_PROVIDER_ORDER = [
     name.strip().lower()
     for name in os.getenv(
         "NEWS_PROVIDER_ORDER",
-        "google_rss,rss,nse_announcements,sec_filings,press_releases,finnhub,alpha_vantage,newsapi,gnews,bse_announcements",
+        "sec_filings,press_releases,nse_announcements,bse_announcements,binance_announcements,bybit_announcements,google_rss,finnhub,alpha_vantage,eodhd,polygon,newsapi,gnews,rss",
     ).split(",")
     if name.strip()
 ]
-NEWS_MAX_PROVIDER_ATTEMPTS = max(1, int(os.getenv("NEWS_MAX_PROVIDER_ATTEMPTS", "4")))
+NEWS_MAX_PROVIDER_ATTEMPTS = max(1, int(os.getenv("NEWS_MAX_PROVIDER_ATTEMPTS", "6")))
 NEWS_MIN_ARTICLES = max(1, int(os.getenv("NEWS_MIN_ARTICLES", "5")))
 NEWS_MAX_ARTICLES = max(NEWS_MIN_ARTICLES, int(os.getenv("NEWS_MAX_ARTICLES", "20")))
 NEWS_QUERY_VARIANTS = max(1, int(os.getenv("NEWS_QUERY_VARIANTS", "4")))
@@ -60,6 +75,19 @@ NEWS_LOG_PROGRESS_EVERY = max(1, int(os.getenv("NEWS_LOG_PROGRESS_EVERY", "10"))
 NEWS_FAILURE_PREVIEW = max(1, int(os.getenv("NEWS_FAILURE_PREVIEW", "6")))
 NEWS_OFFICIAL_HIT_TARGET = max(1, int(os.getenv("NEWS_OFFICIAL_HIT_TARGET", "2")))
 NEWS_DUPLICATE_WINDOW_HOURS = max(1, int(os.getenv("NEWS_DUPLICATE_WINDOW_HOURS", "36")))
+NEWS_FUZZY_DEDUPE_THRESHOLD = min(0.98, max(0.55, float(os.getenv("NEWS_FUZZY_DEDUPE_THRESHOLD", "0.84"))))
+NEWS_FUZZY_DEDUPE_WINDOW_HOURS = max(1, int(os.getenv("NEWS_FUZZY_DEDUPE_WINDOW_HOURS", "18")))
+NEWS_MIN_RELEVANCE_SCORE = max(0.10, float(os.getenv("NEWS_MIN_RELEVANCE_SCORE", "0.95")))
+NEWS_OFFICIAL_MIN_RELEVANCE_SCORE = max(0.05, float(os.getenv("NEWS_OFFICIAL_MIN_RELEVANCE_SCORE", "0.55")))
+NEWS_SYMBOL_SCOPED_MIN_RELEVANCE_SCORE = max(0.0, float(os.getenv("NEWS_SYMBOL_SCOPED_MIN_RELEVANCE_SCORE", "0.20")))
+NEWS_MAX_AGE_HOURS = max(6, int(os.getenv("NEWS_MAX_AGE_HOURS", "72")))
+NEWS_MAX_OFFICIAL_AGE_HOURS = max(NEWS_MAX_AGE_HOURS, int(os.getenv("NEWS_MAX_OFFICIAL_AGE_HOURS", "168")))
+OFFICIAL_EXCHANGE_CACHE_SECONDS = max(300, int(os.getenv("OFFICIAL_EXCHANGE_CACHE_SECONDS", "900")))
+BINANCE_ANNOUNCEMENT_CATALOG_IDS = [
+    int(part.strip())
+    for part in os.getenv("BINANCE_ANNOUNCEMENT_CATALOG_IDS", "48,161,157,49").replace(";", ",").split(",")
+    if part.strip()
+]
 
 NSE_RSS_FEEDS = {
     "online_announcements": "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml",
@@ -85,6 +113,9 @@ OFFICIAL_DOMAINS = {
     "nsearchives.nseindia.com",
     "bseindia.com",
     "www.bseindia.com",
+    "binance.com",
+    "www.binance.com",
+    "announcements.bybit.com",
 }
 MAJOR_MEDIA_DOMAINS = {
     "reuters.com",
@@ -124,6 +155,147 @@ EARNINGS_TONE_KEYWORDS = (
     "earnings webcast",
     "investor call",
 )
+
+OFFICIAL_PROVIDER_NAMES = {
+    "nse_announcements",
+    "sec_filings",
+    "bse_announcements",
+    "binance_announcements",
+    "bybit_announcements",
+}
+SYMBOL_SCOPED_PROVIDERS = {
+    "rss",
+    "finnhub",
+    "alpha_vantage",
+    "sec_filings",
+    "polygon",
+    "eodhd",
+    "binance_announcements",
+    "bybit_announcements",
+}
+PROVIDER_QUALITY_OVERRIDES = {
+    "sec_filings": 1.00,
+    "nse_announcements": 1.00,
+    "binance_announcements": 1.00,
+    "bybit_announcements": 0.98,
+    "bse_announcements": 0.95,
+    "press_releases": 0.90,
+    "google_rss": 0.68,
+    "rss": 0.66,
+    "polygon": 0.74,
+    "finnhub": 0.72,
+    "alpha_vantage": 0.70,
+    "eodhd": 0.68,
+    "newsapi": 0.66,
+    "gnews": 0.62,
+}
+CATALYST_KEYWORDS = {
+    "earnings": (
+        "earnings",
+        "quarter results",
+        "quarterly results",
+        "financial results",
+        "results for the quarter",
+        "earnings call",
+        "annual results",
+    ),
+    "guidance": (
+        "guidance",
+        "outlook",
+        "forecast",
+        "raises outlook",
+        "cuts outlook",
+        "revenue outlook",
+        "profit outlook",
+    ),
+    "mna": (
+        "acquire",
+        "acquisition",
+        "merger",
+        "merge with",
+        "buyout",
+        "takeover",
+        "strategic sale",
+    ),
+    "downgrade": (
+        "downgrade",
+        "cut to sell",
+        "cut to underperform",
+        "cut to underweight",
+        "price target cut",
+    ),
+    "upgrade": (
+        "upgrade",
+        "raised to buy",
+        "raised to overweight",
+        "price target raised",
+        "initiated with buy",
+    ),
+    "regulatory": (
+        "sec",
+        "fda",
+        "approval",
+        "probe",
+        "investigation",
+        "lawsuit",
+        "compliance",
+        "license",
+        "regulatory",
+        "court",
+        "settlement",
+        "network upgrade",
+        "hard fork",
+        "maintenance",
+        "wallet maintenance",
+        "withdrawal",
+        "deposit",
+        "suspension",
+    ),
+    "product_launch": (
+        "launch",
+        "launches",
+        "introduces",
+        "release",
+        "rollout",
+        "mainnet",
+        "beta",
+        "partnership",
+        "integration",
+    ),
+    "insider_activity": (
+        "insider",
+        "promoter",
+        "director deal",
+        "share sale",
+        "stake sale",
+        "stake buy",
+        "pledge",
+        "buyback",
+    ),
+    "listing_change": (
+        "listing",
+        "delisting",
+        "will list",
+        "will delist",
+        "adds new pairs",
+        "adds pairs",
+        "removes pairs",
+        "margin will add",
+        "margin will delist",
+        "perpetual contract",
+    ),
+}
+CATALYST_PRIORITY = [
+    "earnings",
+    "guidance",
+    "mna",
+    "downgrade",
+    "upgrade",
+    "regulatory",
+    "listing_change",
+    "insider_activity",
+    "product_launch",
+]
 
 
 def _get_vader():
@@ -222,6 +394,121 @@ def _article_date(value: str) -> date:
     return _parse_timestamp(value).date()
 
 
+def _age_hours(value: str) -> float:
+    published_at = _parse_timestamp(value)
+    return max(0.0, (datetime.now(timezone.utc) - published_at).total_seconds() / 3600.0)
+
+
+def _freshness_score(value: str, *, official: bool = False) -> float:
+    max_age = NEWS_MAX_OFFICIAL_AGE_HOURS if official else NEWS_MAX_AGE_HOURS
+    age = _age_hours(value)
+    if age >= max_age:
+        return 0.0
+    return round(max(0.0, 1.0 - (age / max(max_age, 1))), 4)
+
+
+def _symbol_market_aliases(symbol: str) -> List[str]:
+    aliases = list(get_symbol_aliases(symbol))
+    raw = symbol.replace(".NS", "").replace("^", "").strip().upper()
+    if raw.endswith(("USDT", "USDC", "BUSD")):
+        for suffix in ("USDT", "USDC", "BUSD"):
+            if raw.endswith(suffix):
+                base_asset = raw[: -len(suffix)]
+                if base_asset:
+                    aliases.extend([base_asset, f"{base_asset} token", f"{base_asset} coin"])
+                break
+    return list(dict.fromkeys(_normalize_space(alias) for alias in aliases if _normalize_space(alias)))
+
+
+def _text_contains_phrase(haystack: str, phrase: str) -> bool:
+    term = _normalize_space(phrase).lower()
+    if not term:
+        return False
+    if len(term) <= 4:
+        return f" {term} " in haystack
+    return term in haystack
+
+
+def _relevance_metrics(symbol: str, title: str, description: str, provider_name: str, url: str = "") -> Dict[str, Any]:
+    title_norm = f" {re.sub(r'[^a-z0-9 ]+', ' ', (title or '').lower())} "
+    body_norm = f" {re.sub(r'[^a-z0-9 ]+', ' ', (description or '').lower())} "
+    url_norm = _canonicalize_url(url)
+    aliases = _symbol_market_aliases(symbol)
+
+    matched_aliases: List[str] = []
+    title_hits = 0
+    body_hits = 0
+    for alias in aliases:
+        if _text_contains_phrase(title_norm, alias):
+            title_hits += 1
+            matched_aliases.append(alias)
+            continue
+        if _text_contains_phrase(body_norm, alias):
+            body_hits += 1
+            matched_aliases.append(alias)
+
+    company_name = _normalize_space(get_company_name(symbol)).lower()
+    company_in_title = bool(company_name) and _text_contains_phrase(title_norm, company_name)
+    company_in_body = bool(company_name) and _text_contains_phrase(body_norm, company_name)
+    symbol_token = symbol.replace(".NS", "").replace("^", "").strip().lower()
+    url_symbol_hit = bool(symbol_token and symbol_token in url_norm)
+
+    score = 0.0
+    score += min(title_hits * 0.75, 1.8)
+    score += min(body_hits * 0.35, 0.9)
+    if company_in_title:
+        score += 0.60
+    elif company_in_body:
+        score += 0.25
+    if url_symbol_hit:
+        score += 0.15
+    if provider_name in SYMBOL_SCOPED_PROVIDERS:
+        score += 0.30
+
+    return {
+        "relevance_score": round(min(score, 3.0), 4),
+        "title_alias_hits": float(title_hits),
+        "body_alias_hits": float(body_hits),
+        "company_name_hit": float(company_in_title or company_in_body),
+        "exact_alias_hit": float(title_hits > 0),
+        "url_symbol_hit": float(url_symbol_hit),
+        "matched_aliases": matched_aliases[:6],
+    }
+
+
+def _catalyst_flags(title: str, description: str, provider_name: str, symbol: str) -> Dict[str, Any]:
+    text = f"{title} {description}".lower()
+    labels: List[str] = []
+    hits: Dict[str, float] = {}
+    for label, keywords in CATALYST_KEYWORDS.items():
+        hit = float(any(keyword in text for keyword in keywords))
+        hits[f"{label}_catalyst_hit"] = hit
+        if hit > 0:
+            labels.append(label)
+
+    if provider_name == "sec_filings" and "earnings" not in labels and any(token in text for token in ("10-q", "10-k", "8-k")):
+        labels.append("regulatory")
+        hits["regulatory_catalyst_hit"] = 1.0
+    if provider_name in {"binance_announcements", "bybit_announcements"} and "listing_change" not in labels:
+        if any(keyword in text for keyword in ("listing", "delisting", "pairs", "perpetual contract", "margin")):
+            labels.append("listing_change")
+            hits["listing_change_catalyst_hit"] = 1.0
+
+    ordered_labels = [label for label in CATALYST_PRIORITY if label in labels]
+    strength = 0.0
+    for label in ordered_labels:
+        if label in {"earnings", "guidance", "mna", "downgrade", "regulatory", "listing_change"}:
+            strength += 1.0
+        else:
+            strength += 0.6
+    return {
+        **hits,
+        "catalyst_labels": ordered_labels,
+        "primary_catalyst": ordered_labels[0] if ordered_labels else "",
+        "catalyst_strength": round(min(strength, 4.0), 4),
+    }
+
+
 def _query_region(symbol: str) -> str:
     return "IN" if symbol.endswith(".NS") else "US"
 
@@ -269,25 +556,17 @@ def _alias_queries(symbol: str) -> List[str]:
 
 
 def _matches_aliases(symbol: str, text: str) -> bool:
-    haystack = f" {re.sub(r'[^a-z0-9 ]+', ' ', (text or '').lower())} "
-    for alias in get_symbol_aliases(symbol):
-        alias_norm = _normalize_space(alias).lower()
-        if not alias_norm:
-            continue
-        if len(alias_norm) <= 4:
-            if f" {alias_norm} " in haystack:
-                return True
-        elif alias_norm in haystack:
-            return True
-    return False
+    metrics = _relevance_metrics(symbol, text, text, "google_rss")
+    return bool(metrics.get("relevance_score", 0.0) >= NEWS_MIN_RELEVANCE_SCORE)
 
 
 def _source_flags(article: Dict, provider_name: str) -> Dict[str, float]:
     domain = _safe_domain(article.get("url", ""))
     title = (article.get("title") or "").lower()
     source = (article.get("source") or "").lower()
-    is_official = domain in OFFICIAL_DOMAINS or provider_name in {"nse_announcements", "sec_filings", "bse_announcements"}
-    is_filing = is_official and any(token in title for token in ["8-k", "10-q", "10-k", "results", "filing", "annual report", "board meeting", "insider"]) 
+    is_official = domain in OFFICIAL_DOMAINS or provider_name in OFFICIAL_PROVIDER_NAMES
+    is_exchange_official = provider_name in {"binance_announcements", "bybit_announcements"}
+    is_filing = is_official and any(token in title for token in ["8-k", "10-q", "10-k", "results", "filing", "annual report", "board meeting", "insider"])
     is_press_release = domain in PRESS_RELEASE_DOMAINS or provider_name == "press_releases" or "press release" in title
 
     if is_official:
@@ -300,10 +579,12 @@ def _source_flags(article: Dict, provider_name: str) -> Dict[str, float]:
         quality = 0.52
     else:
         quality = 0.40
+    quality = max(quality, float(PROVIDER_QUALITY_OVERRIDES.get(provider_name, 0.0) or 0.0))
 
     return {
         "source_quality_score": quality,
         "is_official": float(is_official),
+        "is_exchange_official": float(is_exchange_official),
         "is_filing": float(is_filing),
         "is_press_release": float(is_press_release),
         "official_event_hit": float(is_official),
@@ -320,11 +601,36 @@ def _dedupe_key(article: Dict) -> str:
     return f"{title}|{published}"
 
 
+def _find_duplicate_key(merged: Dict[str, Dict], candidate: Dict) -> str:
+    candidate_key = _dedupe_key(candidate)
+    if candidate_key in merged:
+        return candidate_key
+
+    candidate_title = _normalize_title(candidate.get("title", ""))
+    candidate_ts = _parse_timestamp(candidate.get("publishedAt", ""))
+    candidate_url = _canonicalize_url(candidate.get("url", ""))
+    for existing_key, existing in merged.items():
+        existing_url = _canonicalize_url(existing.get("url", ""))
+        if candidate_url and existing_url and candidate_url == existing_url:
+            return existing_key
+        existing_ts = _parse_timestamp(existing.get("publishedAt", ""))
+        age_delta_hours = abs((candidate_ts - existing_ts).total_seconds()) / 3600.0
+        if age_delta_hours > NEWS_FUZZY_DEDUPE_WINDOW_HOURS:
+            continue
+        similarity = _jaccard_similarity(candidate_title, _normalize_title(existing.get("title", "")))
+        if similarity >= NEWS_FUZZY_DEDUPE_THRESHOLD:
+            return existing_key
+    return candidate_key
+
+
 def _article_rank(article: Dict) -> tuple:
     ts = _parse_timestamp(article.get("publishedAt", ""))
     return (
         float(article.get("official_event_hit", 0.0) or 0.0),
         float(article.get("filing_event_hit", 0.0) or 0.0),
+        float(article.get("catalyst_strength", 0.0) or 0.0),
+        float(article.get("relevance_score", 0.0) or 0.0),
+        float(article.get("freshness_score", 0.0) or 0.0),
         float(article.get("is_press_release", 0.0) or 0.0),
         float(article.get("source_quality_score", 0.0) or 0.0),
         ts.timestamp(),
@@ -337,10 +643,6 @@ def _finalize_article(article: Dict, provider_name: str, symbol: str) -> Optiona
     published_at = article.get("publishedAt") or article.get("published_at") or article.get("time_published") or ""
     if not title:
         return None
-    requires_alias_match = provider_name not in {"rss", "finnhub", "alpha_vantage", "sec_filings"}
-    if requires_alias_match and not _matches_aliases(symbol, f"{title} {description}"):
-        return None
-
     item = {
         "title": title,
         "description": description or title,
@@ -348,8 +650,22 @@ def _finalize_article(article: Dict, provider_name: str, symbol: str) -> Optiona
         "source": _normalize_space(article.get("source", provider_name.replace("_", " ").title())),
         "url": article.get("url", "") or article.get("link", ""),
         "provider": provider_name,
+        "symbol": symbol,
+        "market": get_market(symbol).upper(),
     }
-    item.update(_source_flags(item, provider_name))
+    source_flags = _source_flags(item, provider_name)
+    item.update(source_flags)
+    relevance = _relevance_metrics(symbol, title, description, provider_name, item["url"])
+    freshness = _freshness_score(item["publishedAt"], official=bool(source_flags.get("is_official", 0.0)))
+    item.update(relevance)
+    item["freshness_score"] = freshness
+    item.update(_catalyst_flags(title, description, provider_name, symbol))
+
+    min_relevance = NEWS_SYMBOL_SCOPED_MIN_RELEVANCE_SCORE if provider_name in SYMBOL_SCOPED_PROVIDERS else NEWS_MIN_RELEVANCE_SCORE
+    if source_flags.get("is_official", 0.0) > 0:
+        min_relevance = min(min_relevance, NEWS_OFFICIAL_MIN_RELEVANCE_SCORE)
+    if freshness <= 0.0 or float(item.get("relevance_score", 0.0) or 0.0) < min_relevance:
+        return None
     return item
 
 
@@ -505,6 +821,151 @@ class AlphaVantageNewsFetcher:
                 for item in articles[:NEWS_MAX_ARTICLES]
             ]
             return FetchOutcome(self.name, data=formatted)
+        except Exception as exc:
+            error = str(exc)
+            if looks_rate_limited(error):
+                self.keys.cool_down(api_key)
+                return FetchOutcome(self.name, status="rate_limited", error=error)
+            return FetchOutcome(self.name, status="error", error=error)
+
+
+class PolygonNewsFetcher:
+    name = "polygon"
+    query_driven = False
+
+    def __init__(self):
+        self.keys = APIKeyPool(
+            parse_api_keys("POLYGON_API_KEYS", "POLYGON_API_KEY"),
+            default_cooldown=float(os.getenv("POLYGON_NEWS_COOLDOWN_SECONDS", "180")),
+        )
+        self._min_call_interval = float(os.getenv("POLYGON_NEWS_MIN_CALL_INTERVAL", "0.35"))
+        self._last_call_by_key: Dict[str, float] = {}
+
+    def supports(self, symbol: str) -> bool:
+        return bool(to_polygon_symbol(symbol))
+
+    def _throttle(self, api_key: str):
+        elapsed = time.time() - self._last_call_by_key.get(api_key, 0.0)
+        if elapsed < self._min_call_interval:
+            time.sleep(self._min_call_interval - elapsed)
+        self._last_call_by_key[api_key] = time.time()
+
+    def fetch(self, symbol: str, query: str, from_date: date, to_date: date) -> FetchOutcome:
+        del query
+        api_key = self.keys.acquire()
+        if not api_key:
+            return FetchOutcome(self.name, status="unavailable", error="No Polygon key available")
+
+        ticker = to_polygon_symbol(symbol)
+        if not ticker:
+            return FetchOutcome(self.name, status="unsupported", error=f"Polygon does not support {symbol}")
+
+        self._throttle(api_key)
+        params = {
+            "ticker": ticker,
+            "published_utc.gte": f"{from_date.isoformat()}T00:00:00Z",
+            "published_utc.lte": f"{to_date.isoformat()}T23:59:59Z",
+            "order": "desc",
+            "sort": "published_utc",
+            "limit": NEWS_MAX_ARTICLES,
+            "apiKey": api_key,
+        }
+
+        try:
+            resp = requests.get(POLYGON_NEWS_BASE, params=params, timeout=12, headers=HEADERS)
+            resp.raise_for_status()
+            payload = resp.json()
+            rows = payload.get("results", [])
+            if not rows:
+                error = payload.get("error") or payload.get("message") or payload.get("status") or "Polygon returned no articles"
+                if looks_rate_limited(error):
+                    self.keys.cool_down(api_key)
+                    return FetchOutcome(self.name, status="rate_limited", error=error)
+                return FetchOutcome(self.name, status="empty", error=error)
+            articles = [
+                {
+                    "title": item.get("title", ""),
+                    "description": item.get("description", ""),
+                    "publishedAt": item.get("published_utc", ""),
+                    "source": ((item.get("publisher") or {}).get("name") or "Polygon"),
+                    "url": item.get("article_url", ""),
+                }
+                for item in rows[:NEWS_MAX_ARTICLES]
+            ]
+            return FetchOutcome(self.name, data=articles)
+        except Exception as exc:
+            error = str(exc)
+            if looks_rate_limited(error):
+                self.keys.cool_down(api_key)
+                return FetchOutcome(self.name, status="rate_limited", error=error)
+            return FetchOutcome(self.name, status="error", error=error)
+
+
+class EODHDNewsFetcher:
+    name = "eodhd"
+    query_driven = False
+
+    def __init__(self):
+        self.keys = APIKeyPool(
+            parse_api_keys("EODHD_API_KEYS", "EODHD_API_KEY"),
+            default_cooldown=float(os.getenv("EODHD_NEWS_COOLDOWN_SECONDS", "120")),
+        )
+        self._min_call_interval = float(os.getenv("EODHD_NEWS_MIN_CALL_INTERVAL", "0.35"))
+        self._last_call_by_key: Dict[str, float] = {}
+
+    def supports(self, symbol: str) -> bool:
+        return bool(to_eodhd_symbol(symbol))
+
+    def _throttle(self, api_key: str):
+        elapsed = time.time() - self._last_call_by_key.get(api_key, 0.0)
+        if elapsed < self._min_call_interval:
+            time.sleep(self._min_call_interval - elapsed)
+        self._last_call_by_key[api_key] = time.time()
+
+    def fetch(self, symbol: str, query: str, from_date: date, to_date: date) -> FetchOutcome:
+        del query
+        api_key = self.keys.acquire()
+        if not api_key:
+            return FetchOutcome(self.name, status="unavailable", error="No EODHD key available")
+
+        ticker = to_eodhd_symbol(symbol)
+        if not ticker:
+            return FetchOutcome(self.name, status="unsupported", error=f"EODHD does not support {symbol}")
+
+        self._throttle(api_key)
+        params = {
+            "api_token": api_key,
+            "fmt": "json",
+            "s": ticker,
+            "from": from_date.isoformat(),
+            "to": to_date.isoformat(),
+            "limit": NEWS_MAX_ARTICLES,
+            "offset": 0,
+        }
+
+        try:
+            resp = requests.get(EODHD_NEWS_BASE, params=params, timeout=12, headers=HEADERS)
+            resp.raise_for_status()
+            payload = resp.json()
+            if isinstance(payload, dict):
+                error = payload.get("message") or payload.get("error") or "EODHD returned no articles"
+                if looks_rate_limited(error):
+                    self.keys.cool_down(api_key)
+                    return FetchOutcome(self.name, status="rate_limited", error=error)
+                return FetchOutcome(self.name, status="empty", error=error)
+            if not payload:
+                return FetchOutcome(self.name, status="empty", error="EODHD returned no articles")
+            articles = [
+                {
+                    "title": item.get("title", ""),
+                    "description": item.get("content", item.get("text", "")),
+                    "publishedAt": item.get("date", ""),
+                    "source": item.get("source", "EODHD"),
+                    "url": item.get("link", ""),
+                }
+                for item in payload[:NEWS_MAX_ARTICLES]
+            ]
+            return FetchOutcome(self.name, data=articles)
         except Exception as exc:
             error = str(exc)
             if looks_rate_limited(error):
@@ -771,34 +1232,186 @@ class PressReleaseFetcher(GoogleNewsRSSFetcher):
         return super().fetch(symbol, pr_query, from_date, to_date)
 
 
+class BinanceAnnouncementsFetcher:
+    name = "binance_announcements"
+    query_driven = False
+
+    def __init__(self):
+        self._cache: Dict[int, tuple] = {}
+
+    def supports(self, symbol: str) -> bool:
+        return get_market(symbol) == "crypto"
+
+    def _get_category_entries(self, catalog_id: int) -> List[Dict]:
+        now = time.time()
+        cached = self._cache.get(int(catalog_id))
+        if cached and (now - cached[0]) < OFFICIAL_EXCHANGE_CACHE_SECONDS:
+            return cached[1]
+
+        resp = requests.get(
+            BINANCE_ANNOUNCEMENTS_API_BASE,
+            params={
+                "type": "1",
+                "catalogId": str(catalog_id),
+                "pageNo": "1",
+                "pageSize": str(max(10, NEWS_MAX_ARTICLES)),
+            },
+            timeout=12,
+            headers=HEADERS,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        catalogs = ((payload or {}).get("data") or {}).get("catalogs") or []
+        entries: List[Dict] = []
+        for catalog in catalogs:
+            category_name = str(catalog.get("catalogName") or "Binance Announcements").strip()
+            for row in catalog.get("articles") or []:
+                release_ms = int(row.get("releaseDate") or 0)
+                published_at = datetime.fromtimestamp(release_ms / 1000.0, tz=timezone.utc).isoformat() if release_ms > 0 else ""
+                code = str(row.get("code") or "").strip()
+                url = BINANCE_ANNOUNCEMENT_DETAIL_BASE.format(code=code) if code else "https://www.binance.com/en/support/announcement"
+                entries.append(
+                    {
+                        "title": _normalize_space(row.get("title", "")),
+                        "description": category_name,
+                        "publishedAt": published_at,
+                        "source": f"Binance {category_name}",
+                        "url": url,
+                    }
+                )
+        self._cache[int(catalog_id)] = (now, entries)
+        return entries
+
+    def fetch(self, symbol: str, query: str, from_date: date, to_date: date) -> FetchOutcome:
+        del query
+        articles: List[Dict] = []
+        errors: List[str] = []
+        for catalog_id in BINANCE_ANNOUNCEMENT_CATALOG_IDS:
+            try:
+                for item in self._get_category_entries(catalog_id):
+                    published = _article_date(item.get("publishedAt", ""))
+                    if published < from_date or published > to_date:
+                        continue
+                    if not _matches_aliases(symbol, f"{item.get('title', '')} {item.get('description', '')}"):
+                        continue
+                    articles.append(dict(item))
+            except Exception as exc:
+                errors.append(f"{catalog_id}: {exc}")
+        if articles:
+            articles.sort(key=lambda article: _parse_timestamp(article.get("publishedAt", "")), reverse=True)
+            return FetchOutcome(self.name, data=articles[:NEWS_MAX_ARTICLES])
+        if errors:
+            return FetchOutcome(self.name, status="error", error=" | ".join(errors[:3]))
+        return FetchOutcome(self.name, status="empty", error="No Binance announcements matched aliases")
+
+
+class BybitAnnouncementsFetcher:
+    name = "bybit_announcements"
+    query_driven = False
+
+    def __init__(self):
+        self._cache: tuple = (0.0, [])
+
+    def supports(self, symbol: str) -> bool:
+        return get_market(symbol) == "crypto"
+
+    def _get_entries(self) -> List[Dict]:
+        cached_at, cached_rows = self._cache
+        if cached_rows and (time.time() - cached_at) < OFFICIAL_EXCHANGE_CACHE_SECONDS:
+            return list(cached_rows)
+
+        resp = requests.get(BYBIT_ANNOUNCEMENTS_BASE, timeout=12, headers=HEADERS)
+        resp.raise_for_status()
+        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', resp.text, re.S)
+        if not match:
+            return []
+        payload = json.loads(match.group(1))
+        rows = (((payload or {}).get("props") or {}).get("pageProps") or {}).get("articleInitEntity", {}).get("list") or []
+        entries: List[Dict] = []
+        for row in rows:
+            title = _normalize_space(row.get("title", ""))
+            if not title:
+                continue
+            category = (((row or {}).get("category") or {}).get("title") or "Bybit Announcements").strip()
+            article_url = str(row.get("url") or "").strip()
+            if article_url.startswith("/"):
+                article_url = f"{BYBIT_ANNOUNCEMENTS_BASE.rstrip('/')}{article_url}"
+            published_ts = int(row.get("publish_time") or row.get("date_timestamp") or 0)
+            published_at = datetime.fromtimestamp(published_ts, tz=timezone.utc).isoformat() if published_ts > 0 else ""
+            entries.append(
+                {
+                    "title": title,
+                    "description": _normalize_space(f"{category} {' '.join(row.get('topics') or [])}"),
+                    "publishedAt": published_at,
+                    "source": f"Bybit {category}",
+                    "url": article_url,
+                }
+            )
+        self._cache = (time.time(), entries)
+        return entries
+
+    def fetch(self, symbol: str, query: str, from_date: date, to_date: date) -> FetchOutcome:
+        del query
+        try:
+            articles = []
+            for item in self._get_entries():
+                published = _article_date(item.get("publishedAt", ""))
+                if published < from_date or published > to_date:
+                    continue
+                if not _matches_aliases(symbol, f"{item.get('title', '')} {item.get('description', '')}"):
+                    continue
+                articles.append(dict(item))
+            if not articles:
+                return FetchOutcome(self.name, status="empty", error="No Bybit announcements matched aliases")
+            articles.sort(key=lambda article: _parse_timestamp(article.get("publishedAt", "")), reverse=True)
+            return FetchOutcome(self.name, data=articles[:NEWS_MAX_ARTICLES])
+        except Exception as exc:
+            return FetchOutcome(self.name, status="error", error=str(exc))
+
+
 class MultiSourceNewsFetcher:
     def __init__(self):
         registry = {
+            "alpha_vantage": AlphaVantageNewsFetcher(),
+            "binance_announcements": BinanceAnnouncementsFetcher(),
+            "bybit_announcements": BybitAnnouncementsFetcher(),
+            "eodhd": EODHDNewsFetcher(),
+            "finnhub": FinnhubNewsFetcher(),
             "google_rss": GoogleNewsRSSFetcher(),
+            "gnews": GNewsFetcher(),
+            "newsapi": NewsAPIFetcher(),
+            "polygon": PolygonNewsFetcher(),
             "rss": RSSFetcher(),
             "nse_announcements": NSEAnnouncementsFetcher(),
             "bse_announcements": BSEAnnouncementsFetcher(),
             "sec_filings": SECFilingsFetcher(),
             "press_releases": PressReleaseFetcher(),
-            "finnhub": FinnhubNewsFetcher(),
-            "alpha_vantage": AlphaVantageNewsFetcher(),
-            "newsapi": NewsAPIFetcher(),
-            "gnews": GNewsFetcher(),
         }
         ordered_names = [name for name in NEWS_PROVIDER_ORDER if name in registry]
-        for default_name in ["google_rss", "rss", "nse_announcements", "sec_filings", "press_releases"]:
+        for default_name in ["sec_filings", "press_releases", "google_rss", "rss", "nse_announcements", "binance_announcements", "bybit_announcements"]:
             if default_name not in ordered_names:
                 ordered_names.append(default_name)
         self.providers = [registry[name] for name in ordered_names]
         self._preferred_provider_by_symbol: Dict[str, str] = {}
 
+    @staticmethod
+    def _provider_preference_score(name: str) -> tuple:
+        provider = str(name or "").strip().lower()
+        return (
+            1 if provider in OFFICIAL_PROVIDER_NAMES else 0,
+            1 if provider == "press_releases" else 0,
+            float(PROVIDER_QUALITY_OVERRIDES.get(provider, 0.0) or 0.0),
+        )
+
     def _ordered_providers(self, symbol: str) -> List[object]:
         market = get_market(symbol)
         official_priority = ["google_rss", "rss"]
         if market == "nse":
-            official_priority = ["nse_announcements", "google_rss", "rss", "bse_announcements"]
+            official_priority = ["nse_announcements", "bse_announcements", "google_rss", "rss"]
         elif market == "us":
             official_priority = ["sec_filings", "press_releases", "google_rss", "rss"]
+        elif market == "crypto":
+            official_priority = ["binance_announcements", "bybit_announcements", "google_rss", "rss"]
 
         by_name = {provider.name: provider for provider in self.providers}
         ordered = [by_name[name] for name in official_priority if name in by_name]
@@ -839,20 +1452,22 @@ class MultiSourceNewsFetcher:
                         if prepared is None:
                             continue
                         filtered_count += 1
-                        key = _dedupe_key(prepared)
+                        key = _find_duplicate_key(merged, prepared)
                         current = merged.get(key)
                         if current is None or _article_rank(prepared) > _article_rank(current):
                             merged[key] = prepared
                     if filtered_count:
-                        self._preferred_provider_by_symbol[symbol] = provider.name
+                        current_preferred = self._preferred_provider_by_symbol.get(symbol)
+                        if current_preferred is None or self._provider_preference_score(provider.name) >= self._provider_preference_score(current_preferred):
+                            self._preferred_provider_by_symbol[symbol] = provider.name
                         provider_success = True
-                        if provider.name not in {"google_rss", "rss", "nse_announcements", "sec_filings"}:
+                        if provider.name not in {"google_rss", "rss", "nse_announcements", "bse_announcements", "sec_filings", "binance_announcements", "bybit_announcements"}:
                             fallback_hits += 1
                         official_hits = sum(1 for article in merged.values() if article.get("official_event_hit", 0.0) > 0)
                         if len(merged) >= NEWS_MIN_ARTICLES or official_hits >= NEWS_OFFICIAL_HIT_TARGET:
                             articles = sorted(merged.values(), key=_article_rank, reverse=True)[:NEWS_MAX_ARTICLES]
                             return FetchOutcome(
-                                provider.name,
+                                self._preferred_provider_by_symbol.get(symbol, provider.name),
                                 data=articles,
                                 meta={
                                     "providers_tried": tried,
@@ -872,7 +1487,7 @@ class MultiSourceNewsFetcher:
         if merged:
             articles = sorted(merged.values(), key=_article_rank, reverse=True)[:NEWS_MAX_ARTICLES]
             return FetchOutcome(
-                tried[-1] if tried else "multi_source",
+                self._preferred_provider_by_symbol.get(symbol, tried[-1] if tried else "multi_source"),
                 data=articles,
                 meta={
                     "providers_tried": tried,
@@ -904,8 +1519,19 @@ class SentimentPipeline:
             official = float(article.get("is_official", 0.0) or 0.0)
             filing = float(article.get("is_filing", 0.0) or 0.0)
             press_release = float(article.get("is_press_release", 0.0) or 0.0)
+            freshness = float(article.get("freshness_score", 0.0) or 0.0)
+            relevance = float(article.get("relevance_score", 0.0) or 0.0)
+            catalyst_strength = float(article.get("catalyst_strength", 0.0) or 0.0)
             media_weight = max(0.10, 1.0 - official)
-            weighted = compound * (0.55 + 0.45 * quality + 0.20 * official + 0.10 * filing)
+            weighted = compound * (
+                0.35
+                + 0.35 * quality
+                + 0.20 * official
+                + 0.10 * filing
+                + 0.16 * relevance
+                + 0.12 * freshness
+                + 0.10 * min(catalyst_strength, 2.0)
+            )
             try:
                 dt = _article_date(article.get("publishedAt", ""))
             except Exception:
@@ -917,7 +1543,9 @@ class SentimentPipeline:
             scored.append(
                 {
                     "date": dt,
+                    "publishedAt": article.get("publishedAt", ""),
                     "title": article.get("title", ""),
+                    "description": article.get("description", ""),
                     "compound_score": compound,
                     "weighted_compound_score": weighted,
                     "media_sentiment": compound * media_weight,
@@ -926,6 +1554,12 @@ class SentimentPipeline:
                     "filing_change_score": 0.0,
                     "filing_fresh_language_score": 0.0,
                     "new_risk_factors": new_risk_factors,
+                    "freshness_score": freshness,
+                    "relevance_score": relevance,
+                    "catalyst_strength": catalyst_strength,
+                    "title_alias_hits": float(article.get("title_alias_hits", 0.0) or 0.0),
+                    "body_alias_hits": float(article.get("body_alias_hits", 0.0) or 0.0),
+                    "exact_alias_hit": float(article.get("exact_alias_hit", 0.0) or 0.0),
                     "earnings_tone_signal": compound * is_earnings_call,
                     "earnings_call_count": is_earnings_call,
                     "article_count": 1,
@@ -935,10 +1569,22 @@ class SentimentPipeline:
                     "press_release_count": press_release,
                     "official_event_hit": float(article.get("official_event_hit", 0.0) or 0.0),
                     "filing_event_hit": float(article.get("filing_event_hit", 0.0) or 0.0),
+                    "earnings_catalyst_hit": float(article.get("earnings_catalyst_hit", 0.0) or 0.0),
+                    "guidance_catalyst_hit": float(article.get("guidance_catalyst_hit", 0.0) or 0.0),
+                    "mna_catalyst_hit": float(article.get("mna_catalyst_hit", 0.0) or 0.0),
+                    "downgrade_catalyst_hit": float(article.get("downgrade_catalyst_hit", 0.0) or 0.0),
+                    "upgrade_catalyst_hit": float(article.get("upgrade_catalyst_hit", 0.0) or 0.0),
+                    "regulatory_catalyst_hit": float(article.get("regulatory_catalyst_hit", 0.0) or 0.0),
+                    "product_launch_catalyst_hit": float(article.get("product_launch_catalyst_hit", 0.0) or 0.0),
+                    "insider_activity_catalyst_hit": float(article.get("insider_activity_catalyst_hit", 0.0) or 0.0),
+                    "listing_change_catalyst_hit": float(article.get("listing_change_catalyst_hit", 0.0) or 0.0),
+                    "primary_catalyst": str(article.get("primary_catalyst", "") or ""),
+                    "catalyst_labels": list(article.get("catalyst_labels", []) or []),
                     "source_quality_score": quality,
                     "source": article.get("source", "RSS"),
                     "provider": article.get("provider", ""),
                     "url": article.get("url", ""),
+                    "matched_aliases": list(article.get("matched_aliases", []) or []),
                 }
             )
         filing_records = [item for item in scored if float(item.get("filing_article_count", 0.0) or 0.0) > 0]
@@ -1004,6 +1650,12 @@ class SentimentPipeline:
                             "filing_change_score": article["filing_change_score"],
                             "filing_fresh_language_score": article["filing_fresh_language_score"],
                             "new_risk_factors": article["new_risk_factors"],
+                            "freshness_score": article["freshness_score"],
+                            "relevance_score": article["relevance_score"],
+                            "catalyst_strength": article["catalyst_strength"],
+                            "title_alias_hits": article["title_alias_hits"],
+                            "body_alias_hits": article["body_alias_hits"],
+                            "exact_alias_hit": article["exact_alias_hit"],
                             "earnings_tone_signal": article["earnings_tone_signal"],
                             "earnings_call_count": article["earnings_call_count"],
                             "article_count": article["article_count"],
@@ -1013,10 +1665,20 @@ class SentimentPipeline:
                             "press_release_count": article["press_release_count"],
                             "official_event_hit": article["official_event_hit"],
                             "filing_event_hit": article["filing_event_hit"],
+                            "earnings_catalyst_hit": article["earnings_catalyst_hit"],
+                            "guidance_catalyst_hit": article["guidance_catalyst_hit"],
+                            "mna_catalyst_hit": article["mna_catalyst_hit"],
+                            "downgrade_catalyst_hit": article["downgrade_catalyst_hit"],
+                            "upgrade_catalyst_hit": article["upgrade_catalyst_hit"],
+                            "regulatory_catalyst_hit": article["regulatory_catalyst_hit"],
+                            "product_launch_catalyst_hit": article["product_launch_catalyst_hit"],
+                            "insider_activity_catalyst_hit": article["insider_activity_catalyst_hit"],
+                            "listing_change_catalyst_hit": article["listing_change_catalyst_hit"],
                             "source_quality_score": article["source_quality_score"],
                             "title": article["title"],
                             "source": article["source"],
                             "provider": article.get("provider", ""),
+                            "primary_catalyst": article.get("primary_catalyst", ""),
                         }
                     )
 
@@ -1043,6 +1705,12 @@ class SentimentPipeline:
                     filing_change_score=("filing_change_score", "max"),
                     filing_fresh_language_score=("filing_fresh_language_score", "max"),
                     new_risk_factors=("new_risk_factors", "max"),
+                    freshness_score=("freshness_score", "mean"),
+                    relevance_score=("relevance_score", "mean"),
+                    catalyst_strength=("catalyst_strength", "max"),
+                    title_alias_hits=("title_alias_hits", "max"),
+                    body_alias_hits=("body_alias_hits", "max"),
+                    exact_alias_hit=("exact_alias_hit", "max"),
                     earnings_tone_signal=("earnings_tone_signal", "mean"),
                     earnings_call_count=("earnings_call_count", "sum"),
                     article_count=("article_count", "sum"),
@@ -1052,6 +1720,15 @@ class SentimentPipeline:
                     press_release_count=("press_release_count", "sum"),
                     official_event_hit=("official_event_hit", "max"),
                     filing_event_hit=("filing_event_hit", "max"),
+                    earnings_catalyst_hit=("earnings_catalyst_hit", "sum"),
+                    guidance_catalyst_hit=("guidance_catalyst_hit", "sum"),
+                    mna_catalyst_hit=("mna_catalyst_hit", "sum"),
+                    downgrade_catalyst_hit=("downgrade_catalyst_hit", "sum"),
+                    upgrade_catalyst_hit=("upgrade_catalyst_hit", "sum"),
+                    regulatory_catalyst_hit=("regulatory_catalyst_hit", "sum"),
+                    product_launch_catalyst_hit=("product_launch_catalyst_hit", "sum"),
+                    insider_activity_catalyst_hit=("insider_activity_catalyst_hit", "sum"),
+                    listing_change_catalyst_hit=("listing_change_catalyst_hit", "sum"),
                     source_quality_score=("source_quality_score", "mean"),
                 )
                 .reset_index()
@@ -1069,6 +1746,12 @@ class SentimentPipeline:
                     "filing_change_score",
                     "filing_fresh_language_score",
                     "new_risk_factors",
+                    "freshness_score",
+                    "relevance_score",
+                    "catalyst_strength",
+                    "title_alias_hits",
+                    "body_alias_hits",
+                    "exact_alias_hit",
                     "earnings_tone_signal",
                     "earnings_call_count",
                     "article_count",
@@ -1078,6 +1761,15 @@ class SentimentPipeline:
                     "press_release_count",
                     "official_event_hit",
                     "filing_event_hit",
+                    "earnings_catalyst_hit",
+                    "guidance_catalyst_hit",
+                    "mna_catalyst_hit",
+                    "downgrade_catalyst_hit",
+                    "upgrade_catalyst_hit",
+                    "regulatory_catalyst_hit",
+                    "product_launch_catalyst_hit",
+                    "insider_activity_catalyst_hit",
+                    "listing_change_catalyst_hit",
                     "source_quality_score",
                 ],
                 index=pd.MultiIndex.from_tuples([], names=["symbol", "date"]),

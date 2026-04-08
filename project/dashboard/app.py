@@ -388,10 +388,12 @@ def create_app(
     stress_results: Optional[Dict] = None,
     execution_trace: Optional[List[Dict]] = None,
     execution_backtest: Optional[Dict] = None,
+    alpha_quality: Optional[Dict] = None,
     execution_reconciliation: Optional[List[Dict]] = None,
     portfolio_overlay: Optional[Dict] = None,
     meta_model_status: Optional[Dict] = None,
     learning_status: Optional[Dict] = None,
+    system_health: Optional[Dict] = None,
     latency_monitor=None,
     security_suite=None,
 ) -> tuple:
@@ -405,10 +407,12 @@ def create_app(
     _stress_results = stress_results if stress_results is not None else {}
     _execution_trace = execution_trace if execution_trace is not None else []
     _execution_backtest = execution_backtest if execution_backtest is not None else {}
+    _alpha_quality = alpha_quality if alpha_quality is not None else {}
     _execution_reconciliation = execution_reconciliation if execution_reconciliation is not None else []
     _portfolio_overlay = portfolio_overlay if portfolio_overlay is not None else {}
     _meta_model_status = meta_model_status if meta_model_status is not None else {}
     _learning_status = learning_status if learning_status is not None else {}
+    _system_health = system_health if system_health is not None else {}
     _client_count   = [0]
     _dual_lane_variants_enabled = os.getenv(
         "DASHBOARD_DUAL_LANE_VARIANTS_ENABLED",
@@ -1144,6 +1148,12 @@ def create_app(
             return jsonify({"note": "Execution backtest not ready yet. Wait for inference cycle."})
         return jsonify(_execution_backtest)
 
+    @app.route("/api/alpha-quality")
+    def get_alpha_quality():
+        if not _alpha_quality:
+            return jsonify({"note": "Alpha quality report not ready yet. Wait for execution backtest refresh."})
+        return jsonify(_alpha_quality)
+
     @app.route("/api/execution-divergence")
     def get_execution_divergence():
         rows = list(_execution_reconciliation or [])
@@ -1265,6 +1275,14 @@ def create_app(
             "execution_mode":   broker_summary.get("execution_mode", "paper"),
             "shadow_router":    broker_summary.get("shadow_router", {}),
             "stress_computed":  bool(_stress_results),
+            "trade_readiness":  (_system_health.get("status") if isinstance(_system_health, dict) else "unknown"),
+            "new_entries_enabled": bool((_system_health.get("new_entries_enabled") if isinstance(_system_health, dict) else False)),
+            "blocking_reasons": ((_system_health.get("blocking_reasons", []) if isinstance(_system_health, dict) else []) or []),
+            "data_sources":     (_system_health.get("data_sources", {}) if isinstance(_system_health, dict) else {}),
+            "lane_open_counts": (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("lane_open_counts", {})),
+            "lane_targets":     (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("lane_targets", {})),
+            "universe_sync":    (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("universe_sync", {})),
+            "pipeline_selection": (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("pipeline_selection", {})),
             "uptime_seconds":   round(time.time() - _startup_time),
             "timestamp":        datetime.now(timezone.utc).isoformat(),
         })
@@ -1782,8 +1800,8 @@ body.theme-light{background:
             <div class="ct2" style="margin-bottom:8px">Top headlines</div>
             <div class="ptw" style="max-height:260px">
               <table class="pt">
-                <thead><tr><th>Symbol</th><th>Headline</th><th>Score</th></tr></thead>
-                <tbody id="evheadlines"><tr><td colspan="3" style="color:var(--muted);padding:12px">No headlines yet</td></tr></tbody>
+                <thead><tr><th>Symbol</th><th>Headline</th><th>Catalyst</th><th>Score</th></tr></thead>
+                <tbody id="evheadlines"><tr><td colspan="4" style="color:var(--muted);padding:12px">No headlines yet</td></tr></tbody>
               </table>
             </div>
           </div>
@@ -1791,8 +1809,8 @@ body.theme-light{background:
             <div class="ct2" style="margin-bottom:8px">Symbol heat</div>
             <div class="ptw" style="max-height:260px">
               <table class="pt">
-                <thead><tr><th>Symbol</th><th>Sentiment</th><th>News</th><th>Lane</th></tr></thead>
-                <tbody id="evsymbols"><tr><td colspan="4" style="color:var(--muted);padding:12px">No symbol heat yet</td></tr></tbody>
+                <thead><tr><th>Symbol</th><th>Sentiment</th><th>News</th><th>Catalyst</th><th>Lane</th></tr></thead>
+                <tbody id="evsymbols"><tr><td colspan="5" style="color:var(--muted);padding:12px">No symbol heat yet</td></tr></tbody>
               </table>
             </div>
           </div>
@@ -3045,26 +3063,30 @@ function renderEventIntel(data){
   headlinesBody.innerHTML = headlineRows.length
     ? headlineRows.map(item => {
         const score = Number(item.headline_score || 0);
+        const catalyst = item.primary_catalyst ? String(item.primary_catalyst).replaceAll('_',' ') : 'general';
         return `<tr>
           <td style="font-weight:600">${item.symbol || '-'}</td>
           <td><a href="${item.url || '#'}" target="_blank" rel="noopener noreferrer" style="color:var(--text);text-decoration:none">${item.title || '-'}</a></td>
+          <td style="color:var(--muted)">${catalyst}</td>
           <td style="color:${score >= 4 ? 'var(--green)' : score >= 2 ? 'var(--amber)' : 'var(--muted)'}">${score.toFixed(2)}</td>
         </tr>`;
       }).join('')
-    : '<tr><td colspan="3" style="color:var(--muted);padding:12px">No headlines yet</td></tr>';
+    : '<tr><td colspan="4" style="color:var(--muted);padding:12px">No headlines yet</td></tr>';
   const symbolRows = eventIntel.symbol_heat || [];
   symbolsBody.innerHTML = symbolRows.length
     ? symbolRows.map(item => {
         const sentiment = Number(item.mean_weighted_sentiment || 0);
         const sentimentColor = sentiment > 0 ? 'var(--green)' : sentiment < 0 ? 'var(--red)' : 'var(--muted)';
+        const catalyst = item.primary_catalyst || (Array.isArray(item.top_catalysts) && item.top_catalysts.length ? item.top_catalysts[0] : '-');
         return `<tr>
           <td style="font-weight:600">${item.symbol || '-'}</td>
           <td style="color:${sentimentColor}">${sentiment >= 0 ? '+' : ''}${sentiment.toFixed(2)}</td>
           <td>${item.headline_count || 0}</td>
+          <td>${catalyst}</td>
           <td>${item.lane_label || '-'}</td>
         </tr>`;
       }).join('')
-    : '<tr><td colspan="4" style="color:var(--muted);padding:12px">No symbol heat yet</td></tr>';
+    : '<tr><td colspan="5" style="color:var(--muted);padding:12px">No symbol heat yet</td></tr>';
 }
 
 function initChart(){

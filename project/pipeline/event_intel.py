@@ -61,6 +61,20 @@ def _lane_label(lane: str) -> str:
     }.get(str(lane or "").lower(), "Normal Trading")
 
 
+def _catalyst_label(label: str) -> str:
+    return {
+        "earnings": "Earnings",
+        "guidance": "Guidance",
+        "mna": "M&A",
+        "downgrade": "Downgrade",
+        "upgrade": "Upgrade",
+        "regulatory": "Regulatory",
+        "product_launch": "Product",
+        "insider_activity": "Insider",
+        "listing_change": "Listing",
+    }.get(str(label or "").strip().lower(), str(label or "").replace("_", " ").title())
+
+
 def _canonical_key(article: Dict[str, Any], symbol: str) -> str:
     url = str(article.get("url") or "").strip().lower()
     title = " ".join(str(article.get("title") or "").lower().split())
@@ -75,9 +89,11 @@ def _article_score(article: Dict[str, Any], generated_at: datetime) -> float:
     filing = _safe_float(article.get("filing_event_hit"), 0.0) + _safe_float(article.get("filing_article_count"), 0.0)
     risk = _safe_float(article.get("new_risk_factors"), 0.0)
     press_release = _safe_float(article.get("press_release_count"), 0.0)
+    relevance = _safe_float(article.get("relevance_score"), 0.0)
+    catalyst = _safe_float(article.get("catalyst_strength"), 0.0)
     published_at = _ensure_datetime(article.get("publishedAt") or article.get("date"))
     age_hours = max(0.0, (generated_at - published_at).total_seconds() / 3600.0)
-    freshness = max(0.0, 2.5 - min(age_hours / 12.0, 2.5))
+    freshness = max(_safe_float(article.get("freshness_score"), 0.0) * 2.5, max(0.0, 2.5 - min(age_hours / 12.0, 2.5)))
     return round(
         (weighted * 2.2)
         + (quality * 1.4)
@@ -85,6 +101,8 @@ def _article_score(article: Dict[str, Any], generated_at: datetime) -> float:
         + (filing * 2.4)
         + (risk * 1.5)
         + (press_release * 0.35)
+        + (relevance * 1.2)
+        + (catalyst * 1.4)
         + freshness,
         4,
     )
@@ -102,6 +120,8 @@ def _headline_rows(sentiment_payload: Dict[str, Any], generated_at: datetime) ->
             row["sector"] = get_sector(symbol)
             row["published_at"] = _ensure_datetime(article.get("publishedAt") or article.get("date")).isoformat()
             row["headline_score"] = _article_score(article, generated_at)
+            row["primary_catalyst"] = article.get("primary_catalyst", "")
+            row["catalyst_labels"] = list(article.get("catalyst_labels", []) or [])
             key = _canonical_key(article, symbol)
             current = grouped.get(key)
             if current is None:
@@ -161,6 +181,16 @@ def _symbol_heat_rows(
         filing_hits = sum(1 for item in records if _safe_float(item.get("filing_event_hit"), 0.0) > 0)
         risk_flags = sum(1 for item in records if _safe_float(item.get("new_risk_factors"), 0.0) > 0)
         source_quality = sum(_safe_float(item.get("source_quality_score"), 0.0) for item in records) / max(len(records), 1)
+        freshness = sum(_safe_float(item.get("freshness_score"), 0.0) for item in records) / max(len(records), 1)
+        relevance = sum(_safe_float(item.get("relevance_score"), 0.0) for item in records) / max(len(records), 1)
+        catalyst_strength = max(_safe_float(item.get("catalyst_strength"), 0.0) for item in records)
+        catalyst_counter: Counter = Counter()
+        for item in records:
+            for label in item.get("catalyst_labels", []) or []:
+                catalyst_counter[str(label)] += 1
+            primary = str(item.get("primary_catalyst") or "").strip()
+            if primary:
+                catalyst_counter[primary] += 1
         signal = None
         for candidate in signal_rows.values():
             if isinstance(candidate, dict) and str(candidate.get("symbol") or "").upper() == symbol.upper():
@@ -184,6 +214,11 @@ def _symbol_heat_rows(
                 "filing_hits": filing_hits,
                 "risk_flags": risk_flags,
                 "source_quality_score": round(source_quality, 3),
+                "freshness_score": round(freshness, 3),
+                "relevance_score": round(relevance, 3),
+                "catalyst_strength": round(catalyst_strength, 3),
+                "top_catalysts": [_catalyst_label(label) for label, _ in catalyst_counter.most_common(3)],
+                "primary_catalyst": _catalyst_label(catalyst_counter.most_common(1)[0][0]) if catalyst_counter else "",
                 "lane": lane,
                 "lane_label": _lane_label(lane),
                 "trade_ready": trade_ready,
@@ -195,7 +230,11 @@ def _symbol_heat_rows(
     rows.sort(
         key=lambda item: (
             item["trade_ready"],
-            abs(item["mean_weighted_sentiment"]) + (item["official_hits"] * 0.25) + (item["risk_flags"] * 0.2),
+            abs(item["mean_weighted_sentiment"])
+            + (item["official_hits"] * 0.25)
+            + (item["risk_flags"] * 0.2)
+            + (item.get("catalyst_strength", 0.0) * 0.2)
+            + (item.get("relevance_score", 0.0) * 0.1),
             item["headline_count"],
         ),
         reverse=True,
@@ -219,6 +258,10 @@ def _summary_bullets(
     bullets.append(
         f"{covered}/{total_symbols} symbols had fresh news in the last {summary.get('window_days', 3)} days; official catalysts hit {official} symbols ({provider_text})."
     )
+    catalyst_counts = summary.get("catalyst_counts", {}) or {}
+    if catalyst_counts:
+        catalyst_text = ", ".join(f"{_catalyst_label(name)}={count}" for name, count in list(catalyst_counts.items())[:4])
+        bullets.append(f"Dominant catalyst mix: {catalyst_text}.")
     if top_bullish:
         bullish_text = ", ".join(f"{row['symbol']} ({row['mean_weighted_sentiment']:+.2f})" for row in top_bullish[:3])
         bullets.append(f"Most bullish event pressure right now: {bullish_text}.")
@@ -265,7 +308,9 @@ def _markdown_report(payload: Dict[str, Any]) -> str:
         for item in headlines:
             lines.append(
                 f"- **{item.get('symbol', '-') }** {item.get('title', '').strip()} "
-                f"({item.get('source', item.get('provider', 'news'))}, score {item.get('headline_score', 0):.2f})"
+                f"({item.get('source', item.get('provider', 'news'))}, "
+                f"{_catalyst_label(item.get('primary_catalyst', '')) if item.get('primary_catalyst') else 'General'}, "
+                f"score {item.get('headline_score', 0):.2f})"
             )
     else:
         lines.append("- No headlines captured yet.")
@@ -275,7 +320,7 @@ def _markdown_report(payload: Dict[str, Any]) -> str:
             lines.append(
                 f"- **{item.get('symbol', '-') }** {item.get('lane_label', '-')}: "
                 f"sentiment {item.get('mean_weighted_sentiment', 0):+.2f}, headlines {item.get('headline_count', 0)}, "
-                f"official {item.get('official_hits', 0)}, risk flags {item.get('risk_flags', 0)}, "
+                f"catalyst {item.get('primary_catalyst', '-') or '-'}, official {item.get('official_hits', 0)}, risk flags {item.get('risk_flags', 0)}, "
                 f"trade-ready {item.get('trade_ready', False)}"
             )
     else:
@@ -325,6 +370,13 @@ def build_event_intelligence(
 
     news_summary = sentiment_payload.get("news_summary", {}) if isinstance(sentiment_payload, dict) else {}
     provider_counts = dict(Counter(news_summary.get("provider_counts", {}) or {}))
+    catalyst_counts: Counter = Counter()
+    for item in top_headlines:
+        for label in item.get("catalyst_labels", []) or []:
+            catalyst_counts[str(label)] += 1
+        primary = str(item.get("primary_catalyst") or "").strip()
+        if primary:
+            catalyst_counts[primary] += 1
     lane_snapshot = _signal_snapshot(signal_store)
     summary = {
         "window_days": window_days,
@@ -333,6 +385,7 @@ def build_event_intelligence(
         "official_symbols": int(news_summary.get("official_symbols", 0) or 0),
         "fallback_symbols": int(news_summary.get("fallback_symbols", 0) or 0),
         "provider_counts": provider_counts,
+        "catalyst_counts": dict(catalyst_counts),
         "headline_count": len(top_headlines),
         "net_sentiment": round(sum(row.get("mean_weighted_sentiment", 0.0) for row in symbol_heat), 4),
         "generated_epoch": int(generated_at.timestamp()),

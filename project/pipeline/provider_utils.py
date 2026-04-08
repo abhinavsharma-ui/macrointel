@@ -23,6 +23,54 @@ def stable_rotate(items: List[Any], seed_text: str) -> List[Any]:
     return items[start:] + items[:start]
 
 
+def infer_symbol_market(symbol: str) -> str:
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return "unknown"
+    if text.startswith("^"):
+        return "index"
+    if text.endswith(".NS"):
+        return "nse"
+    if text.endswith(("USDT", "USDC", "BUSD")):
+        return "crypto"
+    return "us"
+
+
+def symbol_without_market_suffix(symbol: str) -> str:
+    text = str(symbol or "").strip().upper()
+    if text.endswith(".NS"):
+        return text[:-3]
+    return text
+
+
+def to_yfinance_symbol(symbol: str) -> str:
+    market = infer_symbol_market(symbol)
+    text = symbol_without_market_suffix(symbol)
+    if market == "nse":
+        return f"{text}.NS" if text else ""
+    if market == "us":
+        return text.replace(".", "-")
+    return text
+
+
+def to_polygon_symbol(symbol: str) -> str:
+    market = infer_symbol_market(symbol)
+    if market != "us":
+        return ""
+    text = symbol_without_market_suffix(symbol)
+    return "" if text.startswith("^") else text
+
+
+def to_eodhd_symbol(symbol: str) -> str:
+    market = infer_symbol_market(symbol)
+    text = symbol_without_market_suffix(symbol)
+    if market == "us":
+        return f"{text}.US" if text else ""
+    if market == "nse":
+        return f"{text}.NSE" if text else ""
+    return ""
+
+
 def looks_rate_limited(message: str) -> bool:
     lowered = (message or "").lower()
     needles = (

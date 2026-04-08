@@ -18,22 +18,24 @@ from typing import Dict, List, Optional
 import pandas as pd
 import requests
 
-from pipeline.provider_utils import APIKeyPool, FetchOutcome, looks_rate_limited, parse_api_keys
+from pipeline.provider_utils import APIKeyPool, FetchOutcome, looks_rate_limited, parse_api_keys, to_eodhd_symbol
 
 logger = logging.getLogger(__name__)
 
 FINNHUB_EARNINGS_BASE = "https://finnhub.io/api/v1/calendar/earnings"
 ALPHA_VANTAGE_BASE = "https://www.alphavantage.co/query"
+EODHD_EARNINGS_BASE = "https://eodhd.com/api/calendar/earnings"
 
 EARNINGS_PROVIDER_ORDER = [
     name.strip().lower()
-    for name in os.getenv("EARNINGS_PROVIDER_ORDER", "finnhub,alpha_vantage").split(",")
+    for name in os.getenv("EARNINGS_PROVIDER_ORDER", "finnhub,alpha_vantage,eodhd").split(",")
     if name.strip()
 ]
 EARNINGS_LOOKBACK_DAYS = max(7, int(os.getenv("EARNINGS_LOOKBACK_DAYS", "45")))
 EARNINGS_FORWARD_DAYS = max(0, int(os.getenv("EARNINGS_FORWARD_DAYS", "7")))
-EARNINGS_MAX_PROVIDER_ATTEMPTS = max(1, int(os.getenv("EARNINGS_MAX_PROVIDER_ATTEMPTS", "2")))
+EARNINGS_MAX_PROVIDER_ATTEMPTS = max(1, int(os.getenv("EARNINGS_MAX_PROVIDER_ATTEMPTS", "3")))
 EARNINGS_ALPHA_MAX_SYMBOLS = max(0, int(os.getenv("EARNINGS_ALPHA_MAX_SYMBOLS", "25")))
+EARNINGS_EODHD_MAX_SYMBOLS = max(0, int(os.getenv("EODHD_EARNINGS_MAX_SYMBOLS", "80")))
 
 
 def _to_float(value) -> Optional[float]:
@@ -234,17 +236,122 @@ class AlphaVantageEarningsFetcher:
             return FetchOutcome(self.name, status="error", error=error)
 
 
+class EODHDEarningsFetcher:
+    name = "eodhd"
+
+    def __init__(self):
+        self.keys = APIKeyPool(
+            parse_api_keys("EODHD_API_KEYS", "EODHD_API_KEY"),
+            default_cooldown=float(os.getenv("EODHD_EARNINGS_COOLDOWN_SECONDS", "120")),
+        )
+        self._min_call_interval = float(os.getenv("EODHD_EARNINGS_MIN_CALL_INTERVAL", "0.35"))
+        self._last_call_by_key: Dict[str, float] = {}
+
+    def supports(self, symbols: List[str]) -> bool:
+        return any(to_eodhd_symbol(symbol) for symbol in symbols)
+
+    def _throttle(self, api_key: str):
+        elapsed = time.time() - self._last_call_by_key.get(api_key, 0.0)
+        if elapsed < self._min_call_interval:
+            time.sleep(self._min_call_interval - elapsed)
+        self._last_call_by_key[api_key] = time.time()
+
+    def fetch(self, symbols: List[str], from_date: date, to_date: date) -> FetchOutcome:
+        api_key = self.keys.acquire()
+        if not api_key:
+            return FetchOutcome(self.name, status="unavailable", error="No EODHD key available")
+
+        symbol_map = {
+            converted.upper(): original
+            for original in symbols
+            for converted in [to_eodhd_symbol(original)]
+            if converted
+        }
+        converted_symbols = list(symbol_map.keys())
+        if not converted_symbols:
+            return FetchOutcome(self.name, data=_normalize_event_frame(pd.DataFrame()))
+        if EARNINGS_EODHD_MAX_SYMBOLS > 0:
+            converted_symbols = converted_symbols[:EARNINGS_EODHD_MAX_SYMBOLS]
+
+        self._throttle(api_key)
+        params = {
+            "api_token": api_key,
+            "fmt": "json",
+            "from": from_date.isoformat(),
+            "to": to_date.isoformat(),
+            "symbols": ",".join(converted_symbols),
+        }
+
+        try:
+            resp = requests.get(EODHD_EARNINGS_BASE, params=params, timeout=15)
+            resp.raise_for_status()
+            payload = resp.json()
+            if isinstance(payload, dict):
+                error = payload.get("message") or payload.get("error") or "EODHD returned no earnings rows"
+                if looks_rate_limited(error):
+                    self.keys.cool_down(api_key)
+                    return FetchOutcome(self.name, status="rate_limited", error=error)
+                return FetchOutcome(self.name, status="empty", error=error)
+
+            raw_rows = []
+            if isinstance(payload, list):
+                for item in payload:
+                    if isinstance(item, list):
+                        raw_rows.extend(item)
+                    elif isinstance(item, dict):
+                        raw_rows.append(item)
+
+            records = []
+            for row in raw_rows:
+                if not isinstance(row, dict):
+                    continue
+                code = str(row.get("code") or row.get("symbol") or "").upper().strip()
+                original_symbol = symbol_map.get(code)
+                if not original_symbol:
+                    continue
+                reported_date = row.get("report_date") or row.get("date") or row.get("reportDate")
+                if not reported_date:
+                    continue
+                records.append(
+                    {
+                        "symbol": original_symbol,
+                        "fiscal_date": row.get("date") or row.get("fiscalDateEnding") or reported_date,
+                        "reported_date": reported_date,
+                        "reported_eps": _to_float(row.get("epsActual", row.get("eps_actual"))),
+                        "estimated_eps": _to_float(row.get("epsEstimate", row.get("eps_estimate"))),
+                        "surprise_pct": _to_float(row.get("surprisePercent", row.get("surprise_percent"))),
+                        "revenue": _to_float(row.get("revenueActual", row.get("revenue_actual", row.get("revenue")))),
+                        "pe_ratio": _to_float(row.get("pe", row.get("pe_ratio"))),
+                        "source": self.name,
+                    }
+                )
+
+            frame = _normalize_event_frame(pd.DataFrame(records))
+            if frame.empty:
+                return FetchOutcome(self.name, status="empty", error="EODHD returned no matching earnings events")
+            return FetchOutcome(self.name, data=frame)
+        except Exception as exc:
+            error = str(exc)
+            if looks_rate_limited(error):
+                self.keys.cool_down(api_key)
+                return FetchOutcome(self.name, status="rate_limited", error=error)
+            return FetchOutcome(self.name, status="error", error=error)
+
+
 class MultiSourceEarningsFetcher:
     def __init__(self):
         registry = {
             "finnhub": FinnhubEarningsCalendarFetcher(),
             "alpha_vantage": AlphaVantageEarningsFetcher(),
+            "eodhd": EODHDEarningsFetcher(),
         }
         ordered_names = [name for name in EARNINGS_PROVIDER_ORDER if name in registry]
         if "finnhub" not in ordered_names:
             ordered_names.append("finnhub")
         if "alpha_vantage" not in ordered_names:
             ordered_names.append("alpha_vantage")
+        if "eodhd" not in ordered_names:
+            ordered_names.append("eodhd")
         self.providers = [registry[name] for name in ordered_names]
 
     def fetch(self, symbols: List[str], from_date: date, to_date: date) -> FetchOutcome:
@@ -259,6 +366,22 @@ class MultiSourceEarningsFetcher:
                 break
 
             if provider.name == "finnhub":
+                if not provider.supports(remaining):
+                    continue
+                outcome = provider.fetch(remaining, from_date, to_date)
+                attempts += 1
+                if outcome.ok and outcome.data is not None and not outcome.data.empty:
+                    frame = outcome.data
+                    frames.append(frame)
+                    covered = set(frame["symbol"].unique())
+                    for symbol in covered:
+                        provider_by_symbol[symbol] = provider.name
+                    remaining = [symbol for symbol in remaining if symbol not in covered]
+                elif outcome.error:
+                    errors.append(f"{provider.name}: {outcome.error}")
+                continue
+
+            if provider.name == "eodhd":
                 if not provider.supports(remaining):
                     continue
                 outcome = provider.fetch(remaining, from_date, to_date)

@@ -10,6 +10,7 @@ Usage:
 """
 
 import os
+from pathlib import Path
 from typing import List
 
 # ─────────────────────────────────────────────────────────────
@@ -179,6 +180,67 @@ DAY_TRADE_EXPANDED_SYMBOLS = list(
 )
 DAY_TRADE_EXPANDED_SYMBOL_SET = set(DAY_TRADE_EXPANDED_SYMBOLS)
 
+
+def _dedupe_symbols(values: List[str]) -> List[str]:
+    return list(dict.fromkeys([str(value).strip().upper() for value in values if str(value).strip()]))
+
+
+def _parse_symbol_blob(raw: str) -> List[str]:
+    text = str(raw or "")
+    chunks = []
+    for line in text.splitlines():
+        chunks.extend(line.replace(";", ",").split(","))
+    cleaned = []
+    for value in chunks:
+        item = str(value).strip()
+        if not item or item.startswith("#"):
+            continue
+        cleaned.append(item)
+    return _dedupe_symbols(cleaned)
+
+
+def _read_symbol_file(path_value: str) -> List[str]:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return []
+    path = Path(path_text)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[1] / path
+    if not path.exists():
+        return []
+    try:
+        return _parse_symbol_blob(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _env_symbols(*env_names: str) -> List[str]:
+    values: List[str] = []
+    for env_name in env_names:
+        raw = os.getenv(env_name, "")
+        if raw:
+            values.extend(_parse_symbol_blob(raw))
+    return _dedupe_symbols(values)
+
+
+def _extra_universe_symbols(mode: str) -> List[str]:
+    mode_key = str(mode or "").lower()
+    extras: List[str] = []
+    extras.extend(_env_symbols("UNIVERSE_EXTRA_SYMBOLS"))
+    extras.extend(_read_symbol_file(os.getenv("UNIVERSE_EXTRA_FILE", "")))
+
+    if mode_key in {"full", "us", "daytrade", "daytrade_us", "throughput", "throughput_us"}:
+        extras.extend(_env_symbols("US_UNIVERSE_EXTRA_SYMBOLS"))
+        extras.extend(_read_symbol_file(os.getenv("US_UNIVERSE_EXTRA_FILE", "")))
+    if mode_key in {"full", "nse", "daytrade", "daytrade_nse", "throughput", "throughput_nse"}:
+        extras.extend(_env_symbols("NSE_UNIVERSE_EXTRA_SYMBOLS"))
+        extras.extend(_read_symbol_file(os.getenv("NSE_UNIVERSE_EXTRA_FILE", "")))
+    if mode_key in {"daytrade", "daytrade_us", "daytrade_nse", "throughput", "throughput_us", "throughput_nse"}:
+        extras.extend(_env_symbols("DAY_TRADE_EXTRA_SYMBOLS"))
+        extras.extend(_read_symbol_file(os.getenv("DAY_TRADE_EXTRA_FILE", "")))
+
+    return _dedupe_symbols(extras)
+
 # ─────────────────────────────────────────────────────────────
 # Sector mapping
 # ─────────────────────────────────────────────────────────────
@@ -253,8 +315,20 @@ def get_universe(mode: str = "core") -> list:
         universe = DAY_TRADE_US_SYMBOLS
     elif mode == "daytrade_nse":
         universe = DAY_TRADE_NSE_SYMBOLS
+    elif mode == "throughput":
+        universe = _dedupe_symbols(ALL_SYMBOLS + DAY_TRADE_EXPANDED_SYMBOLS + LEADER_SYMBOLS)
+    elif mode == "throughput_us":
+        universe = _dedupe_symbols(
+            US_SYMBOLS + DAY_TRADE_US_SYMBOLS + [symbol for symbol in LEADER_SYMBOLS if not symbol.endswith(".NS")]
+        )
+    elif mode == "throughput_nse":
+        universe = _dedupe_symbols(
+            NSE_SYMBOLS + DAY_TRADE_NSE_SYMBOLS + [symbol for symbol in LEADER_SYMBOLS if symbol.endswith(".NS")]
+        )
     else:
         universe = CORE_SYMBOLS
+
+    universe = _dedupe_symbols(list(universe) + _extra_universe_symbols(mode))
 
     try:
         limit = int(float(os.getenv("UNIVERSE_LIMIT", "0") or 0))
@@ -500,8 +574,23 @@ def get_symbol_aliases(symbol: str) -> List[str]:
             [
                 f"{company_name} {sector}",
                 f"{raw} {sector}",
-            ]
-        )
+        ]
+    )
+    if symbol.upper().endswith(("USDT", "USDC", "BUSD")):
+        base_asset = raw
+        for suffix in ("USDT", "USDC", "BUSD"):
+            if base_asset.endswith(suffix):
+                base_asset = base_asset[: -len(suffix)]
+                break
+        if base_asset:
+            aliases.extend(
+                [
+                    base_asset,
+                    f"{base_asset} token",
+                    f"{company_name} token",
+                    f"{base_asset} coin",
+                ]
+            )
     seen = set()
     deduped: List[str] = []
     for alias in aliases:

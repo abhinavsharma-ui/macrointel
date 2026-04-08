@@ -19,6 +19,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 from collections import deque, defaultdict
+from pathlib import Path
 from typing import Optional, Dict, Callable, List, Set
 from dataclasses import dataclass, field
 
@@ -42,6 +43,7 @@ class Tick:
     bid: Optional[float] = None
     ask: Optional[float] = None
     market: str = "US"   # "US" or "IN"
+    source: str = ""
 
     @property
     def spread(self) -> Optional[float]:
@@ -327,16 +329,21 @@ class BinancePublicDepthWebSocket:
     """
 
     WS_BASE = "wss://stream.binance.com:9443/stream?streams="
+    TESTNET_WS_BASE = "wss://stream.testnet.binance.vision/stream?streams="
 
     def __init__(
         self,
         symbols: List[str],
         buffer: RealTimePriceBuffer = None,
         depth_buffer: PublicDepthBuffer = None,
+        *,
+        testnet: bool = False,
     ):
         self.symbols = [str(symbol).strip().lower() for symbol in symbols if str(symbol).strip()]
         self.buffer = buffer or PRICE_BUFFER
         self.depth_buffer = depth_buffer or DEPTH_BUFFER
+        self.testnet = bool(testnet)
+        self.source = "binance_testnet" if self.testnet else "binance"
         self.ws: Optional[websocket.WebSocketApp] = None
         self._running = False
 
@@ -344,7 +351,8 @@ class BinancePublicDepthWebSocket:
         streams: List[str] = []
         for symbol in self.symbols:
             streams.extend([f"{symbol}@trade", f"{symbol}@bookTicker", f"{symbol}@depth20@100ms"])
-        return self.WS_BASE + "/".join(streams)
+        base = self.TESTNET_WS_BASE if self.testnet else self.WS_BASE
+        return base + "/".join(streams)
 
     def start(self, daemon: bool = True):
         self._running = True
@@ -403,6 +411,7 @@ class BinancePublicDepthWebSocket:
                 volume=volume_proxy,
                 timestamp=trade_ts,
                 market="CRYPTO",
+                source=self.source,
             )
             if tick.price > 0:
                 self.buffer.push(tick)
@@ -419,6 +428,7 @@ class BinancePublicDepthWebSocket:
                     "best_ask": best_ask,
                     "best_ask_qty": float(data.get("A", 0.0) or 0.0),
                     "book_ticker_update_id": data.get("u"),
+                    "source": self.source,
                 },
             )
             mid = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0
@@ -432,6 +442,7 @@ class BinancePublicDepthWebSocket:
                         bid=best_bid,
                         ask=best_ask,
                         market="CRYPTO",
+                        source=self.source,
                     )
                 )
             return
@@ -445,6 +456,7 @@ class BinancePublicDepthWebSocket:
                     "bids": bids,
                     "asks": asks,
                     "last_depth_update_id": data.get("lastUpdateId"),
+                    "source": self.source,
                 },
             )
 
@@ -453,6 +465,213 @@ class BinancePublicDepthWebSocket:
 
     def _on_close(self, ws, close_status_code, close_msg):
         logger.info(f"Binance public depth WebSocket closed: {close_status_code}")
+
+
+class BybitPublicDepthWebSocket:
+    """
+    Public spot market-data stream for Bybit.
+
+    Runs alongside Binance so the shared buffers always have a fresh crypto feed.
+    """
+
+    WS_BASE = "wss://stream.bybit.com/v5/public/spot"
+    TESTNET_WS_BASE = "wss://stream-testnet.bybit.com/v5/public/spot"
+
+    def __init__(
+        self,
+        symbols: List[str],
+        buffer: RealTimePriceBuffer = None,
+        depth_buffer: PublicDepthBuffer = None,
+        *,
+        testnet: bool = False,
+        depth_levels: int = 50,
+    ):
+        self.symbols = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
+        self.buffer = buffer or PRICE_BUFFER
+        self.depth_buffer = depth_buffer or DEPTH_BUFFER
+        self.testnet = bool(testnet)
+        self.depth_levels = max(1, int(depth_levels))
+        self.source = "bybit_testnet" if self.testnet else "bybit"
+        self.ws: Optional[websocket.WebSocketApp] = None
+        self._running = False
+        self._books: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(lambda: {"bids": {}, "asks": {}})
+        self._ping_thread: Optional[threading.Thread] = None
+
+    def _ws_url(self) -> str:
+        return self.TESTNET_WS_BASE if self.testnet else self.WS_BASE
+
+    def _subscribe_topics(self) -> List[str]:
+        topics: List[str] = []
+        for symbol in self.symbols:
+            topics.append(f"orderbook.{self.depth_levels}.{symbol}")
+            topics.append(f"publicTrade.{symbol}")
+        return topics
+
+    def start(self, daemon: bool = True):
+        self._running = True
+        thread = threading.Thread(target=self._run_forever, daemon=daemon)
+        thread.start()
+        logger.info(f"Bybit public depth WebSocket started for {len(self.symbols)} crypto symbols")
+
+    def stop(self):
+        self._running = False
+        if self.ws:
+            self.ws.close()
+
+    def _run_forever(self):
+        while self._running:
+            try:
+                self.ws = websocket.WebSocketApp(
+                    self._ws_url(),
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self.ws.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as exc:
+                logger.warning(f"Bybit public depth WebSocket error: {exc}")
+            if self._running:
+                time.sleep(3)
+
+    def _ping_loop(self):
+        while self._running and self.ws is not None:
+            try:
+                self.ws.send(json.dumps({"op": "ping"}))
+            except Exception:
+                return
+            time.sleep(20)
+
+    def _on_open(self, ws):
+        ws.send(json.dumps({"op": "subscribe", "args": self._subscribe_topics()}))
+        self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+        self._ping_thread.start()
+        logger.info("Bybit public depth WebSocket connected")
+
+    @staticmethod
+    def _normalize_level(level) -> Optional[Dict[str, float]]:
+        if isinstance(level, (list, tuple)) and len(level) >= 2:
+            try:
+                return {"price": float(level[0] or 0.0), "quantity": float(level[1] or 0.0)}
+            except Exception:
+                return None
+        if isinstance(level, dict):
+            try:
+                return {
+                    "price": float(level.get("price", 0.0) or 0.0),
+                    "quantity": float(level.get("size", level.get("qty", 0.0)) or 0.0),
+                }
+            except Exception:
+                return None
+        return None
+
+    def _book_lists(self, symbol: str) -> Dict[str, List[List[float]]]:
+        book = self._books[symbol]
+        bids = sorted(book["bids"].values(), key=lambda item: item["price"], reverse=True)
+        asks = sorted(book["asks"].values(), key=lambda item: item["price"])
+        return {
+            "bids": [[item["price"], item["quantity"]] for item in bids[: self.depth_levels]],
+            "asks": [[item["price"], item["quantity"]] for item in asks[: self.depth_levels]],
+        }
+
+    def _apply_orderbook(self, symbol: str, payload: Dict):
+        book = self._books[symbol]
+        event_type = str(payload.get("type", "") or "").lower()
+        data = payload.get("data", {}) or {}
+        if event_type == "snapshot":
+            book["bids"] = {}
+            book["asks"] = {}
+        for side_name, target in (("b", "bids"), ("a", "asks")):
+            for raw_level in data.get(side_name, []) or []:
+                normalized = self._normalize_level(raw_level)
+                if not normalized:
+                    continue
+                price = normalized["price"]
+                quantity = normalized["quantity"]
+                key = f"{price:.8f}"
+                if quantity <= 0:
+                    book[target].pop(key, None)
+                else:
+                    book[target][key] = {"price": price, "quantity": quantity}
+
+        lists = self._book_lists(symbol)
+        best_bid = lists["bids"][0][0] if lists["bids"] else 0.0
+        best_ask = lists["asks"][0][0] if lists["asks"] else 0.0
+        best_bid_qty = lists["bids"][0][1] if lists["bids"] else 0.0
+        best_ask_qty = lists["asks"][0][1] if lists["asks"] else 0.0
+        self.depth_buffer.update(
+            symbol,
+            {
+                "bids": lists["bids"],
+                "asks": lists["asks"],
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "best_bid_qty": best_bid_qty,
+                "best_ask_qty": best_ask_qty,
+                "last_depth_update_id": data.get("u"),
+                "source": self.source,
+            },
+        )
+        if best_bid > 0 and best_ask > 0:
+            self.buffer.push(
+                Tick(
+                    symbol=symbol,
+                    price=(best_bid + best_ask) / 2.0,
+                    volume=0,
+                    timestamp=datetime.now(timezone.utc),
+                    bid=best_bid,
+                    ask=best_ask,
+                    market="CRYPTO",
+                    source=self.source,
+                )
+            )
+
+    def _apply_trade(self, symbol: str, payload: Dict):
+        for item in payload.get("data", []) or []:
+            price = float(item.get("p", 0.0) or 0.0)
+            size = float(item.get("v", 0.0) or 0.0)
+            trade_ts = datetime.fromtimestamp(float(item.get("T", time.time() * 1000)) / 1000.0, tz=timezone.utc)
+            lists = self._book_lists(symbol)
+            best_bid = lists["bids"][0][0] if lists["bids"] else None
+            best_ask = lists["asks"][0][0] if lists["asks"] else None
+            if price <= 0:
+                continue
+            self.buffer.push(
+                Tick(
+                    symbol=symbol,
+                    price=price,
+                    volume=int(max(0.0, size * price)),
+                    timestamp=trade_ts,
+                    bid=best_bid,
+                    ask=best_ask,
+                    market="CRYPTO",
+                    source=self.source,
+                )
+            )
+
+    def _on_message(self, ws, message):
+        try:
+            payload = json.loads(message)
+        except Exception:
+            return
+
+        if payload.get("op") in {"pong", "ping"} or str(payload.get("ret_msg", "")).lower() == "pong":
+            return
+
+        topic = str(payload.get("topic", "") or "")
+        if not topic:
+            return
+        symbol = topic.split(".")[-1].upper()
+        if topic.startswith("orderbook."):
+            self._apply_orderbook(symbol, payload)
+        elif topic.startswith("publicTrade."):
+            self._apply_trade(symbol, payload)
+
+    def _on_error(self, ws, error):
+        logger.warning(f"Bybit public depth WebSocket error: {error}")
+
+    def _on_close(self, ws, *args):
+        logger.info("Bybit public depth WebSocket closed")
 
 
 
@@ -692,6 +911,134 @@ class UpstoxWebSocket:
 
     def _on_close(self, ws, *args):
         logger.info("Upstox WebSocket closed")
+
+
+class MetaTrader5PollingFeed:
+    """
+    Lightweight MT5 tick bridge.
+
+    MT5 does not expose a normal external WebSocket, so we poll symbol_info_tick
+    and push the freshest prices into the shared live buffer.
+    """
+
+    def __init__(
+        self,
+        symbols: List[str],
+        buffer: RealTimePriceBuffer = None,
+        *,
+        poll_interval_seconds: float = 1.0,
+        symbol_map_path: str = "data/mt5_symbols.json",
+        path: str = "",
+        login: str = "",
+        password: str = "",
+        server: str = "",
+    ):
+        self.symbols = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
+        self.buffer = buffer or PRICE_BUFFER
+        self.poll_interval_seconds = max(0.2, float(poll_interval_seconds))
+        self.symbol_map = self._load_symbol_map(symbol_map_path)
+        self.path = str(path or "").strip()
+        self.login = str(login or "").strip()
+        self.password = str(password or "").strip()
+        self.server = str(server or "").strip()
+        self._running = False
+        self._initialized = False
+        try:
+            import MetaTrader5 as mt5  # type: ignore
+
+            self._mt5 = mt5
+        except Exception as exc:
+            self._mt5 = None
+            logger.warning(f"MT5 realtime feed unavailable: {exc}")
+
+    @staticmethod
+    def _load_symbol_map(path_value: str) -> Dict[str, str]:
+        path = Path(path_value)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        mapping: Dict[str, str] = {}
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if key and value:
+                    mapping[str(key).strip().upper()] = str(value).strip()
+        return mapping
+
+    def _resolve_symbol(self, symbol: str) -> str:
+        if symbol in self.symbol_map:
+            return self.symbol_map[symbol]
+        return symbol[:-3] if symbol.endswith(".NS") else symbol
+
+    def _initialize(self) -> bool:
+        if self._mt5 is None:
+            return False
+        if self._initialized:
+            return True
+        kwargs: Dict[str, object] = {"timeout": 5000}
+        if self.path:
+            kwargs["path"] = self.path
+        if self.login:
+            kwargs["login"] = int(self.login)
+        if self.password:
+            kwargs["password"] = self.password
+        if self.server:
+            kwargs["server"] = self.server
+        self._initialized = bool(self._mt5.initialize(**kwargs))
+        if not self._initialized:
+            logger.warning(f"MT5 realtime initialize failed: {self._mt5.last_error()}")
+        return self._initialized
+
+    def start(self):
+        if self._mt5 is None:
+            return
+        self._running = True
+        threading.Thread(target=self._poll_loop, daemon=True).start()
+        logger.info(f"MT5 polling feed started for {len(self.symbols)} symbols")
+
+    def stop(self):
+        self._running = False
+
+    def _poll_loop(self):
+        if not self._initialize():
+            return
+        while self._running:
+            loop_started = time.time()
+            for symbol in self.symbols:
+                resolved_symbol = self._resolve_symbol(symbol)
+                try:
+                    if not self._mt5.symbol_select(resolved_symbol, True):
+                        continue
+                    tick = self._mt5.symbol_info_tick(resolved_symbol)
+                    if tick is None:
+                        continue
+                    bid = float(getattr(tick, "bid", 0.0) or 0.0)
+                    ask = float(getattr(tick, "ask", 0.0) or 0.0)
+                    last = float(getattr(tick, "last", 0.0) or 0.0)
+                    price = last or (bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0
+                    if price <= 0:
+                        continue
+                    timestamp_seconds = float(getattr(tick, "time", time.time()) or time.time())
+                    self.buffer.push(
+                        Tick(
+                            symbol=symbol,
+                            price=price,
+                            volume=int(float(getattr(tick, "volume_real", getattr(tick, "volume", 0.0)) or 0.0)),
+                            timestamp=datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc),
+                            bid=bid if bid > 0 else None,
+                            ask=ask if ask > 0 else None,
+                            market="CRYPTO" if symbol.endswith(("USDT", "USDC", "BUSD")) else "IN" if symbol.endswith(".NS") else "US",
+                            source="mt5",
+                        )
+                    )
+                except Exception:
+                    continue
+            elapsed = time.time() - loop_started
+            time.sleep(max(0.0, self.poll_interval_seconds - elapsed))
 
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

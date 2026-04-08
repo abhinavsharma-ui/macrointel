@@ -20,13 +20,24 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from pipeline.provider_utils import APIKeyPool, FetchOutcome, looks_rate_limited, parse_api_keys, stable_rotate
+from pipeline.provider_utils import (
+    APIKeyPool,
+    FetchOutcome,
+    looks_rate_limited,
+    parse_api_keys,
+    stable_rotate,
+    to_eodhd_symbol,
+    to_polygon_symbol,
+    to_yfinance_symbol,
+)
 from pipeline.universe import get_universe
 
 logger = logging.getLogger(__name__)
 
 ALPHA_VANTAGE_BASE = "https://www.alphavantage.co/query"
 FINNHUB_BASE = "https://finnhub.io/api/v1/stock/candle"
+POLYGON_AGGS_BASE = "https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{from_date}/{to_date}"
+EODHD_EOD_BASE = "https://eodhd.com/api/eod/{ticker}"
 TWELVE_DATA_BASE = "https://api.twelvedata.com/time_series"
 
 DEFAULT_UNIVERSE_MODE = os.getenv("UNIVERSE_MODE", "full").strip().lower() or "full"
@@ -35,10 +46,10 @@ if DEFAULT_UNIVERSE_MODE not in {"core", "full", "us", "nse"}:
 
 PRICE_PROVIDER_ORDER = [
     name.strip().lower()
-    for name in os.getenv("PRICE_PROVIDER_ORDER", "yfinance,finnhub,alpha_vantage,twelve_data").split(",")
+    for name in os.getenv("PRICE_PROVIDER_ORDER", "yfinance,finnhub,alpha_vantage,polygon,eodhd").split(",")
     if name.strip()
 ]
-PRICE_MAX_PROVIDER_ATTEMPTS = max(1, int(os.getenv("PRICE_MAX_PROVIDER_ATTEMPTS", "2")))
+PRICE_MAX_PROVIDER_ATTEMPTS = max(1, int(os.getenv("PRICE_MAX_PROVIDER_ATTEMPTS", "5")))
 PRICE_FETCH_FULL_HISTORY = os.getenv("PRICE_FETCH_FULL_HISTORY", "1").strip().lower() not in {"0", "false", "no"}
 PRICE_SYMBOL_REFRESH_SECONDS = max(60, int(os.getenv("PRICE_SYMBOL_REFRESH_SECONDS", "3600")))
 PRICE_KEEP_FULL_HISTORY = os.getenv("PRICE_KEEP_FULL_HISTORY", "0").strip().lower() in {"1", "true", "yes"}
@@ -242,6 +253,171 @@ class FinnhubPriceFetcher:
             return FetchOutcome(self.name, status="error", error=error)
 
 
+class PolygonPriceFetcher:
+    name = "polygon"
+
+    def __init__(self):
+        self.keys = APIKeyPool(
+            parse_api_keys("POLYGON_API_KEYS", "POLYGON_API_KEY"),
+            default_cooldown=float(os.getenv("POLYGON_COOLDOWN_SECONDS", "180")),
+        )
+        self._min_call_interval = float(os.getenv("POLYGON_MIN_CALL_INTERVAL", "0.35"))
+        self._last_call_by_key: Dict[str, float] = {}
+
+    def supports(self, symbol: str) -> bool:
+        return bool(to_polygon_symbol(symbol))
+
+    def _throttle(self, api_key: str):
+        elapsed = time.time() - self._last_call_by_key.get(api_key, 0.0)
+        if elapsed < self._min_call_interval:
+            time.sleep(self._min_call_interval - elapsed)
+        self._last_call_by_key[api_key] = time.time()
+
+    def fetch_daily(self, symbol: str, full: bool = False) -> FetchOutcome:
+        api_key = self.keys.acquire()
+        if not api_key:
+            return FetchOutcome(self.name, status="unavailable", error="No Polygon key available")
+
+        ticker = to_polygon_symbol(symbol)
+        if not ticker:
+            return FetchOutcome(self.name, status="unsupported", error=f"Polygon does not support {symbol}")
+
+        self._throttle(api_key)
+        start_date = date.today() - timedelta(days=365 * 3 if full else 365)
+        end_date = date.today()
+        params = {
+            "adjusted": "true",
+            "sort": "asc",
+            "limit": "50000",
+            "apiKey": api_key,
+        }
+
+        try:
+            resp = requests.get(
+                POLYGON_AGGS_BASE.format(
+                    ticker=ticker,
+                    from_date=start_date.isoformat(),
+                    to_date=end_date.isoformat(),
+                ),
+                params=params,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            rows = payload.get("results", [])
+            if not rows:
+                error = payload.get("error") or payload.get("message") or payload.get("status") or "Polygon returned no aggregates"
+                if looks_rate_limited(error):
+                    self.keys.cool_down(api_key)
+                    return FetchOutcome(self.name, status="rate_limited", error=error)
+                return FetchOutcome(self.name, status="empty", error=error)
+
+            frame = pd.DataFrame(
+                [
+                    {
+                        "date": pd.to_datetime(item.get("t"), unit="ms"),
+                        "open": _as_float(item.get("o")),
+                        "high": _as_float(item.get("h")),
+                        "low": _as_float(item.get("l")),
+                        "close": _as_float(item.get("c")),
+                        "adj_close": _as_float(item.get("c")),
+                        "volume": _as_int(item.get("v")),
+                    }
+                    for item in rows
+                ]
+            ).set_index("date")
+            frame = _normalize_price_frame(frame)
+            if frame is None:
+                return FetchOutcome(self.name, status="empty", error="Polygon returned malformed data")
+            return FetchOutcome(self.name, data=frame)
+        except Exception as exc:
+            error = str(exc)
+            if looks_rate_limited(error):
+                self.keys.cool_down(api_key)
+                return FetchOutcome(self.name, status="rate_limited", error=error)
+            return FetchOutcome(self.name, status="error", error=error)
+
+
+class EODHDPriceFetcher:
+    name = "eodhd"
+
+    def __init__(self):
+        self.keys = APIKeyPool(
+            parse_api_keys("EODHD_API_KEYS", "EODHD_API_KEY"),
+            default_cooldown=float(os.getenv("EODHD_COOLDOWN_SECONDS", "120")),
+        )
+        self._min_call_interval = float(os.getenv("EODHD_MIN_CALL_INTERVAL", "0.35"))
+        self._last_call_by_key: Dict[str, float] = {}
+
+    def supports(self, symbol: str) -> bool:
+        return bool(to_eodhd_symbol(symbol))
+
+    def _throttle(self, api_key: str):
+        elapsed = time.time() - self._last_call_by_key.get(api_key, 0.0)
+        if elapsed < self._min_call_interval:
+            time.sleep(self._min_call_interval - elapsed)
+        self._last_call_by_key[api_key] = time.time()
+
+    def fetch_daily(self, symbol: str, full: bool = False) -> FetchOutcome:
+        api_key = self.keys.acquire()
+        if not api_key:
+            return FetchOutcome(self.name, status="unavailable", error="No EODHD key available")
+
+        ticker = to_eodhd_symbol(symbol)
+        if not ticker:
+            return FetchOutcome(self.name, status="unsupported", error=f"EODHD does not support {symbol}")
+
+        self._throttle(api_key)
+        start_date = date.today() - timedelta(days=365 * 3 if full else 365)
+        end_date = date.today()
+        params = {
+            "api_token": api_key,
+            "fmt": "json",
+            "period": "d",
+            "order": "a",
+            "from": start_date.isoformat(),
+            "to": end_date.isoformat(),
+        }
+
+        try:
+            resp = requests.get(EODHD_EOD_BASE.format(ticker=ticker), params=params, timeout=15)
+            resp.raise_for_status()
+            payload = resp.json()
+            if isinstance(payload, dict):
+                error = payload.get("message") or payload.get("error") or "EODHD returned no price rows"
+                if looks_rate_limited(error):
+                    self.keys.cool_down(api_key)
+                    return FetchOutcome(self.name, status="rate_limited", error=error)
+                return FetchOutcome(self.name, status="empty", error=error)
+            if not payload:
+                return FetchOutcome(self.name, status="empty", error="EODHD returned no price rows")
+
+            frame = pd.DataFrame(
+                [
+                    {
+                        "date": pd.Timestamp(item.get("date")),
+                        "open": _as_float(item.get("open")),
+                        "high": _as_float(item.get("high")),
+                        "low": _as_float(item.get("low")),
+                        "close": _as_float(item.get("close")),
+                        "adj_close": _as_float(item.get("adjusted_close", item.get("close"))),
+                        "volume": _as_int(item.get("volume")),
+                    }
+                    for item in payload
+                ]
+            ).set_index("date")
+            frame = _normalize_price_frame(frame)
+            if frame is None:
+                return FetchOutcome(self.name, status="empty", error="EODHD returned malformed data")
+            return FetchOutcome(self.name, data=frame)
+        except Exception as exc:
+            error = str(exc)
+            if looks_rate_limited(error):
+                self.keys.cool_down(api_key)
+                return FetchOutcome(self.name, status="rate_limited", error=error)
+            return FetchOutcome(self.name, status="error", error=error)
+
+
 class TwelveDataFetcher:
     name = "twelve_data"
 
@@ -323,7 +499,7 @@ class YFinanceFetcher:
 
                 start = date.today() - timedelta(days=365 * 3 if full else 365)
                 end = date.today()
-                ticker = yf.Ticker(symbol)
+                ticker = yf.Ticker(to_yfinance_symbol(symbol) or symbol)
                 raw = ticker.history(start=str(start), end=str(end), auto_adjust=True)
             if raw.empty:
                 return FetchOutcome(self.name, status="empty", error="yfinance returned no history")
@@ -356,7 +532,9 @@ class MultiSourcePriceFetcher:
     def __init__(self):
         registry = {
             "alpha_vantage": AlphaVantageFetcher(),
+            "eodhd": EODHDPriceFetcher(),
             "finnhub": FinnhubPriceFetcher(),
+            "polygon": PolygonPriceFetcher(),
             "twelve_data": TwelveDataFetcher(),
             "yfinance": YFinanceFetcher(),
         }

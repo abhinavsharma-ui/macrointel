@@ -11,6 +11,7 @@ load_dotenv(ROOT / ".env")
 load_dotenv(ROOT / ".env.example", override=False)
 
 import os
+import json
 
 # Apply performance caps *before* importing NumPy/Pandas/XGBoost/etc.
 from core.performance import apply_performance_profile
@@ -25,7 +26,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -49,6 +50,33 @@ def _resolve_root_path(path_value: str) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def _parse_symbol_blob(raw: str) -> List[str]:
+    text = str(raw or "")
+    values = []
+    for line in text.splitlines():
+        values.extend(line.replace(";", ",").split(","))
+    cleaned = []
+    for value in values:
+        item = str(value).strip().upper()
+        if not item or item.startswith("#"):
+            continue
+        cleaned.append(item)
+    return list(dict.fromkeys(cleaned))
+
+
+def _load_symbol_file(path_value: str) -> List[str]:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return []
+    path = _resolve_root_path(path_text)
+    if not path.exists():
+        return []
+    try:
+        return _parse_symbol_blob(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
 class MacroIntelligenceSystem:
     def __init__(self):
         self._signal_store: Dict = {}
@@ -65,25 +93,83 @@ class MacroIntelligenceSystem:
             "fred": os.getenv("FRED_API_KEY", ""),
         }
         self._universe_mode = os.getenv("UNIVERSE_MODE", "full").strip().lower() or "full"
-        if self._universe_mode not in {"core", "full", "us", "nse", "daytrade", "daytrade_us", "daytrade_nse"}:
+        if self._universe_mode not in {
+            "core",
+            "full",
+            "us",
+            "nse",
+            "daytrade",
+            "daytrade_us",
+            "daytrade_nse",
+            "throughput",
+            "throughput_us",
+            "throughput_nse",
+        }:
             logger.warning(f"Invalid UNIVERSE_MODE '{self._universe_mode}', defaulting to full")
             self._universe_mode = "full"
         self._day_trading_mode = (
             os.getenv("DAY_TRADING_MODE", "1").strip().lower() in {"1", "true", "yes", "on"}
-            or self._universe_mode.startswith("daytrade")
+            or self._universe_mode.startswith(("daytrade", "throughput"))
         )
         self._day_trade_force_daytrade_universe = (
             os.getenv("DAY_TRADE_FORCE_DAYTRADE_UNIVERSE", "0").strip().lower() in {"1", "true", "yes", "on"}
         )
+        self._throughput_mode = os.getenv("THROUGHPUT_MODE", "1").strip().lower() in {"1", "true", "yes", "on"}
+        self._universe_sync_summary: Dict[str, Any] = {}
+        self._source_selection_summary: Dict[str, Dict[str, Any]] = {}
+        self._pipeline_rotation_offsets: Dict[str, int] = defaultdict(int)
+        self._pipeline_priority_symbol_cap = max(0, int(os.getenv("PIPELINE_PRIORITY_SYMBOL_CAP", "0") or 0))
+        self._source_symbol_caps = {
+            "prices": max(0, int(os.getenv("PRICE_PIPELINE_SYMBOL_CAP", "0") or 0)),
+            "sentiment": max(0, int(os.getenv("SENTIMENT_PIPELINE_SYMBOL_CAP", "0") or 0)),
+            "earnings": max(0, int(os.getenv("EARNINGS_PIPELINE_SYMBOL_CAP", "0") or 0)),
+            "altdata": max(0, int(os.getenv("ALTDATA_PIPELINE_SYMBOL_CAP", "0") or 0)),
+        }
+        self._binance_ws_symbols_per_connection = max(
+            1,
+            int(os.getenv("BINANCE_WS_SYMBOLS_PER_CONNECTION", "110") or 110),
+        )
+        self._bybit_ws_symbols_per_connection = max(
+            1,
+            int(os.getenv("BYBIT_WS_SYMBOLS_PER_CONNECTION", "60") or 60),
+        )
+        if self._throughput_mode or os.getenv("OFFICIAL_UNIVERSE_AUTO_SYNC", "1").strip().lower() in {"1", "true", "yes", "on"}:
+            self._universe_sync_summary = self._sync_official_universes()
         self._crypto_depth_enabled = os.getenv("CRYPTO_DEPTH_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
-        self._crypto_symbols = [
-            symbol.strip().upper()
-            for symbol in os.getenv(
-                "CRYPTO_DEPTH_SYMBOLS",
-                "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT,BNBUSDT,AVAXUSDT",
-            ).replace(";", ",").split(",")
-            if symbol.strip()
-        ]
+        crypto_default = (
+            "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT,BNBUSDT,AVAXUSDT,"
+            "LTCUSDT,BCHUSDT,DOTUSDT,TRXUSDT,ATOMUSDT,ETCUSDT,XLMUSDT,NEARUSDT,APTUSDT,"
+            "ARBUSDT,OPUSDT,FILUSDT,ICPUSDT,INJUSDT,UNIUSDT,AAVEUSDT,SANDUSDT,MANAUSDT,"
+            "ALGOUSDT,VETUSDT,EOSUSDT"
+        )
+        self._crypto_symbols = list(
+            dict.fromkeys(
+                _parse_symbol_blob(os.getenv("CRYPTO_DEPTH_SYMBOLS", crypto_default))
+                + _load_symbol_file(os.getenv("CRYPTO_DEPTH_SYMBOLS_FILE", ""))
+            )
+        )
+        self._binance_crypto_symbols = list(
+            dict.fromkeys(
+                _parse_symbol_blob(os.getenv("BINANCE_CRYPTO_SYMBOLS", ""))
+                + _load_symbol_file(os.getenv("BINANCE_CRYPTO_SYMBOLS_FILE", ""))
+            )
+        )
+        self._bybit_crypto_symbols = list(
+            dict.fromkeys(
+                _parse_symbol_blob(os.getenv("BYBIT_CRYPTO_SYMBOLS", ""))
+                + _load_symbol_file(os.getenv("BYBIT_CRYPTO_SYMBOLS_FILE", ""))
+            )
+        )
+        if not self._binance_crypto_symbols:
+            self._binance_crypto_symbols = list(self._crypto_symbols)
+        if not self._bybit_crypto_symbols:
+            self._bybit_crypto_symbols = list(self._crypto_symbols)
+        if self._throughput_mode and len(self._crypto_symbols) < 24:
+            self._crypto_symbols = list(dict.fromkeys(self._crypto_symbols + _parse_symbol_blob(crypto_default)))
+        if self._throughput_mode and len(self._binance_crypto_symbols) < 24:
+            self._binance_crypto_symbols = list(dict.fromkeys(self._binance_crypto_symbols + self._crypto_symbols))
+        if self._throughput_mode and len(self._bybit_crypto_symbols) < 24:
+            self._bybit_crypto_symbols = list(dict.fromkeys(self._bybit_crypto_symbols + self._crypto_symbols))
         self._crypto_signal_stale_seconds = max(15, int(os.getenv("CRYPTO_SIGNAL_STALE_SECONDS", "45")))
         self._crypto_signal_hold_grace_seconds = max(
             30,
@@ -130,6 +216,12 @@ class MacroIntelligenceSystem:
             and not self._universe_mode.startswith("daytrade")
         ):
             self._universe_mode = "daytrade"
+        if self._throughput_mode and self._universe_mode in {"core", "full"}:
+            self._universe_mode = "throughput"
+        elif self._throughput_mode and self._universe_mode == "us":
+            self._universe_mode = "throughput_us"
+        elif self._throughput_mode and self._universe_mode == "nse":
+            self._universe_mode = "throughput_nse"
         self._poll_batch_size = max(1, int(os.getenv("POLL_BATCH_SIZE", "20")))
         self._poll_interval_seconds = max(5, int(os.getenv("POLL_INTERVAL_SECONDS", "15")))
         self._sentiment_batch_size = max(1, int(os.getenv("SENTIMENT_BATCH_SIZE", "25")))
@@ -139,6 +231,12 @@ class MacroIntelligenceSystem:
         self._earnings_refresh_seconds = max(1800, int(os.getenv("EARNINGS_REFRESH_SECONDS", "21600")))
         self._altdata_refresh_seconds = max(900, int(os.getenv("ALTDATA_REFRESH_SECONDS", "3600")))
         self._inference_refresh_seconds = max(15, int(os.getenv("INFERENCE_REFRESH_SECONDS", "120")))
+        self._entry_readiness_enabled = os.getenv("ENTRY_READINESS_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
+        self._entry_stale_multiplier = max(1.0, float(os.getenv("ENTRY_STALE_MULTIPLIER", "2.0")))
+        self._entry_require_market_open = os.getenv("ENTRY_REQUIRE_MARKET_OPEN", "1").strip().lower() not in {"0", "false", "off"}
+        self._entry_require_live_price_normal = os.getenv("ENTRY_REQUIRE_LIVE_PRICE_NORMAL", "1").strip().lower() not in {"0", "false", "off"}
+        self._entry_require_live_price_day = os.getenv("ENTRY_REQUIRE_LIVE_PRICE_DAY", "1").strip().lower() not in {"0", "false", "off"}
+        self._entry_require_live_price_crypto = os.getenv("ENTRY_REQUIRE_LIVE_PRICE_CRYPTO", "1").strip().lower() not in {"0", "false", "off"}
         self._auto_trade_min_conviction = max(0.0, float(os.getenv("AUTO_TRADE_MIN_CONVICTION", "1.2")))
         self._auto_trade_top_k = max(1, int(os.getenv("AUTO_TRADE_TOP_K", "72")))
         self._auto_trade_max_new_per_cycle = max(1, int(os.getenv("AUTO_TRADE_MAX_NEW_PER_CYCLE", "18")))
@@ -201,6 +299,11 @@ class MacroIntelligenceSystem:
             self._auto_trade_base_position_pct,
             float(os.getenv("AUTO_TRADE_MAX_POSITION_PCT", "0.08")),
         )
+        self._lane_target_open_positions = {
+            "normal": max(0, int(os.getenv("NORMAL_LANE_TARGET_OPEN_POSITIONS", os.getenv("LANE_TARGET_OPEN_POSITIONS", "150")))),
+            "day": max(0, int(os.getenv("DAY_LANE_TARGET_OPEN_POSITIONS", os.getenv("LANE_TARGET_OPEN_POSITIONS", "150")))),
+            "crypto": max(0, int(os.getenv("CRYPTO_LANE_TARGET_OPEN_POSITIONS", os.getenv("LANE_TARGET_OPEN_POSITIONS", "150")))),
+        }
         self._auto_trade_leader_min_conviction = max(
             0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_CONVICTION", "0.8"))
         )
@@ -275,6 +378,13 @@ class MacroIntelligenceSystem:
         self._auto_retrain_timeout_seconds = max(60, int(os.getenv("AUTO_RETRAIN_TIMEOUT_SECONDS", "1800")))
         self._auto_retrain_use_optuna = os.getenv("AUTO_RETRAIN_USE_OPTUNA", "0").strip().lower() in {"1", "true", "yes", "on"}
         self._execution_trace_limit = max(100, int(os.getenv("EXECUTION_TRACE_LIMIT", "500")))
+        self._runtime_state_path = _resolve_root_path(os.getenv("RUNTIME_STATE_PATH", "data/runtime_state.json"))
+        self._execution_trace_log_path = _resolve_root_path(os.getenv("EXECUTION_TRACE_LOG_PATH", "data/execution_trace.jsonl"))
+        self._execution_reconciliation_log_path = _resolve_root_path(
+            os.getenv("EXECUTION_RECONCILIATION_LOG_PATH", "data/execution_reconciliation.jsonl")
+        )
+        self._system_health_path = _resolve_root_path(os.getenv("SYSTEM_HEALTH_PATH", "data/system_health.json"))
+        self._runtime_state_save_seconds = max(5, int(os.getenv("RUNTIME_STATE_SAVE_SECONDS", "30")))
         self._execution_backtest_enabled = os.getenv("EXECUTION_BACKTEST_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
         self._execution_backtest_interval_seconds = max(
             300, int(os.getenv("EXECUTION_BACKTEST_INTERVAL_SECONDS", "1800"))
@@ -297,6 +407,15 @@ class MacroIntelligenceSystem:
             0.05,
             float(os.getenv("EXECUTION_BACKTEST_PLATEAU_DELTA", "0.3")),
         )
+        self._alpha_quality_enabled = os.getenv("ALPHA_QUALITY_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
+        self._alpha_quality_lookback_days = max(
+            45,
+            int(os.getenv("ALPHA_QUALITY_LOOKBACK_DAYS", str(max(120, self._execution_backtest_lookback_days)))),
+        )
+        self._alpha_quality_horizon_days = max(1, int(os.getenv("ALPHA_QUALITY_HORIZON_DAYS", os.getenv("META_MODEL_HORIZON_DAYS", "5"))))
+        self._alpha_quality_bucket_count = min(10, max(3, int(os.getenv("ALPHA_QUALITY_BUCKETS", "5"))))
+        self._alpha_quality_min_bucket_samples = max(5, int(os.getenv("ALPHA_QUALITY_MIN_BUCKET_SAMPLES", "12")))
+        self._alpha_quality_report_path = _resolve_root_path(os.getenv("ALPHA_QUALITY_REPORT_PATH", "data/alpha_quality.json"))
         self._broker_execution_mode = str(os.getenv("BROKER_EXECUTION_MODE", "paper") or "paper").strip().lower()
         if self._broker_execution_mode not in {"paper", "shadow"}:
             logger.warning(f"Unsupported BROKER_EXECUTION_MODE '{self._broker_execution_mode}', falling back to paper")
@@ -462,6 +581,11 @@ class MacroIntelligenceSystem:
                 "pair_corr_cap": min(0.99, max(0.10, float(os.getenv("CRYPTO_LANE_MAX_PAIR_CORRELATION", "0.98")))),
             },
         }
+        for lane_name, target_value in self._lane_target_open_positions.items():
+            if lane_name in self._lane_engine_config:
+                self._lane_engine_config[lane_name]["target_open_positions"] = int(target_value)
+        if self._throughput_mode:
+            self._apply_throughput_mode()
         self._last_feature_signature: Dict[str, str] = {}
         self._crypto_last_signal_ts: Dict[str, float] = {}
         self._position_plans: Dict[str, Dict] = {}
@@ -469,6 +593,7 @@ class MacroIntelligenceSystem:
         self._last_execution_backtest_ts = 0.0
         self._execution_backtest_running = False
         self._last_feature_store_save_ts = 0.0
+        self._last_runtime_state_save_ts = 0.0
         self._execution_trace: List[Dict] = []
         self._execution_reconciliation: List[Dict] = []
         self._intraday_state: Dict[str, Dict] = {}
@@ -491,6 +616,375 @@ class MacroIntelligenceSystem:
         self._components["data_versions"] = dict(self._data_versions)
         if self._event_window_mode:
             self._apply_event_window_mode()
+        self._data_health = self._seed_data_health()
+        self._system_health: Dict[str, Any] = {}
+        self._components["data_health"] = self._data_health
+        self._components["system_health"] = self._system_health
+        self._load_runtime_state()
+        self._refresh_system_health()
+
+    def _source_refresh_seconds(self, source: str) -> int:
+        return {
+            "prices": self._price_refresh_seconds,
+            "sentiment": self._sentiment_refresh_seconds,
+            "earnings": self._earnings_refresh_seconds,
+            "altdata": self._altdata_refresh_seconds,
+        }.get(str(source or "").lower(), 0)
+
+    def _source_stale_after_seconds(self, source: str) -> float:
+        refresh_seconds = float(self._source_refresh_seconds(source) or 0.0)
+        if refresh_seconds <= 0:
+            return 0.0
+        return max(refresh_seconds, refresh_seconds * self._entry_stale_multiplier)
+
+    def _seed_data_health(self) -> Dict[str, Dict[str, Any]]:
+        seeded: Dict[str, Dict[str, Any]] = {}
+        for source in ("prices", "sentiment", "earnings", "altdata"):
+            seeded[source] = {
+                "updated_at": None,
+                "updated_at_ts": 0.0,
+                "refresh_seconds": self._source_refresh_seconds(source),
+                "stale_after_seconds": self._source_stale_after_seconds(source),
+                "status": "missing",
+            }
+        return seeded
+
+    def _append_jsonl(self, path: Path, row: Dict[str, Any], *, log_label: str) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, default=str) + "\n")
+        except Exception as exc:
+            logger.warning(f"{log_label} save failed: {exc}")
+
+    def _serialize_runtime_state(self) -> Dict[str, Any]:
+        return {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "position_plans": self._position_plans,
+            "last_trade_timestamps": self._last_trade_timestamps,
+            "execution_trace": self._execution_trace[-self._execution_trace_limit :],
+            "execution_reconciliation": self._execution_reconciliation[-self._execution_trace_limit :],
+            "data_health": self._data_health,
+            "system_health": self._system_health,
+        }
+
+    def _persist_runtime_state(self, *, force: bool = False) -> None:
+        now = time.time()
+        if not force and (now - self._last_runtime_state_save_ts) < self._runtime_state_save_seconds:
+            return
+        self._refresh_system_health()
+        payload = self._serialize_runtime_state()
+        try:
+            self._runtime_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._runtime_state_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+            self._system_health_path.parent.mkdir(parents=True, exist_ok=True)
+            self._system_health_path.write_text(json.dumps(self._system_health, indent=2, default=str), encoding="utf-8")
+            self._last_runtime_state_save_ts = now
+        except Exception as exc:
+            logger.warning(f"Runtime state save failed: {exc}")
+
+    def _load_runtime_state(self) -> None:
+        if not self._runtime_state_path.exists():
+            return
+        try:
+            payload = json.loads(self._runtime_state_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(f"Runtime state load failed: {exc}")
+            return
+
+        self._execution_trace.clear()
+        self._execution_trace.extend(
+            [dict(row) for row in (payload.get("execution_trace") or []) if isinstance(row, dict)][-self._execution_trace_limit :]
+        )
+        self._execution_reconciliation.clear()
+        self._execution_reconciliation.extend(
+            [dict(row) for row in (payload.get("execution_reconciliation") or []) if isinstance(row, dict)][-self._execution_trace_limit :]
+        )
+        self._position_plans.clear()
+        for position_key, plan in (payload.get("position_plans") or {}).items():
+            if isinstance(plan, dict):
+                self._position_plans[str(position_key)] = dict(plan)
+        self._last_trade_timestamps.clear()
+        for lane_key, value in (payload.get("last_trade_timestamps") or {}).items():
+            try:
+                self._last_trade_timestamps[str(lane_key)] = float(value)
+            except Exception:
+                continue
+
+        restored_health = self._seed_data_health()
+        loaded_health = payload.get("data_health") or {}
+        if isinstance(loaded_health, dict):
+            for source in restored_health:
+                if isinstance(loaded_health.get(source), dict):
+                    restored_health[source].update(loaded_health[source])
+                restored_health[source]["refresh_seconds"] = self._source_refresh_seconds(source)
+                restored_health[source]["stale_after_seconds"] = self._source_stale_after_seconds(source)
+        self._data_health.clear()
+        self._data_health.update(restored_health)
+
+        self._system_health.clear()
+        if isinstance(payload.get("system_health"), dict):
+            self._system_health.update(payload["system_health"])
+
+        logger.info(
+            "Runtime state restored: %s plans | %s execution events | %s reconciliations",
+            len(self._position_plans),
+            len(self._execution_trace),
+            len(self._execution_reconciliation),
+        )
+
+    def _sync_runtime_state_with_broker(self, broker) -> None:
+        if broker is None:
+            return
+        positions = getattr(broker, "positions", {}) or {}
+        open_position_keys = {
+            str(position_key)
+            for position_key, position in positions.items()
+            if float(getattr(position, "quantity", 0.0) or 0.0) > 0.0
+        }
+        stale_plan_keys = [position_key for position_key in self._position_plans.keys() if position_key not in open_position_keys]
+        for position_key in stale_plan_keys:
+            self._position_plans.pop(position_key, None)
+
+        restored_count = 0
+        for position_key, position in positions.items():
+            if float(getattr(position, "quantity", 0.0) or 0.0) <= 0.0:
+                continue
+            resolved_key = str(position_key)
+            if resolved_key in self._position_plans:
+                continue
+            symbol = str(getattr(position, "symbol", resolved_key) or resolved_key)
+            lane = self._lane_from_position_key(resolved_key)
+            self._position_plans[resolved_key] = {
+                "symbol": symbol,
+                "signal_key": resolved_key,
+                "lane": lane,
+                "market": self._market_code_for_symbol(symbol),
+                "entry_reason": "restored_state",
+                "min_hold_seconds": int(self._lane_config(lane).get("min_hold_seconds", self._auto_trade_min_hold_seconds)),
+                "stop_loss_pct": 2.0,
+                "take_profit_pct": 5.0,
+                "trailing_stop_pct": float(self._day_trade_trail_stop_pct * 100.0),
+                "peak_price": float(getattr(position, "avg_cost", 0.0) or 0.0),
+                "restored_from_broker_state": True,
+            }
+            restored_count += 1
+
+        if stale_plan_keys or restored_count:
+            logger.info(
+                "Runtime broker sync: restored %s open-position plans | pruned %s stale plans",
+                restored_count,
+                len(stale_plan_keys),
+            )
+
+    def _record_source_refresh(self, source: str, payload: Optional[Dict[str, Any]]) -> None:
+        source_key = str(source or "").lower()
+        snapshot = self._data_health.get(source_key, {})
+        entry = {
+            "updated_at_ts": time.time(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "refresh_seconds": self._source_refresh_seconds(source_key),
+            "stale_after_seconds": self._source_stale_after_seconds(source_key),
+            "status": "ok",
+        }
+        if source_key == "prices":
+            recent = (payload or {}).get("price_daily_recent", {}) if isinstance(payload, dict) else {}
+            entry["symbols_covered"] = len(recent) if isinstance(recent, dict) else 0
+        elif source_key == "sentiment":
+            if isinstance(payload, dict):
+                entry["symbols_covered"] = int(payload.get("symbols_covered", 0) or len(payload.get("headlines", {}) or {}))
+                entry["provider_counts"] = dict((payload.get("news_summary", {}) or {}).get("provider_counts", {}) or {})
+        elif source_key == "earnings":
+            latest_by_symbol = (payload or {}).get("latest_earnings_by_symbol") if isinstance(payload, dict) else None
+            earnings_events = (payload or {}).get("earnings_events") if isinstance(payload, dict) else None
+            if isinstance(latest_by_symbol, dict):
+                entry["symbols_covered"] = len(latest_by_symbol)
+            elif hasattr(earnings_events, "empty"):
+                try:
+                    entry["symbols_covered"] = int(earnings_events["symbol"].nunique()) if not earnings_events.empty else 0
+                except Exception:
+                    entry["symbols_covered"] = 0
+        elif source_key == "altdata":
+            summary = (payload or {}).get("summary") if isinstance(payload, dict) else None
+            if isinstance(summary, dict):
+                entry["symbols_covered"] = int(summary.get("symbols_covered", 0) or 0)
+        snapshot.update(entry)
+        self._data_health[source_key] = snapshot
+
+    def _source_health_snapshot(self, source: str, *, as_of_ts: Optional[float] = None) -> Dict[str, Any]:
+        source_key = str(source or "").lower()
+        snapshot = dict(self._data_health.get(source_key) or {})
+        now_ts = float(as_of_ts if as_of_ts is not None else time.time())
+        updated_at_ts = self._safe_number(snapshot.get("updated_at_ts"), 0.0)
+        age_seconds = round(max(0.0, now_ts - updated_at_ts), 2) if updated_at_ts > 0 else None
+        stale_after_seconds = self._source_stale_after_seconds(source_key)
+        status = "missing"
+        if updated_at_ts > 0:
+            status = "ok" if age_seconds is not None and age_seconds <= stale_after_seconds else "stale"
+        snapshot.update(
+            {
+                "source": source_key,
+                "age_seconds": age_seconds,
+                "refresh_seconds": self._source_refresh_seconds(source_key),
+                "stale_after_seconds": stale_after_seconds,
+                "status": status,
+            }
+        )
+        return snapshot
+
+    def _market_is_open(self, market: str, *, timestamp: Optional[datetime] = None) -> bool:
+        if str(market or "").upper() == "CRYPTO":
+            return True
+        current_ts = timestamp if isinstance(timestamp, datetime) else datetime.now(timezone.utc)
+        local_ts, open_local, close_local = self._market_session_clock(current_ts, market)
+        return open_local <= local_ts <= close_local
+
+    def _entry_readiness_gate(self, symbol: str, lane: str, signal: Optional[Dict] = None) -> Dict[str, Any]:
+        lane_key = str(lane or "normal").lower()
+        if not self._entry_readiness_enabled:
+            return {"allow": True, "reason": "disabled", "lane": lane_key}
+
+        resolved_signal = signal if isinstance(signal, dict) else {}
+        market = str(resolved_signal.get("market") or self._market_code_for_symbol(symbol)).upper()
+        reasons: List[str] = []
+        prices_snapshot = self._source_health_snapshot("prices")
+        sentiment_snapshot = self._source_health_snapshot("sentiment")
+        earnings_snapshot = self._source_health_snapshot("earnings")
+        altdata_snapshot = self._source_health_snapshot("altdata")
+
+        if prices_snapshot.get("status") != "ok":
+            reasons.append("price_data_stale")
+        if lane_key in {"normal", "day"}:
+            if sentiment_snapshot.get("status") != "ok":
+                reasons.append("sentiment_missing" if sentiment_snapshot.get("status") == "missing" else "sentiment_stale")
+            if earnings_snapshot.get("status") != "ok":
+                reasons.append("earnings_missing" if earnings_snapshot.get("status") == "missing" else "earnings_stale")
+
+        if self._entry_require_market_open and market != "CRYPTO" and not self._market_is_open(market):
+            reasons.append("market_closed")
+
+        live_required = (
+            (lane_key == "normal" and self._entry_require_live_price_normal)
+            or (lane_key == "day" and self._entry_require_live_price_day)
+            or (lane_key == "crypto" and self._entry_require_live_price_crypto)
+        )
+        live_tick = self._latest_live_tick(symbol) if live_required else None
+        live_tick_age_seconds = None
+        live_source = ""
+        if live_required:
+            if live_tick is None:
+                reasons.append("no_fresh_live_price")
+            else:
+                tick_ts = getattr(live_tick, "timestamp", None)
+                if isinstance(tick_ts, datetime):
+                    live_tick_age_seconds = round(
+                        max(0.0, (datetime.now(timezone.utc) - tick_ts.astimezone(timezone.utc)).total_seconds()),
+                        2,
+                    )
+                live_source = str(getattr(live_tick, "source", "") or "")
+
+        return {
+            "allow": len(reasons) == 0,
+            "reason": reasons[0] if reasons else "ready",
+            "reasons": reasons,
+            "lane": lane_key,
+            "market": market,
+            "live_price_required": live_required,
+            "live_tick_age_seconds": live_tick_age_seconds,
+            "live_source": live_source,
+            "sources": {
+                "prices": prices_snapshot.get("status"),
+                "sentiment": sentiment_snapshot.get("status"),
+                "earnings": earnings_snapshot.get("status"),
+                "altdata": altdata_snapshot.get("status"),
+            },
+        }
+
+    def _refresh_system_health(self) -> None:
+        price_buffer_stats: Dict[str, Any] = {}
+        active_symbols = 0
+        try:
+            from core.realtime_engine import PRICE_BUFFER
+
+            price_buffer_stats = dict(getattr(PRICE_BUFFER, "stats", {}) or {})
+            active_symbols = len(PRICE_BUFFER.active_symbols())
+        except Exception:
+            price_buffer_stats = {}
+            active_symbols = 0
+
+        broker = self._components.get("broker")
+        open_positions = sum(
+            1
+            for position in (getattr(broker, "positions", {}) or {}).values()
+            if float(getattr(position, "quantity", 0.0) or 0.0) > 0.0
+        )
+        lane_counts = {lane: 0 for lane in self._lane_engine_order}
+        if broker is not None:
+            for _, position, _, lane, _ in self._iter_open_positions(broker):
+                if float(getattr(position, "quantity", 0.0) or 0.0) > 0.0:
+                    lane_counts[lane] = lane_counts.get(lane, 0) + 1
+        source_snapshots = {source: self._source_health_snapshot(source) for source in ("prices", "sentiment", "earnings", "altdata")}
+        blocking_reasons = [
+            reason
+            for reason, source in (
+                ("price_data_stale", "prices"),
+                ("sentiment_stale", "sentiment"),
+                ("earnings_stale", "earnings"),
+            )
+            if source_snapshots[source].get("status") != "ok"
+        ]
+        self._system_health.clear()
+        self._system_health.update(
+            {
+                "status": "ok" if not blocking_reasons else "blocked",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "entry_readiness_enabled": self._entry_readiness_enabled,
+                "new_entries_enabled": self._entry_readiness_enabled and not blocking_reasons,
+                "blocking_reasons": blocking_reasons,
+                "data_sources": source_snapshots,
+                "runtime": {
+                    "signal_count": len(self._signal_store),
+                    "open_positions": open_positions,
+                    "lane_open_counts": lane_counts,
+                    "lane_targets": {
+                        lane: int((self._lane_engine_config.get(lane, {}) or {}).get("target_open_positions", 0) or 0)
+                        for lane in self._lane_engine_order
+                    },
+                    "execution_trace_count": len(self._execution_trace),
+                    "execution_reconciliation_count": len(self._execution_reconciliation),
+                    "tick_count": int(price_buffer_stats.get("total_ticks", 0) or 0),
+                    "active_symbols": active_symbols,
+                    "universe_sync": dict(self._components.get("universe_sync", {}) or {}),
+                    "pipeline_selection": dict(self._source_selection_summary),
+                },
+            }
+        )
+
+    def _sync_official_universes(self, force: bool = False) -> Dict[str, Any]:
+        try:
+            from pipeline.universe_sync import sync_official_universes
+
+            summary = sync_official_universes(force=force)
+            if isinstance(summary, dict):
+                self._components["universe_sync"] = dict(summary)
+                status = str(summary.get("status") or "unknown")
+                if status in {"ok", "fresh"}:
+                    logger.info(
+                        "Official universe sync %s | US=%s NSE=%s crypto=%s shared_crypto=%s",
+                        status,
+                        summary.get("us_symbols", 0),
+                        summary.get("nse_symbols", 0),
+                        summary.get("crypto_symbols", 0),
+                        summary.get("shared_crypto_symbols", 0),
+                    )
+                elif status not in {"disabled"}:
+                    logger.warning(f"Official universe sync returned status={status}: {summary}")
+                return summary
+        except Exception as exc:
+            logger.warning(f"Official universe sync failed: {exc}")
+        summary = {"status": "error"}
+        self._components["universe_sync"] = summary
+        return summary
 
     def _get_target_symbols(self, market: str = "full") -> List[str]:
         from pipeline.universe import get_universe
@@ -499,18 +993,139 @@ class MacroIntelligenceSystem:
         if market == "us":
             if mode in {"daytrade", "daytrade_us"}:
                 return get_universe("daytrade_us")
+            if mode in {"throughput", "throughput_us"}:
+                return get_universe("throughput_us")
             if mode == "daytrade_nse":
+                return []
+            if mode == "throughput_nse":
                 return []
             return get_universe("us") if mode != "core" else [s for s in get_universe("core") if not s.endswith(".NS")]
         if market == "nse":
             if mode in {"daytrade", "daytrade_nse"}:
                 return get_universe("daytrade_nse")
+            if mode in {"throughput", "throughput_nse"}:
+                return get_universe("throughput_nse")
             if mode == "daytrade_us":
                 return []
+            if mode == "throughput_us":
+                return []
             return get_universe("nse") if mode != "core" else [s for s in get_universe("core") if s.endswith(".NS")]
-        if mode in {"core", "full", "us", "nse", "daytrade", "daytrade_us", "daytrade_nse"}:
+        if mode in {"core", "full", "us", "nse", "daytrade", "daytrade_us", "daytrade_nse", "throughput", "throughput_us", "throughput_nse"}:
             return get_universe(mode)
         return get_universe("full")
+
+    def _apply_throughput_mode(self) -> None:
+        self._allow_dual_lane_variants = True
+        self._auto_trade_top_k = max(self._auto_trade_top_k, int(os.getenv("THROUGHPUT_TOP_K", "480")))
+        self._auto_trade_max_new_per_cycle = max(
+            self._auto_trade_max_new_per_cycle,
+            int(os.getenv("THROUGHPUT_MAX_NEW_PER_CYCLE", "120")),
+        )
+        self._auto_trade_max_open_positions = max(
+            self._auto_trade_max_open_positions,
+            int(os.getenv("THROUGHPUT_MAX_OPEN_POSITIONS", "520")),
+        )
+        self._auto_trade_max_sector_positions = max(
+            self._auto_trade_max_sector_positions,
+            int(os.getenv("THROUGHPUT_MAX_SECTOR_POSITIONS", "80")),
+        )
+        self._portfolio_optimizer_gross_target_pct = max(
+            self._portfolio_optimizer_gross_target_pct,
+            float(os.getenv("THROUGHPUT_GROSS_TARGET_PCT", "0.92")),
+        )
+        self._portfolio_optimizer_max_names = max(
+            self._portfolio_optimizer_max_names,
+            int(os.getenv("THROUGHPUT_MAX_ALLOC_NAMES", "600")),
+        )
+        self._portfolio_optimizer_min_weight = min(
+            self._portfolio_optimizer_min_weight,
+            float(os.getenv("THROUGHPUT_MIN_WEIGHT", "0.0015")),
+        )
+        self._portfolio_optimizer_max_weight = min(
+            self._portfolio_optimizer_max_weight,
+            max(self._portfolio_optimizer_min_weight, float(os.getenv("THROUGHPUT_MAX_WEIGHT", "0.03"))),
+        )
+        self._lane_base_allocations.update(
+            {
+                "normal": max(self._lane_base_allocations["normal"], float(os.getenv("THROUGHPUT_NORMAL_BASE_ALLOC_PCT", "0.34"))),
+                "day": max(self._lane_base_allocations["day"], float(os.getenv("THROUGHPUT_DAY_BASE_ALLOC_PCT", "0.33"))),
+                "crypto": max(self._lane_base_allocations["crypto"], float(os.getenv("THROUGHPUT_CRYPTO_BASE_ALLOC_PCT", "0.33"))),
+            }
+        )
+        self._lane_min_allocations.update(
+            {
+                "normal": max(self._lane_min_allocations["normal"], float(os.getenv("THROUGHPUT_NORMAL_MIN_ALLOC_PCT", "0.20"))),
+                "day": max(self._lane_min_allocations["day"], float(os.getenv("THROUGHPUT_DAY_MIN_ALLOC_PCT", "0.20"))),
+                "crypto": max(self._lane_min_allocations["crypto"], float(os.getenv("THROUGHPUT_CRYPTO_MIN_ALLOC_PCT", "0.20"))),
+            }
+        )
+        self._lane_max_allocations.update(
+            {
+                "normal": max(self._lane_max_allocations["normal"], float(os.getenv("THROUGHPUT_NORMAL_MAX_ALLOC_PCT", "0.45"))),
+                "day": max(self._lane_max_allocations["day"], float(os.getenv("THROUGHPUT_DAY_MAX_ALLOC_PCT", "0.40"))),
+                "crypto": max(self._lane_max_allocations["crypto"], float(os.getenv("THROUGHPUT_CRYPTO_MAX_ALLOC_PCT", "0.40"))),
+            }
+        )
+
+        throughput_lane_defaults = {
+            "normal": {"top_k": 520, "max_new_per_cycle": 140, "max_open_positions": 220, "sector_cap": 60, "pair_corr_cap": 0.995},
+            "day": {"top_k": 520, "max_new_per_cycle": 160, "max_open_positions": 220, "sector_cap": 70, "pair_corr_cap": 0.997},
+            "crypto": {"top_k": 240, "max_new_per_cycle": 120, "max_open_positions": 180, "sector_cap": 220, "pair_corr_cap": 0.999},
+        }
+        for lane_name, defaults in throughput_lane_defaults.items():
+            lane_cfg = self._lane_engine_config.get(lane_name, {})
+            env_prefix = lane_name.upper()
+            lane_cfg["top_k"] = max(
+                lane_cfg.get("top_k", 1),
+                int(os.getenv(f"THROUGHPUT_{env_prefix}_LANE_TOP_K", str(defaults["top_k"]))),
+            )
+            lane_cfg["max_new_per_cycle"] = max(
+                lane_cfg.get("max_new_per_cycle", 1),
+                int(os.getenv(f"THROUGHPUT_{env_prefix}_LANE_MAX_NEW_PER_CYCLE", str(defaults["max_new_per_cycle"]))),
+            )
+            lane_cfg["max_open_positions"] = max(
+                lane_cfg.get("max_open_positions", 1),
+                int(os.getenv(f"THROUGHPUT_{env_prefix}_LANE_MAX_OPEN_POSITIONS", str(defaults["max_open_positions"]))),
+            )
+            lane_cfg["sector_cap"] = max(
+                lane_cfg.get("sector_cap", 1),
+                int(os.getenv(f"THROUGHPUT_{env_prefix}_LANE_MAX_SECTOR_POSITIONS", str(defaults["sector_cap"]))),
+            )
+            lane_cfg["pair_corr_cap"] = max(
+                float(lane_cfg.get("pair_corr_cap", 0.10) or 0.10),
+                float(os.getenv(f"THROUGHPUT_{env_prefix}_LANE_MAX_PAIR_CORRELATION", str(defaults["pair_corr_cap"]))),
+            )
+            lane_cfg["target_open_positions"] = max(
+                int(lane_cfg.get("target_open_positions", 0) or 0),
+                int(self._lane_target_open_positions.get(lane_name, 0)),
+            )
+            if lane_name == "normal":
+                lane_cfg["base_position_pct"] = min(
+                    float(lane_cfg.get("base_position_pct", 0.04) or 0.04),
+                    float(os.getenv("THROUGHPUT_NORMAL_BASE_POSITION_PCT", "0.006")),
+                )
+                lane_cfg["max_position_pct"] = min(
+                    float(lane_cfg.get("max_position_pct", 0.10) or 0.10),
+                    float(os.getenv("THROUGHPUT_NORMAL_MAX_POSITION_PCT", "0.02")),
+                )
+            elif lane_name == "day":
+                lane_cfg["base_position_pct"] = min(
+                    float(lane_cfg.get("base_position_pct", 0.02) or 0.02),
+                    float(os.getenv("THROUGHPUT_DAY_BASE_POSITION_PCT", "0.004")),
+                )
+                lane_cfg["max_position_pct"] = min(
+                    float(lane_cfg.get("max_position_pct", 0.05) or 0.05),
+                    float(os.getenv("THROUGHPUT_DAY_MAX_POSITION_PCT", "0.015")),
+                )
+            elif lane_name == "crypto":
+                lane_cfg["base_position_pct"] = min(
+                    float(lane_cfg.get("base_position_pct", 0.025) or 0.025),
+                    float(os.getenv("THROUGHPUT_CRYPTO_BASE_POSITION_PCT", "0.003")),
+                )
+                lane_cfg["max_position_pct"] = min(
+                    float(lane_cfg.get("max_position_pct", 0.05) or 0.05),
+                    float(os.getenv("THROUGHPUT_CRYPTO_MAX_POSITION_PCT", "0.012")),
+                )
 
     def _apply_event_window_mode(self) -> None:
         self._day_trading_mode = True
@@ -687,6 +1302,79 @@ class MacroIntelligenceSystem:
     def _chunk_symbols(self, symbols: List[str], batch_size: int) -> List[List[str]]:
         return [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
 
+    def _priority_pipeline_symbols(self, symbols: List[str]) -> List[str]:
+        ordered = list(dict.fromkeys(str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()))
+        if not ordered:
+            return []
+        allowed = set(ordered)
+        priority: List[str] = []
+        broker = self._components.get("broker")
+        if broker is not None:
+            for _, position, symbol, _, _ in self._iter_open_positions(broker):
+                if float(getattr(position, "quantity", 0.0) or 0.0) > 0.0 and symbol in allowed:
+                    priority.append(symbol)
+        try:
+            from pipeline.universe import DAY_TRADE_EXPANDED_SYMBOLS, LEADER_SYMBOLS
+
+            priority.extend(symbol for symbol in LEADER_SYMBOLS if symbol in allowed)
+            priority.extend(symbol for symbol in DAY_TRADE_EXPANDED_SYMBOLS if symbol in allowed)
+        except Exception:
+            pass
+        limit = self._pipeline_priority_symbol_cap
+        deduped = list(dict.fromkeys(priority))
+        return deduped[:limit] if limit > 0 else deduped
+
+    def _select_pipeline_symbols(self, source_name: str, symbols: List[str]) -> List[str]:
+        ordered = list(dict.fromkeys(str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()))
+        cap = max(0, int(self._source_symbol_caps.get(source_name, 0) or 0))
+        if not ordered:
+            self._source_selection_summary[source_name] = {
+                "selected_symbols": 0,
+                "total_symbols": 0,
+                "priority_symbols": 0,
+                "rotation_offset": 0,
+            }
+            return []
+        if cap <= 0 or len(ordered) <= cap:
+            self._source_selection_summary[source_name] = {
+                "selected_symbols": len(ordered),
+                "total_symbols": len(ordered),
+                "priority_symbols": min(len(ordered), len(self._priority_pipeline_symbols(ordered))),
+                "rotation_offset": 0,
+            }
+            return ordered
+
+        priority = self._priority_pipeline_symbols(ordered)
+        selected = list(priority[:cap])
+        remaining_slots = max(0, cap - len(selected))
+        remainder = [symbol for symbol in ordered if symbol not in selected]
+        next_offset = 0
+        if remaining_slots > 0 and remainder:
+            offset = self._pipeline_rotation_offsets.get(source_name, 0) % len(remainder)
+            rotated = remainder[offset:] + remainder[:offset]
+            selected.extend(rotated[:remaining_slots])
+            next_offset = (offset + remaining_slots) % len(remainder)
+        self._pipeline_rotation_offsets[source_name] = next_offset
+        self._source_selection_summary[source_name] = {
+            "selected_symbols": len(selected),
+            "total_symbols": len(ordered),
+            "priority_symbols": len(priority[:cap]),
+            "rotation_offset": next_offset,
+        }
+        return selected
+
+    def _start_chunked_component(self, component_key: str, factory, symbols: List[str], chunk_size: int, **kwargs) -> int:
+        ordered = list(dict.fromkeys(str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()))
+        if not ordered:
+            return 0
+        instances = []
+        for chunk in self._chunk_symbols(ordered, max(1, chunk_size)):
+            instance = factory(symbols=chunk, **kwargs)
+            instance.start()
+            instances.append(instance)
+        self._components[component_key] = instances[0] if len(instances) == 1 else instances
+        return len(instances)
+
     def _collect_sentiment_batched(self, symbols: List[str], days_back: int = 3, save: bool = True) -> Dict:
         import pandas as pd
         from pipeline.sentiment_collector import SentimentPipeline
@@ -813,12 +1501,12 @@ class MacroIntelligenceSystem:
                 "Crypto scalper mode: active | "
                 f"{len(self._crypto_symbols)} symbols | stale cutoff {self._crypto_signal_stale_seconds}s"
             )
-        logger.info(f"Price provider order: {os.getenv('PRICE_PROVIDER_ORDER', 'yfinance,finnhub,alpha_vantage,twelve_data')}")
+        logger.info(f"Price provider order: {os.getenv('PRICE_PROVIDER_ORDER', 'yfinance,finnhub,alpha_vantage,polygon,eodhd')}")
         logger.info(
             "News provider order: "
-            f"{os.getenv('NEWS_PROVIDER_ORDER', 'google_rss,rss,nse_announcements,sec_filings,press_releases,finnhub,alpha_vantage,newsapi,gnews,bse_announcements')}"
+            f"{os.getenv('NEWS_PROVIDER_ORDER', 'google_rss,sec_filings,press_releases,finnhub,alpha_vantage,eodhd,polygon,newsapi,gnews,rss,nse_announcements,bse_announcements')}"
         )
-        logger.info(f"Earnings provider order: {os.getenv('EARNINGS_PROVIDER_ORDER', 'finnhub,alpha_vantage')}")
+        logger.info(f"Earnings provider order: {os.getenv('EARNINGS_PROVIDER_ORDER', 'finnhub,alpha_vantage,eodhd')}")
         logger.info(
             f"Refresh cadence: prices {self._price_refresh_seconds}s | "
             f"sentiment {self._sentiment_refresh_seconds}s | "
@@ -827,10 +1515,30 @@ class MacroIntelligenceSystem:
             f"inference {self._inference_refresh_seconds}s"
         )
         logger.info(
+            "Entry readiness guard: %s | stale multiplier x%.1f | market-open check %s",
+            "enabled" if self._entry_readiness_enabled else "disabled",
+            self._entry_stale_multiplier,
+            "on" if self._entry_require_market_open else "off",
+        )
+        logger.info(
             f"Execution overlay: top {self._auto_trade_top_k} ideas | "
             f"max {self._auto_trade_max_open_positions} positions | "
             f"max {self._auto_trade_max_sector_positions} per sector"
         )
+        if self._throughput_mode:
+            logger.info(
+                "Throughput mode: active | lane targets normal=%s day=%s crypto=%s",
+                self._lane_target_open_positions.get("normal", 0),
+                self._lane_target_open_positions.get("day", 0),
+                self._lane_target_open_positions.get("crypto", 0),
+            )
+        if self._alpha_quality_enabled:
+            logger.info(
+                "Alpha quality monitor: enabled | lookback %sd | horizon %sd | buckets %s",
+                self._alpha_quality_lookback_days,
+                self._alpha_quality_horizon_days,
+                self._alpha_quality_bucket_count,
+            )
         logger.info(
             f"Portfolio correlation guard: max pair {self._auto_trade_max_pair_correlation:.2f} | "
             f"target avg {self._auto_trade_target_avg_correlation:.2f}"
@@ -857,6 +1565,7 @@ class MacroIntelligenceSystem:
         self._running = True
         self._components["execution_trace"] = self._execution_trace
         self._components["execution_backtest"] = {}
+        self._components["alpha_quality"] = {}
         self._components["portfolio_overlay"] = {}
         self._components["meta_model_status"] = {}
         self._components["stress_results"] = {}
@@ -869,7 +1578,8 @@ class MacroIntelligenceSystem:
         self._components["pit_db"] = PITDatabase()
 
         logger.info("[2/8] Initializing execution broker...")
-        from core.brokerages import ShadowBroker, UpstoxExecutionBroker
+        from core.brokerages import ShadowBroker
+        from core.external_execution import build_shadow_router
         from core.paper_trading import VirtualBroker
 
         paper_broker = VirtualBroker(
@@ -885,28 +1595,33 @@ class MacroIntelligenceSystem:
 
         broker = paper_broker
         if self._shadow_router_enabled:
-            shadow_router = UpstoxExecutionBroker(
-                access_token=self._api_keys.get("upstox", ""),
-                instrument_map_path=os.getenv("UPSTOX_INSTRUMENT_MAP_PATH", "data/upstox_instruments.json"),
-                enabled=os.getenv("UPSTOX_ORDER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},
-                dry_run=True,
-                timeout_seconds=int(os.getenv("UPSTOX_ORDER_TIMEOUT_SECONDS", "8")),
-                tracked_symbols=self._get_target_symbols("nse"),
+            tracked_shadow_symbols = list(
+                dict.fromkeys(self._get_target_symbols() + list(self._crypto_symbols))
             )
-            broker = ShadowBroker(
-                paper_broker,
-                secondary=shadow_router,
-                reconciliation_path=self._shadow_reconciliation_log_path,
-            )
-            self._components["live_execution_router"] = shadow_router
-            logger.info(
-                f"Execution mode: shadow | Upstox router configured={shadow_router.configured} | "
-                f"log={self._shadow_reconciliation_log_path}"
-            )
+            shadow_router = build_shadow_router(api_keys=self._api_keys, tracked_symbols=tracked_shadow_symbols)
+            if shadow_router is not None:
+                broker = ShadowBroker(
+                    paper_broker,
+                    secondary=shadow_router,
+                    reconciliation_path=self._shadow_reconciliation_log_path,
+                )
+                self._components["live_execution_router"] = shadow_router
+                logger.info(
+                    f"Execution mode: shadow | router={shadow_router.__class__.__name__} "
+                    f"| configured={getattr(shadow_router, 'configured', False)} "
+                    f"| log={self._shadow_reconciliation_log_path}"
+                )
+            else:
+                logger.info(
+                    f"Execution mode: shadow requested but no live secondary router is configured | "
+                    f"log={self._shadow_reconciliation_log_path}"
+                )
         else:
             logger.info("Execution mode: paper")
 
         self._components["broker"] = broker
+        self._sync_runtime_state_with_broker(broker)
+        self._persist_runtime_state(force=True)
 
         logger.info("[3/8] Starting data pipeline...")
         threading.Thread(target=self._data_pipeline_loop, daemon=True).start()
@@ -933,7 +1648,9 @@ class MacroIntelligenceSystem:
     def _start_realtime_feeds(self):
         from core.realtime_engine import (
             BinancePublicDepthWebSocket,
+            BybitPublicDepthWebSocket,
             FinnhubWebSocket,
+            MetaTrader5PollingFeed,
             PollingFallback,
             UpstoxWebSocket,
             PRICE_BUFFER,
@@ -964,10 +1681,55 @@ class MacroIntelligenceSystem:
             self._components["upstox_ws"] = ws
             covered_by_ws.update(nse)
 
+        if os.getenv("MT5_FEED_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"} and target_symbols:
+            mt5_feed = MetaTrader5PollingFeed(
+                symbols=target_symbols,
+                buffer=PRICE_BUFFER,
+                poll_interval_seconds=float(os.getenv("MT5_FEED_POLL_INTERVAL_SECONDS", "1.0")),
+                symbol_map_path=os.getenv("MT5_SYMBOL_MAP_PATH", "data/mt5_symbols.json"),
+                path=os.getenv("MT5_PATH", ""),
+                login=os.getenv("MT5_LOGIN", ""),
+                password=os.getenv("MT5_PASSWORD", ""),
+                server=os.getenv("MT5_SERVER", ""),
+            )
+            mt5_feed.start()
+            self._components["mt5_feed"] = mt5_feed
+
         if self._crypto_depth_enabled and self._crypto_symbols:
-            crypto_ws = BinancePublicDepthWebSocket(symbols=self._crypto_symbols, buffer=PRICE_BUFFER)
-            crypto_ws.start()
-            self._components["binance_public_depth_ws"] = crypto_ws
+            crypto_feed_order = [
+                name.strip().lower()
+                for name in os.getenv("CRYPTO_FEED_ORDER", "binance,bybit").replace(";", ",").split(",")
+                if name.strip()
+            ]
+            use_all_crypto_feeds = os.getenv("CRYPTO_FEED_FALLBACK_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+            started_crypto_feeds = []
+            for feed_name in crypto_feed_order:
+                if feed_name == "binance":
+                    connection_count = self._start_chunked_component(
+                        "binance_public_depth_ws",
+                        BinancePublicDepthWebSocket,
+                        self._binance_crypto_symbols,
+                        self._binance_ws_symbols_per_connection,
+                        buffer=PRICE_BUFFER,
+                        testnet=os.getenv("BINANCE_WS_TESTNET", "0").strip().lower() in {"1", "true", "yes", "on"},
+                    )
+                    if connection_count:
+                        started_crypto_feeds.append(f"binance x{connection_count}")
+                elif feed_name == "bybit":
+                    connection_count = self._start_chunked_component(
+                        "bybit_public_depth_ws",
+                        BybitPublicDepthWebSocket,
+                        self._bybit_crypto_symbols,
+                        self._bybit_ws_symbols_per_connection,
+                        buffer=PRICE_BUFFER,
+                        testnet=os.getenv("BYBIT_WS_TESTNET", "0").strip().lower() in {"1", "true", "yes", "on"},
+                    )
+                    if connection_count:
+                        started_crypto_feeds.append(f"bybit x{connection_count}")
+                if started_crypto_feeds and not use_all_crypto_feeds:
+                    break
+            if started_crypto_feeds:
+                logger.info(f"Crypto realtime feeds started: {', '.join(started_crypto_feeds)}")
 
         if not polling_enabled:
             logger.info("Polling fallback disabled (POLLING_FALLBACK_ENABLED=0)")
@@ -1016,9 +1778,7 @@ class MacroIntelligenceSystem:
 
     def _get_latest_close(self, symbol: str) -> Optional[float]:
         try:
-            from core.realtime_engine import PRICE_BUFFER
-
-            latest_tick = PRICE_BUFFER.latest(symbol)
+            latest_tick = self._latest_live_tick(symbol)
             if latest_tick and float(latest_tick.price) > 0:
                 return float(latest_tick.price)
         except Exception:
@@ -2766,6 +3526,8 @@ class MacroIntelligenceSystem:
         self._execution_trace.append(event)
         if len(self._execution_trace) > self._execution_trace_limit:
             del self._execution_trace[: len(self._execution_trace) - self._execution_trace_limit]
+        self._append_jsonl(self._execution_trace_log_path, event, log_label="Execution trace")
+        self._persist_runtime_state()
 
     def _broker_result_details(self, result: Optional[Dict]) -> Dict:
         if not isinstance(result, dict):
@@ -2819,6 +3581,8 @@ class MacroIntelligenceSystem:
         self._execution_reconciliation.append(row)
         if len(self._execution_reconciliation) > self._execution_trace_limit:
             del self._execution_reconciliation[: len(self._execution_reconciliation) - self._execution_trace_limit]
+        self._append_jsonl(self._execution_reconciliation_log_path, row, log_label="Execution reconciliation")
+        self._persist_runtime_state()
 
     def _persist_feature_store(
         self,
@@ -3416,6 +4180,330 @@ class MacroIntelligenceSystem:
             "trade_returns": [round(float(value), 6) for value in trade_returns],
         }
 
+    def _summarize_alpha_slice(self, frame: pd.DataFrame) -> Dict[str, Any]:
+        if frame is None or frame.empty:
+            return {
+                "count": 0,
+                "avg_return_pct": 0.0,
+                "median_return_pct": 0.0,
+                "hit_rate_pct": 0.0,
+                "avg_take_probability_pct": 0.0,
+                "avg_rank_score": 0.0,
+                "avg_expected_edge_pct": 0.0,
+            }
+
+        returns = frame["forward_return"].astype(float)
+        return {
+            "count": int(len(frame)),
+            "avg_return_pct": round(float(returns.mean() * 100.0), 3),
+            "median_return_pct": round(float(returns.median() * 100.0), 3),
+            "hit_rate_pct": round(float(frame["win"].mean() * 100.0), 2),
+            "avg_take_probability_pct": round(float(frame["take_probability"].mean() * 100.0), 2),
+            "avg_rank_score": round(float(frame["rank_score"].mean()), 4),
+            "avg_expected_edge_pct": round(float(frame["expected_edge_pct"].mean()), 3),
+        }
+
+    def _alpha_bucket_summary(self, frame: pd.DataFrame, column: str) -> Dict[str, Any]:
+        if frame is None or frame.empty or column not in frame.columns:
+            return {"buckets": [], "monotonic_avg_return": False}
+
+        working = frame[[column, "forward_return", "win", "take_probability"]].dropna().copy()
+        if len(working) < max(self._alpha_quality_bucket_count * 2, self._alpha_quality_min_bucket_samples):
+            return {"buckets": [], "monotonic_avg_return": False}
+
+        ranked = working[column].rank(method="first", pct=True)
+        labels = [f"Q{i}" for i in range(1, self._alpha_quality_bucket_count + 1)]
+        working["bucket"] = pd.cut(
+            ranked,
+            bins=np.linspace(0.0, 1.0, self._alpha_quality_bucket_count + 1),
+            labels=labels,
+            include_lowest=True,
+        )
+
+        buckets = []
+        for label in labels:
+            bucket = working[working["bucket"] == label]
+            if bucket.empty:
+                continue
+            buckets.append(
+                {
+                    "bucket": label,
+                    "count": int(len(bucket)),
+                    "min_value": round(float(bucket[column].min()), 4),
+                    "max_value": round(float(bucket[column].max()), 4),
+                    "avg_return_pct": round(float(bucket["forward_return"].mean() * 100.0), 3),
+                    "median_return_pct": round(float(bucket["forward_return"].median() * 100.0), 3),
+                    "hit_rate_pct": round(float(bucket["win"].mean() * 100.0), 2),
+                    "avg_take_probability_pct": round(float(bucket["take_probability"].mean() * 100.0), 2),
+                }
+            )
+
+        avg_returns = [bucket["avg_return_pct"] for bucket in buckets]
+        monotonic = len(avg_returns) >= 2 and all(
+            avg_returns[idx] <= avg_returns[idx + 1] + 1e-9 for idx in range(len(avg_returns) - 1)
+        )
+        return {"buckets": buckets, "monotonic_avg_return": monotonic}
+
+    def _build_alpha_quality_dataset(
+        self,
+        feature_matrices: Dict[str, object],
+        *,
+        lookback_days: int,
+        horizon_days: int,
+    ) -> pd.DataFrame:
+        from core.signal_engine_v2 import MetaDecisionEngine, MultiFactorScorer
+        from pipeline.universe import is_day_trade_symbol
+
+        scorer = MultiFactorScorer()
+        meta_engine = MetaDecisionEngine()
+        latest_end = None
+        symbol_frames: Dict[str, pd.DataFrame] = {}
+        for symbol, frame in feature_matrices.items():
+            if frame is None or getattr(frame, "empty", True) or "close" not in frame.columns:
+                continue
+            ordered = frame.sort_index()
+            if ordered.empty or len(ordered) <= horizon_days:
+                continue
+            symbol_frames[symbol] = ordered
+            if latest_end is None or ordered.index[-1] > latest_end:
+                latest_end = ordered.index[-1]
+
+        if not symbol_frames or latest_end is None:
+            return pd.DataFrame()
+
+        start_cutoff = latest_end - pd.Timedelta(days=lookback_days)
+        trade_cost_pct = self._execution_backtest_tx_cost_bps / 10_000.0
+        factor_names = list(MultiFactorScorer.FACTOR_WEIGHTS.keys())
+        rows: List[Dict[str, Any]] = []
+
+        for symbol, ordered in symbol_frames.items():
+            subset = ordered[ordered.index >= start_cutoff].copy()
+            if subset.empty or len(subset) <= horizon_days:
+                continue
+            forward_returns = (subset["close"].shift(-horizon_days) / subset["close"]) - 1.0
+            subset = subset.iloc[:-horizon_days]
+            if subset.empty:
+                continue
+
+            market = self._market_code_for_symbol(symbol)
+            lane = "crypto" if market == "CRYPTO" else "day" if self._day_trading_mode and is_day_trade_symbol(symbol) else "normal"
+            lane_config = self._lane_config(lane)
+            risk_defaults = {
+                "stop_loss_pct": 2.0,
+                "take_profit_pct": 5.0,
+                "risk_reward_ratio": 2.0,
+            }
+            if lane == "crypto":
+                risk_defaults["stop_loss_pct"] = 1.5
+                risk_defaults["take_profit_pct"] = 3.0
+            elif lane == "day":
+                risk_defaults["stop_loss_pct"] = 1.2
+                risk_defaults["take_profit_pct"] = 2.4
+
+            for idx, feature_row in subset.iterrows():
+                future_return = forward_returns.loc[idx]
+                if pd.isna(future_return):
+                    continue
+                try:
+                    scored = scorer.score(feature_row, symbol=symbol)
+                except Exception:
+                    continue
+                if str(scored.get("direction", "neutral")).lower() != "buy":
+                    continue
+
+                signal_payload = {
+                    **scored,
+                    "lane": lane,
+                    "market": market,
+                    "model_agreement": self._safe_number(feature_row.get("model_agreement"), 0.0),
+                    "risk_parameters": {
+                        **risk_defaults,
+                        "risk_reward_ratio": round(
+                            risk_defaults["take_profit_pct"] / max(risk_defaults["stop_loss_pct"], 0.1),
+                            3,
+                        ),
+                    },
+                }
+                decision = meta_engine._evaluate_one(symbol, signal_payload, feature_row)
+                record = {
+                    "date": pd.Timestamp(idx).isoformat(),
+                    "symbol": symbol,
+                    "lane": lane,
+                    "market": market,
+                    "leader_symbol": bool(scored.get("leader_symbol", False)),
+                    "regime": str(scored.get("regime", "normal") or "normal"),
+                    "final_score": float(scored.get("final_score", 0.0) or 0.0),
+                    "confidence": float(scored.get("confidence", 0.0) or 0.0),
+                    "conviction_score": float(scored.get("conviction_score", 0.0) or 0.0),
+                    "take_trade": bool(decision.get("take_trade", False)),
+                    "take_probability": float(decision.get("take_probability", 0.0) or 0.0),
+                    "rank_score": float(decision.get("rank_score", 0.0) or 0.0),
+                    "expected_edge_pct": float(decision.get("expected_edge_pct", 0.0) or 0.0),
+                    "expected_drawdown_pct": float(decision.get("expected_drawdown_pct", 0.0) or 0.0),
+                    "meta_reason": str(decision.get("reason", "") or ""),
+                    "meta_source": str(decision.get("source", "") or ""),
+                    "forward_return": float(future_return),
+                    "win": bool(float(future_return) > trade_cost_pct),
+                    "min_conviction_threshold": float(
+                        lane_config.get(
+                            "min_conviction",
+                            self._auto_trade_min_conviction,
+                        )
+                    ),
+                }
+                for factor_name in factor_names:
+                    record[f"factor_{factor_name}"] = float((scored.get("factor_scores", {}) or {}).get(factor_name, 0.0) or 0.0)
+                rows.append(record)
+
+        if not rows:
+            return pd.DataFrame()
+        return pd.DataFrame(rows)
+
+    def _persist_alpha_quality_report(self, payload: Dict[str, Any]) -> None:
+        try:
+            self._alpha_quality_report_path.parent.mkdir(parents=True, exist_ok=True)
+            self._alpha_quality_report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        except Exception as exc:
+            logger.warning(f"Alpha quality report save failed: {exc}")
+
+    def _compute_alpha_quality_report(self, feature_matrices: Dict[str, object]) -> Dict[str, Any]:
+        if not self._alpha_quality_enabled:
+            return {"status": "disabled", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+        dataset = self._build_alpha_quality_dataset(
+            feature_matrices,
+            lookback_days=self._alpha_quality_lookback_days,
+            horizon_days=self._alpha_quality_horizon_days,
+        )
+        if dataset.empty:
+            return {
+                "status": "insufficient_data",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "lookback_days": self._alpha_quality_lookback_days,
+                "horizon_days": self._alpha_quality_horizon_days,
+            }
+
+        take_rows = dataset[dataset["take_trade"]].copy()
+        skip_rows = dataset[~dataset["take_trade"]].copy()
+        probability_buckets = self._alpha_bucket_summary(dataset, "take_probability")
+        rank_buckets = self._alpha_bucket_summary(dataset, "rank_score")
+
+        calibration_gap_pct = None
+        bucket_rows = probability_buckets.get("buckets", [])
+        if bucket_rows:
+            total_weight = sum(int(bucket.get("count", 0) or 0) for bucket in bucket_rows)
+            if total_weight > 0:
+                weighted_gap = sum(
+                    abs(float(bucket.get("avg_take_probability_pct", 0.0)) - float(bucket.get("hit_rate_pct", 0.0)))
+                    * int(bucket.get("count", 0) or 0)
+                    for bucket in bucket_rows
+                )
+                calibration_gap_pct = round(weighted_gap / total_weight, 3)
+
+        threshold_candidates = sorted(
+            {
+                round(value, 2)
+                for value in np.linspace(0.30, 0.80, max(self._alpha_quality_bucket_count + 1, 6))
+            }
+        )
+        threshold_rows = []
+        for threshold in threshold_candidates:
+            subset = dataset[dataset["take_probability"] >= threshold]
+            if len(subset) < self._alpha_quality_min_bucket_samples:
+                continue
+            threshold_rows.append(
+                {
+                    "take_probability_threshold": threshold,
+                    **self._summarize_alpha_slice(subset),
+                }
+            )
+        recommended_threshold = None
+        if threshold_rows:
+            recommended_threshold = max(
+                threshold_rows,
+                key=lambda item: (
+                    float(item.get("avg_return_pct", 0.0)),
+                    float(item.get("hit_rate_pct", 0.0)),
+                    int(item.get("count", 0)),
+                ),
+            )
+
+        factor_correlations = []
+        for factor_name in (
+            "trend",
+            "momentum",
+            "mean_revert",
+            "volume",
+            "sentiment",
+            "earnings_propagation",
+            "close_reversal",
+        ):
+            factor_col = f"factor_{factor_name}"
+            if factor_col not in dataset.columns or dataset[factor_col].nunique() < 3:
+                continue
+            try:
+                correlation = dataset[factor_col].corr(dataset["forward_return"], method="spearman")
+            except Exception:
+                correlation = None
+            if correlation is None or pd.isna(correlation):
+                continue
+            factor_correlations.append({"factor": factor_name, "spearman_corr": round(float(correlation), 4)})
+        factor_correlations.sort(key=lambda item: abs(float(item["spearman_corr"])), reverse=True)
+
+        regime_summary = []
+        for regime, group in dataset.groupby("regime"):
+            regime_summary.append({"regime": regime, **self._summarize_alpha_slice(group)})
+        regime_summary.sort(key=lambda item: item["regime"])
+
+        reason_summary = []
+        for reason, group in dataset.groupby("meta_reason"):
+            reason_summary.append({"reason": reason, **self._summarize_alpha_slice(group)})
+        reason_summary.sort(key=lambda item: item["count"], reverse=True)
+
+        payload = {
+            "status": "ok",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "lookback_days": self._alpha_quality_lookback_days,
+            "horizon_days": self._alpha_quality_horizon_days,
+            "coverage": {
+                "buy_signal_rows": int(len(dataset)),
+                "take_rows": int(len(take_rows)),
+                "skip_rows": int(len(skip_rows)),
+                "symbols": int(dataset["symbol"].nunique()),
+                "markets": sorted(dataset["market"].dropna().astype(str).unique().tolist()),
+                "lanes": sorted(dataset["lane"].dropna().astype(str).unique().tolist()),
+            },
+            "summary": {
+                "all_buy_signals": self._summarize_alpha_slice(dataset),
+                "taken_signals": self._summarize_alpha_slice(take_rows),
+                "skipped_signals": self._summarize_alpha_slice(skip_rows),
+                "uplift_avg_return_pct": round(
+                    float(self._summarize_alpha_slice(take_rows)["avg_return_pct"] - self._summarize_alpha_slice(skip_rows)["avg_return_pct"]),
+                    3,
+                ),
+                "uplift_hit_rate_pct": round(
+                    float(self._summarize_alpha_slice(take_rows)["hit_rate_pct"] - self._summarize_alpha_slice(skip_rows)["hit_rate_pct"]),
+                    2,
+                ),
+                "calibration_gap_pct": calibration_gap_pct,
+            },
+            "take_probability_buckets": probability_buckets,
+            "rank_score_buckets": rank_buckets,
+            "threshold_sweep": threshold_rows,
+            "recommended_take_probability_threshold": recommended_threshold,
+            "factor_correlations": factor_correlations[:6],
+            "regime_summary": regime_summary,
+            "reason_summary": reason_summary[:8],
+            "flags": {
+                "take_probability_monotonic": bool(probability_buckets.get("monotonic_avg_return")),
+                "rank_score_monotonic": bool(rank_buckets.get("monotonic_avg_return")),
+                "calibration_warning": calibration_gap_pct is not None and calibration_gap_pct > 12.0,
+                "negative_taken_expectancy": float(self._summarize_alpha_slice(take_rows)["avg_return_pct"]) <= 0.0,
+            },
+        }
+        self._persist_alpha_quality_report(payload)
+        return payload
+
     def _maybe_refresh_execution_backtest(self, feature_matrices: Dict[str, object]):
         if not self._execution_backtest_enabled:
             return
@@ -3519,12 +4607,19 @@ class MacroIntelligenceSystem:
                     "uplift": uplift,
                     "overfit": overfit_payload,
                 }
+                alpha_quality_payload = self._compute_alpha_quality_report(feature_matrices)
                 target = self._components.get("execution_backtest")
                 if isinstance(target, dict):
                     target.clear()
                     target.update(payload)
                 else:
                     self._components["execution_backtest"] = payload
+                alpha_target = self._components.get("alpha_quality")
+                if isinstance(alpha_target, dict):
+                    alpha_target.clear()
+                    alpha_target.update(alpha_quality_payload)
+                else:
+                    self._components["alpha_quality"] = alpha_quality_payload
                 overfit_target = self._components.get("execution_overfit")
                 if isinstance(overfit_target, dict):
                     overfit_target.clear()
@@ -3536,6 +4631,13 @@ class MacroIntelligenceSystem:
                     f"{constrained_m.get('total_return_pct', 'n/a')}% vs baseline "
                     f"{baseline_m.get('total_return_pct', 'n/a')}%"
                 )
+                if isinstance(alpha_quality_payload, dict) and alpha_quality_payload.get("status") == "ok":
+                    alpha_summary = alpha_quality_payload.get("summary", {}) or {}
+                    logger.info(
+                        "Alpha quality refreshed: taken avg return %s%% | calibration gap %s%%",
+                        alpha_summary.get("taken_signals", {}).get("avg_return_pct", "n/a"),
+                        alpha_summary.get("calibration_gap_pct", "n/a"),
+                    )
             except Exception as exc:
                 logger.warning(f"Execution backtest refresh failed: {exc}")
             finally:
@@ -3720,6 +4822,7 @@ class MacroIntelligenceSystem:
 
     def _record_trade_timestamp(self, symbol: str, lane: Optional[str] = None):
         self._last_trade_timestamps[self._cooldown_key(symbol, lane)] = time.time()
+        self._persist_runtime_state()
 
     def _select_replacement_candidate(self, broker, lane: Optional[str] = None) -> Optional[Tuple[str, float]]:
         weakest_position_key = None
@@ -3835,6 +4938,7 @@ class MacroIntelligenceSystem:
                 position_key=resolved_position_key,
                 details=self._broker_result_details(result),
             )
+            self._persist_runtime_state(force=True)
             logger.info(f"AUTO-SELL: {symbol} x{existing.quantity} @ ${current_price:.2f} | {reason}")
             return True
         self._capture_execution_reconciliation(symbol, "sell", exit_signal, result, position_key=resolved_position_key)
@@ -4158,6 +5262,26 @@ class MacroIntelligenceSystem:
                     )
                     continue
 
+            entry_readiness = self._entry_readiness_gate(symbol, lane, signal)
+            signal["entry_readiness"] = entry_readiness
+            if not entry_readiness.get("allow", True):
+                self._record_execution_event(
+                    symbol,
+                    "buy",
+                    "skipped",
+                    str(entry_readiness.get("reason", "entry_readiness_block")),
+                    signal=signal,
+                    position_key=position_key,
+                    score=rank_score,
+                    conviction=conviction,
+                    details={
+                        "readiness_reasons": entry_readiness.get("reasons"),
+                        "live_tick_age_seconds": entry_readiness.get("live_tick_age_seconds"),
+                        "live_source": entry_readiness.get("live_source"),
+                    },
+                )
+                continue
+
             current_price = self._get_latest_close(symbol)
             if current_price is None:
                 continue
@@ -4395,6 +5519,7 @@ class MacroIntelligenceSystem:
                     sector=sector,
                     details=self._broker_result_details(result),
                 )
+                self._persist_runtime_state(force=True)
                 new_positions += 1
                 logger.info(
                     f"AUTO-BUY: {symbol} [{lane}] x{position_size} @ ${current_price:.2f} | "
@@ -4414,9 +5539,11 @@ class MacroIntelligenceSystem:
         if current_prices:
             broker.update_prices(current_prices)
 
+        self._refresh_system_health()
         self._refresh_portfolio_overlay()
         self._manage_open_positions(broker, current_prices)
         self._execute_lane_entries(broker, self._build_lane_candidates())
+        self._persist_runtime_state()
 
     def _start_dashboard(self, port: int):
         from core.realtime_engine import PRICE_BUFFER
@@ -4429,10 +5556,12 @@ class MacroIntelligenceSystem:
             stress_results=self._components.get("stress_results", {}),
             execution_trace=self._components.get("execution_trace"),
             execution_backtest=self._components.get("execution_backtest"),
+            alpha_quality=self._components.get("alpha_quality"),
             execution_reconciliation=self._components.get("execution_reconciliation"),
             portfolio_overlay=self._components.get("portfolio_overlay"),
             meta_model_status=self._components.get("meta_model_status"),
             learning_status=self._components.get("learning_status"),
+            system_health=self._components.get("system_health"),
             security_suite=self._components.get("security"),
         )
         logger.info(f"\n{'=' * 52}")
@@ -4459,40 +5588,52 @@ class MacroIntelligenceSystem:
                 refreshed = []
 
                 if not self._components.get("price_data") or (now - last_price_refresh) >= self._price_refresh_seconds:
-                    self._components["price_data"] = PriceDataPipeline(symbols=target_symbols).run_incremental_update()
+                    price_symbols = self._select_pipeline_symbols("prices", target_symbols)
+                    self._components["price_data"] = PriceDataPipeline(symbols=price_symbols).run_incremental_update()
                     last_price_refresh = now
                     self._data_versions["prices"] += 1
+                    self._record_source_refresh("prices", self._components["price_data"])
                     refreshed.append("prices")
 
                 if not self._components.get("sentiment_data") or (now - last_sentiment_refresh) >= self._sentiment_refresh_seconds:
-                    self._components["sentiment_data"] = self._collect_sentiment_batched(symbols=target_symbols, days_back=3, save=True)
+                    sentiment_symbols = self._select_pipeline_symbols("sentiment", target_symbols)
+                    self._components["sentiment_data"] = self._collect_sentiment_batched(symbols=sentiment_symbols, days_back=3, save=True)
                     last_sentiment_refresh = now
                     self._data_versions["sentiment"] += 1
+                    self._record_source_refresh("sentiment", self._components["sentiment_data"])
                     self._refresh_event_intelligence()
                     refreshed.append("sentiment")
 
                 if not self._components.get("earnings_data") or (now - last_earnings_refresh) >= self._earnings_refresh_seconds:
-                    self._components["earnings_data"] = earnings_pipeline.run(symbols=target_symbols, save=True)
+                    earnings_symbols = self._select_pipeline_symbols("earnings", target_symbols)
+                    self._components["earnings_data"] = earnings_pipeline.run(symbols=earnings_symbols, save=True)
                     last_earnings_refresh = now
                     self._data_versions["earnings"] += 1
+                    self._record_source_refresh("earnings", self._components["earnings_data"])
                     refreshed.append("earnings")
 
                 if not self._components.get("altdata_data") or (now - last_altdata_refresh) >= self._altdata_refresh_seconds:
-                    self._components["altdata_data"] = self._collect_altdata(symbols=target_symbols)
+                    altdata_symbols = self._select_pipeline_symbols("altdata", target_symbols)
+                    self._components["altdata_data"] = self._collect_altdata(symbols=altdata_symbols)
                     last_altdata_refresh = now
                     self._data_versions["altdata"] += 1
+                    self._record_source_refresh("altdata", self._components["altdata_data"])
                     refreshed.append("altdata")
 
                 if refreshed:
                     if self._event_intel_enabled and self._components.get("sentiment_data") and not self._components.get("event_intel"):
                         self._refresh_event_intelligence()
                     self._components["data_versions"] = dict(self._data_versions)
+                    self._refresh_system_health()
+                    self._persist_runtime_state()
                     logger.info(
                         f"Data pipeline refresh complete for {len(target_symbols)} symbols in {self._universe_mode} mode "
                         f"({', '.join(refreshed)})"
                     )
             except Exception as exc:
                 logger.error(f"Data pipeline error: {exc}")
+                self._refresh_system_health()
+                self._persist_runtime_state()
             time.sleep(30)
 
     def _latest_live_tick(self, symbol: str):
