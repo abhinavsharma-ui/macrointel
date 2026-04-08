@@ -27,6 +27,7 @@ Standalone launch:
 import csv
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -428,6 +429,32 @@ def create_app(
         except Exception:
             return default
 
+    def _json_safe(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): _json_safe(val) for key, val in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_json_safe(item) for item in value]
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, (str, int, bool)) or value is None:
+            return value
+        if hasattr(value, "isoformat") and callable(getattr(value, "isoformat")):
+            try:
+                return value.isoformat()
+            except Exception:
+                pass
+        if hasattr(value, "item") and callable(getattr(value, "item")):
+            try:
+                return _json_safe(value.item())
+            except Exception:
+                pass
+        try:
+            if value != value:
+                return None
+        except Exception:
+            pass
+        return str(value)
+
     def _to_datetime(value: Any) -> Optional[datetime]:
         if isinstance(value, datetime):
             return value
@@ -765,8 +792,11 @@ def create_app(
                 continue
             normal_lane = raw.get("normal_lane_signal")
             if isinstance(normal_lane, dict):
-                variant = _enrich_signal_row(dict(normal_lane))
-                variant["symbol"] = symbol
+                variant_payload = dict(normal_lane)
+                variant_payload["symbol"] = symbol
+                variant_payload["lane"] = "normal"
+                variant_payload.setdefault("signal_key", f"{symbol}::normal")
+                variant = _enrich_signal_row(variant_payload)
                 variant["lane"] = "normal"
                 variant["lane_label"] = _lane_label("normal")
                 variant["signal_key"] = variant.get("signal_key") or f"{symbol}::normal"
@@ -936,9 +966,9 @@ def create_app(
             sigs = [s for s in sigs if str(s.get("lane", "")).lower() == lane_filter]
         sigs.sort(key=lambda s: (
             0 if s.get("signal") == "buy" else 1 if s.get("signal") == "sell" else 2,
-            -(s.get("confidence") or 0),
+            -_safe_float(s.get("confidence"), 0.0),
         ))
-        return jsonify({
+        return jsonify(_json_safe({
             "signals":    sigs,
             "count":      len(sigs),
             "buy_count":  sum(1 for s in sigs if s.get("signal") == "buy"),
@@ -949,7 +979,7 @@ def create_app(
                 for lane in ("normal", "day", "crypto")
             },
             "timestamp":  datetime.now(timezone.utc).isoformat(),
-        })
+        }))
 
     @app.route("/api/signals/<symbol>")
     def get_signal(symbol):
