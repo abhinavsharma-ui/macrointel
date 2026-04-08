@@ -98,7 +98,7 @@ class MacroIntelligenceSystem:
                 )
             ),
         )
-        self._allow_dual_lane_variants = os.getenv("DUAL_LANE_VARIANTS_ENABLED", "0").strip().lower() in {
+        self._allow_dual_lane_variants = os.getenv("DUAL_LANE_VARIANTS_ENABLED", "1").strip().lower() in {
             "1",
             "true",
             "yes",
@@ -139,18 +139,18 @@ class MacroIntelligenceSystem:
         self._earnings_refresh_seconds = max(1800, int(os.getenv("EARNINGS_REFRESH_SECONDS", "21600")))
         self._altdata_refresh_seconds = max(900, int(os.getenv("ALTDATA_REFRESH_SECONDS", "3600")))
         self._inference_refresh_seconds = max(15, int(os.getenv("INFERENCE_REFRESH_SECONDS", "120")))
-        self._auto_trade_min_conviction = max(0.0, float(os.getenv("AUTO_TRADE_MIN_CONVICTION", "2.8")))
-        self._auto_trade_top_k = max(1, int(os.getenv("AUTO_TRADE_TOP_K", "48")))
-        self._auto_trade_max_new_per_cycle = max(1, int(os.getenv("AUTO_TRADE_MAX_NEW_PER_CYCLE", "12")))
-        self._auto_trade_max_open_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "24")))
+        self._auto_trade_min_conviction = max(0.0, float(os.getenv("AUTO_TRADE_MIN_CONVICTION", "1.2")))
+        self._auto_trade_top_k = max(1, int(os.getenv("AUTO_TRADE_TOP_K", "72")))
+        self._auto_trade_max_new_per_cycle = max(1, int(os.getenv("AUTO_TRADE_MAX_NEW_PER_CYCLE", "18")))
+        self._auto_trade_max_open_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "36")))
         self._auto_trade_max_sector_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_SECTOR_POSITIONS", "6")))
         self._auto_trade_cooldown_seconds = max(0, int(os.getenv("AUTO_TRADE_COOLDOWN_SECONDS", "120")))
         self._auto_trade_min_hold_seconds = max(0, int(os.getenv("AUTO_TRADE_MIN_HOLD_SECONDS", "300")))
         self._day_trade_force_exit_seconds = max(300, int(os.getenv("DAY_TRADE_FORCE_EXIT_SECONDS", "3600")))
-        self._day_trade_min_tick_count = max(6, int(os.getenv("DAY_TRADE_MIN_TICK_COUNT", "14")))
+        self._day_trade_min_tick_count = max(6, int(os.getenv("DAY_TRADE_MIN_TICK_COUNT", "10")))
         self._day_trade_intraday_score_threshold = max(
             0.10,
-            float(os.getenv("DAY_TRADE_INTRADAY_SCORE_THRESHOLD", "0.30")),
+            float(os.getenv("DAY_TRADE_INTRADAY_SCORE_THRESHOLD", "0.18")),
         )
         self._day_trade_intraday_weight = min(
             0.95,
@@ -158,7 +158,7 @@ class MacroIntelligenceSystem:
         )
         self._day_trade_news_boost_threshold = max(
             0.0,
-            float(os.getenv("DAY_TRADE_NEWS_BOOST_THRESHOLD", "0.25")),
+            float(os.getenv("DAY_TRADE_NEWS_BOOST_THRESHOLD", "0.15")),
         )
         self._day_trade_risk_per_trade_pct = min(
             0.02,
@@ -186,11 +186,11 @@ class MacroIntelligenceSystem:
         )
         self._day_trade_vwap_pullback_atr_mult = max(
             0.05,
-            float(os.getenv("DAY_TRADE_VWAP_PULLBACK_ATR_MULT", "0.15")),
+            float(os.getenv("DAY_TRADE_VWAP_PULLBACK_ATR_MULT", "0.08")),
         )
         self._day_trade_ensemble_threshold = max(
             0.15,
-            float(os.getenv("DAY_TRADE_ENSEMBLE_THRESHOLD", "0.58")),
+            float(os.getenv("DAY_TRADE_ENSEMBLE_THRESHOLD", "0.42")),
         )
         self._day_trade_trail_stop_pct = max(
             0.0025,
@@ -202,13 +202,13 @@ class MacroIntelligenceSystem:
             float(os.getenv("AUTO_TRADE_MAX_POSITION_PCT", "0.08")),
         )
         self._auto_trade_leader_min_conviction = max(
-            0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_CONVICTION", "2.4"))
+            0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_CONVICTION", "0.8"))
         )
         self._auto_trade_leader_min_take_probability = min(
-            0.99, max(0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_TAKE_PROBABILITY", "0.34")))
+            0.99, max(0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_TAKE_PROBABILITY", "0.18")))
         )
         self._auto_trade_leader_min_rank_score = max(
-            0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_RANK_SCORE", "0.45"))
+            0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_RANK_SCORE", "0.12"))
         )
         self._auto_trade_zero_weight_fallback_enabled = (
             os.getenv("AUTO_TRADE_ZERO_WEIGHT_FALLBACK_ENABLED", "1").strip().lower()
@@ -216,12 +216,12 @@ class MacroIntelligenceSystem:
         )
         self._auto_trade_zero_weight_min_take_probability = min(
             0.99,
-            max(0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_TAKE_PROBABILITY", "0.36"))),
+            max(0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_TAKE_PROBABILITY", "0.16"))),
         )
         self._auto_trade_zero_weight_min_rank_score = max(
-            0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_RANK_SCORE", "0.45"))
+            0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_RANK_SCORE", "0.08"))
         )
-        self._auto_trade_replace_margin = max(0.1, float(os.getenv("AUTO_TRADE_REPLACE_MARGIN", "0.1")))
+        self._auto_trade_replace_margin = max(0.0, float(os.getenv("AUTO_TRADE_REPLACE_MARGIN", "0.02")))
         self._auto_trade_stress_position_mult = min(
             1.0,
             max(0.1, float(os.getenv("AUTO_TRADE_STRESS_POSITION_MULT", "0.6"))),
@@ -417,19 +417,19 @@ class MacroIntelligenceSystem:
         )
         self._lane_engine_config = {
             "normal": {
-                "top_k": max(1, int(os.getenv("NORMAL_LANE_TOP_K", "56"))),
-                "max_new_per_cycle": max(1, int(os.getenv("NORMAL_LANE_MAX_NEW_PER_CYCLE", "10"))),
-                "max_open_positions": max(1, int(os.getenv("NORMAL_LANE_MAX_OPEN_POSITIONS", "24"))),
+                "top_k": max(1, int(os.getenv("NORMAL_LANE_TOP_K", "96"))),
+                "max_new_per_cycle": max(1, int(os.getenv("NORMAL_LANE_MAX_NEW_PER_CYCLE", "20"))),
+                "max_open_positions": max(1, int(os.getenv("NORMAL_LANE_MAX_OPEN_POSITIONS", "40"))),
                 "cooldown_seconds": max(60, int(os.getenv("NORMAL_LANE_COOLDOWN_SECONDS", "300"))),
                 "min_hold_seconds": max(300, int(os.getenv("NORMAL_LANE_MIN_HOLD_SECONDS", "1800"))),
                 "force_exit_seconds": 0,
                 "risk_per_trade_pct": min(0.02, max(0.001, float(os.getenv("NORMAL_LANE_RISK_PER_TRADE_PCT", "0.0075")))),
                 "base_position_pct": max(0.005, float(os.getenv("NORMAL_LANE_BASE_POSITION_PCT", "0.04"))),
                 "max_position_pct": max(0.01, float(os.getenv("NORMAL_LANE_MAX_POSITION_PCT", "0.10"))),
-                "min_conviction": max(0.0, float(os.getenv("NORMAL_LANE_MIN_CONVICTION", "3.0"))),
-                "min_take_probability": min(0.99, max(0.0, float(os.getenv("NORMAL_LANE_MIN_TAKE_PROBABILITY", "0.36")))),
-                "sector_cap": max(1, int(os.getenv("NORMAL_LANE_MAX_SECTOR_POSITIONS", "8"))),
-                "pair_corr_cap": min(0.98, max(0.10, float(os.getenv("NORMAL_LANE_MAX_PAIR_CORRELATION", "0.94")))),
+                "min_conviction": max(0.0, float(os.getenv("NORMAL_LANE_MIN_CONVICTION", "1.0"))),
+                "min_take_probability": min(0.99, max(0.0, float(os.getenv("NORMAL_LANE_MIN_TAKE_PROBABILITY", "0.18")))),
+                "sector_cap": max(1, int(os.getenv("NORMAL_LANE_MAX_SECTOR_POSITIONS", "12"))),
+                "pair_corr_cap": min(0.99, max(0.10, float(os.getenv("NORMAL_LANE_MAX_PAIR_CORRELATION", "0.97")))),
             },
             "day": {
                 "top_k": max(1, int(os.getenv("DAY_LANE_TOP_K", str(self._auto_trade_top_k)))),
@@ -441,10 +441,10 @@ class MacroIntelligenceSystem:
                 "risk_per_trade_pct": self._day_trade_risk_per_trade_pct,
                 "base_position_pct": max(0.005, float(os.getenv("DAY_LANE_BASE_POSITION_PCT", str(self._auto_trade_base_position_pct)))),
                 "max_position_pct": max(0.005, float(os.getenv("DAY_LANE_MAX_POSITION_PCT", str(self._auto_trade_max_position_pct)))),
-                "min_conviction": max(0.0, float(os.getenv("DAY_LANE_MIN_CONVICTION", str(self._auto_trade_min_conviction)))),
-                "min_take_probability": min(0.99, max(0.0, float(os.getenv("DAY_LANE_MIN_TAKE_PROBABILITY", "0.32")))),
-                "sector_cap": max(1, int(os.getenv("DAY_LANE_MAX_SECTOR_POSITIONS", str(self._auto_trade_max_sector_positions + 1)))),
-                "pair_corr_cap": min(0.98, max(0.10, float(os.getenv("DAY_LANE_MAX_PAIR_CORRELATION", str(min(0.92, self._auto_trade_max_pair_correlation + 0.08)))))),
+                "min_conviction": max(0.0, float(os.getenv("DAY_LANE_MIN_CONVICTION", "0.75"))),
+                "min_take_probability": min(0.99, max(0.0, float(os.getenv("DAY_LANE_MIN_TAKE_PROBABILITY", "0.14")))),
+                "sector_cap": max(1, int(os.getenv("DAY_LANE_MAX_SECTOR_POSITIONS", str(self._auto_trade_max_sector_positions + 4)))),
+                "pair_corr_cap": min(0.99, max(0.10, float(os.getenv("DAY_LANE_MAX_PAIR_CORRELATION", "0.98")))),
             },
             "crypto": {
                 "top_k": max(1, int(os.getenv("CRYPTO_LANE_TOP_K", "32"))),
@@ -456,7 +456,7 @@ class MacroIntelligenceSystem:
                 "risk_per_trade_pct": min(0.02, max(0.001, float(os.getenv("CRYPTO_LANE_RISK_PER_TRADE_PCT", "0.004")))),
                 "base_position_pct": max(0.0025, float(os.getenv("CRYPTO_LANE_BASE_POSITION_PCT", "0.025"))),
                 "max_position_pct": max(0.005, float(os.getenv("CRYPTO_LANE_MAX_POSITION_PCT", "0.05"))),
-                "min_conviction": max(0.0, float(os.getenv("CRYPTO_LANE_MIN_CONVICTION", "2.8"))),
+                "min_conviction": max(0.0, float(os.getenv("CRYPTO_LANE_MIN_CONVICTION", "0.5"))),
                 "min_take_probability": self._crypto_scalper_min_take_probability,
                 "sector_cap": max(1, int(os.getenv("CRYPTO_LANE_MAX_SECTOR_POSITIONS", "12"))),
                 "pair_corr_cap": min(0.99, max(0.10, float(os.getenv("CRYPTO_LANE_MAX_PAIR_CORRELATION", "0.98")))),
@@ -604,7 +604,7 @@ class MacroIntelligenceSystem:
         )
         dual_lane_raw = os.getenv("EVENT_WINDOW_DUAL_LANE_VARIANTS_ENABLED")
         if dual_lane_raw is None:
-            self._allow_dual_lane_variants = False
+            self._allow_dual_lane_variants = True
         else:
             self._allow_dual_lane_variants = dual_lane_raw.strip().lower() in {"1", "true", "yes", "on"}
 
@@ -1308,7 +1308,7 @@ class MacroIntelligenceSystem:
                     items.append((primary_lane, symbol, primary))
                     seen.add(key)
             normal_variant = self._get_lane_signal(symbol, "normal")
-            include_normal_variant = self._allow_dual_lane_variants or primary_lane != "day"
+            include_normal_variant = bool(normal_variant) and (self._allow_dual_lane_variants or primary_lane != "normal")
             if normal_variant and include_normal_variant and (symbol, "normal") not in seen:
                 items.append(("normal", symbol, normal_variant))
                 seen.add((symbol, "normal"))
@@ -3952,6 +3952,7 @@ class MacroIntelligenceSystem:
             conviction = float(signal.get("conviction_score", 0.0) or 0.0)
             take_probability = float(meta.get("take_probability", signal.get("take_probability", 0.0)) or 0.0)
             rank_score = float(meta.get("rank_score", signal.get("rank_score", 0.0)) or 0.0)
+            meta_reason = str(meta.get("reason", "") or "")
             portfolio_target_pct = float(construction.get("target_position_pct", 0.0) or 0.0)
             lane_min_conviction = lane_config.get("min_conviction", self._auto_trade_min_conviction)
             if lane == "crypto":
@@ -4045,15 +4046,32 @@ class MacroIntelligenceSystem:
                 and rank_score >= self._auto_trade_zero_weight_min_rank_score
                 and conviction >= (min_conviction * (0.8 if leader_symbol else 0.9))
             )
+            qualified_edge_fallback = (
+                construction
+                and portfolio_target_pct <= 0
+                and lane in {"normal", "day"}
+                and meta_reason in {
+                    "qualified_edge",
+                    "qualified_edge_rescue",
+                    "trained_qualified_edge",
+                    "trained_qualified_edge_rescue",
+                    "weak_conviction_rescue",
+                }
+                and take_probability >= max(0.10, lane_config.get("min_take_probability", 0.0) * 0.85)
+                and rank_score >= max(0.04, self._auto_trade_zero_weight_min_rank_score * 0.75)
+                and conviction >= max(0.5, min_conviction * 0.65)
+            )
             intraday_daytrade_override = (
                 lane == "day"
                 and portfolio_target_pct <= 0
-                and take_probability >= (0.40 if self._event_window_mode else 0.48)
+                and take_probability >= (0.28 if self._event_window_mode else 0.35)
                 and conviction >= (min_conviction * 0.9)
-                and float(intraday.get("confidence", 0.0) or 0.0) >= 0.48
+                and float(intraday.get("confidence", 0.0) or 0.0) >= 0.42
                 and intraday.get("direction") == "buy"
             )
-            if construction and portfolio_target_pct <= 0 and not (zero_weight_fallback or intraday_daytrade_override):
+            if construction and portfolio_target_pct <= 0 and not (
+                zero_weight_fallback or qualified_edge_fallback or intraday_daytrade_override
+            ):
                 self._record_execution_event(
                     symbol,
                     "buy",
@@ -4936,7 +4954,7 @@ class MacroIntelligenceSystem:
                         "day_trade_intraday" if symbol_day_mode else "swing_event",
                         lane_override="day" if symbol_day_mode else "normal",
                     )
-                    if symbol_day_mode and self._allow_dual_lane_variants:
+                    if symbol_day_mode:
                         signal["normal_lane_signal"] = _build_signal_payload(
                             base_scored,
                             "swing_event",

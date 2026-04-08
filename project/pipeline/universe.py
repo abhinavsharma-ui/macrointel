@@ -169,6 +169,15 @@ DAY_TRADE_NSE_SYMBOLS = [
 
 DAY_TRADE_SYMBOLS = list(dict.fromkeys(DAY_TRADE_US_SYMBOLS + DAY_TRADE_NSE_SYMBOLS))
 DAY_TRADE_SYMBOL_SET = set(DAY_TRADE_SYMBOLS)
+DAY_TRADE_EXPANDED_SYMBOLS = list(
+    dict.fromkeys(
+        DAY_TRADE_SYMBOLS
+        + LEADER_SYMBOLS
+        + US_SYMBOLS
+        + NSE_LARGE_CAP
+    )
+)
+DAY_TRADE_EXPANDED_SYMBOL_SET = set(DAY_TRADE_EXPANDED_SYMBOLS)
 
 # ─────────────────────────────────────────────────────────────
 # Sector mapping
@@ -212,7 +221,14 @@ def is_leader_symbol(symbol: str) -> bool:
     return symbol in LEADER_SYMBOL_SET
 
 
+def _expanded_day_trade_enabled() -> bool:
+    raw = os.getenv("DAY_TRADE_EXPANDED_UNIVERSE", "1")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def is_day_trade_symbol(symbol: str) -> bool:
+    if _expanded_day_trade_enabled():
+        return symbol in DAY_TRADE_EXPANDED_SYMBOL_SET
     return symbol in DAY_TRADE_SYMBOL_SET
 
 
@@ -232,7 +248,7 @@ def get_universe(mode: str = "core") -> list:
     elif mode == "nse":
         universe = NSE_SYMBOLS
     elif mode == "daytrade":
-        universe = DAY_TRADE_SYMBOLS
+        universe = DAY_TRADE_EXPANDED_SYMBOLS if _expanded_day_trade_enabled() else DAY_TRADE_SYMBOLS
     elif mode == "daytrade_us":
         universe = DAY_TRADE_US_SYMBOLS
     elif mode == "daytrade_nse":

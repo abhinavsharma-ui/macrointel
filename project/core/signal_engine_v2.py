@@ -36,11 +36,11 @@ class MultiFactorScorer:
         "close_reversal": 0.12,
     }
 
-    BUY_THRESHOLD = max(0.02, float(os.getenv("SIGNAL_ENGINE_BUY_THRESHOLD", "0.08")))
-    SELL_THRESHOLD = -max(0.02, float(os.getenv("SIGNAL_ENGINE_SELL_THRESHOLD", "0.08")))
-    LEADER_BUY_THRESHOLD = max(0.02, float(os.getenv("SIGNAL_ENGINE_LEADER_BUY_THRESHOLD", "0.05")))
-    LEADER_SELL_THRESHOLD = -max(0.02, float(os.getenv("SIGNAL_ENGINE_LEADER_SELL_THRESHOLD", "0.05")))
-    LEADER_STRESSED_THRESHOLD = max(0.02, float(os.getenv("SIGNAL_ENGINE_LEADER_STRESSED_THRESHOLD", "0.07")))
+    BUY_THRESHOLD = max(0.015, float(os.getenv("SIGNAL_ENGINE_BUY_THRESHOLD", "0.05")))
+    SELL_THRESHOLD = -max(0.015, float(os.getenv("SIGNAL_ENGINE_SELL_THRESHOLD", "0.05")))
+    LEADER_BUY_THRESHOLD = max(0.015, float(os.getenv("SIGNAL_ENGINE_LEADER_BUY_THRESHOLD", "0.04")))
+    LEADER_SELL_THRESHOLD = -max(0.015, float(os.getenv("SIGNAL_ENGINE_LEADER_SELL_THRESHOLD", "0.04")))
+    LEADER_STRESSED_THRESHOLD = max(0.02, float(os.getenv("SIGNAL_ENGINE_LEADER_STRESSED_THRESHOLD", "0.055")))
 
     REGIME_MULTIPLIERS = {
         "calm": 1.05,
@@ -436,7 +436,7 @@ class MetaDecisionEngine:
       - suggest a size multiplier for execution
     """
 
-    TAKE_THRESHOLD = 0.54
+    TAKE_THRESHOLD = 0.50
 
     def __init__(self):
         self._take_threshold = min(
@@ -459,9 +459,42 @@ class MetaDecisionEngine:
             0.0,
             float(os.getenv("META_MODEL_RUNTIME_MIN_CONVICTION", "4.8")),
         )
+        self._lane_take_threshold_caps = {
+            "normal": min(0.99, max(0.01, float(os.getenv("META_MODEL_RUNTIME_NORMAL_THRESHOLD", "0.48")))),
+            "day": min(0.99, max(0.01, float(os.getenv("META_MODEL_RUNTIME_DAY_THRESHOLD", "0.40")))),
+            "crypto": min(0.99, max(0.01, float(os.getenv("META_MODEL_RUNTIME_CRYPTO_THRESHOLD", "0.28")))),
+        }
+        self._lane_min_convictions = {
+            "normal": max(0.0, float(os.getenv("META_MODEL_RUNTIME_NORMAL_MIN_CONVICTION", "0.90"))),
+            "day": max(0.0, float(os.getenv("META_MODEL_RUNTIME_DAY_MIN_CONVICTION", "0.65"))),
+            "crypto": max(0.0, float(os.getenv("META_MODEL_RUNTIME_CRYPTO_MIN_CONVICTION", "0.45"))),
+        }
+        self._lane_leader_min_convictions = {
+            "normal": max(0.0, float(os.getenv("META_MODEL_RUNTIME_NORMAL_LEADER_MIN_CONVICTION", "0.80"))),
+            "day": max(0.0, float(os.getenv("META_MODEL_RUNTIME_DAY_LEADER_MIN_CONVICTION", "0.55"))),
+            "crypto": max(0.0, float(os.getenv("META_MODEL_RUNTIME_CRYPTO_LEADER_MIN_CONVICTION", "0.45"))),
+        }
         self._trained_model = TrainedMetaModel.load()
         if self._trained_model is not None:
             logger.info("MetaDecisionEngine: trained meta checkpoint loaded")
+
+    def _signal_lane(self, signal: Dict) -> str:
+        return str((signal or {}).get("lane") or "normal").strip().lower()
+
+    def _conviction_floor(self, signal: Dict, leader_symbol: bool) -> float:
+        lane = self._signal_lane(signal)
+        lane_floor = (
+            self._lane_leader_min_convictions.get(lane, self._leader_min_conviction)
+            if leader_symbol
+            else self._lane_min_convictions.get(lane, self._min_conviction)
+        )
+        generic_floor = self._leader_min_conviction if leader_symbol else self._min_conviction
+        return min(generic_floor, lane_floor)
+
+    def _effective_take_threshold(self, signal: Dict, default_threshold: float) -> float:
+        lane = self._signal_lane(signal)
+        lane_cap = self._lane_take_threshold_caps.get(lane, self._take_threshold)
+        return min(default_threshold, lane_cap)
 
     def evaluate_universe(self, signals: Dict[str, Dict], feature_rows: Optional[Dict[str, pd.Series]] = None) -> Dict[str, Dict]:
         decisions: Dict[str, Dict] = {}
@@ -588,11 +621,14 @@ class MetaDecisionEngine:
             size_multiplier *= 0.65
 
         reason = "qualified_edge"
-        if take_prob < self._take_threshold:
+        conviction_floor = self._conviction_floor(signal, leader_symbol)
+        effective_threshold = self._effective_take_threshold(signal, self._take_threshold)
+
+        if take_prob < effective_threshold:
             reason = "low_take_probability"
         elif expected_edge_pct <= 0:
             reason = "negative_expected_edge"
-        elif conviction < (self._leader_min_conviction if leader_symbol else self._min_conviction):
+        elif conviction < conviction_floor:
             reason = "weak_conviction"
 
         return {
@@ -654,21 +690,36 @@ class MetaDecisionEngine:
         if direction == "neutral":
             take_trade = False
         else:
-            effective_threshold = self._take_threshold
+            effective_threshold = self._effective_take_threshold(signal, self._take_threshold)
             min_edge_required = self._min_edge_pct
             min_ratio_required = self._min_edge_ratio
             if self._trained_model is not None and decision_source == "trained_blend":
-                effective_threshold = trained_threshold
+                effective_threshold = self._effective_take_threshold(signal, trained_threshold)
                 min_edge_required = trained_min_edge
                 min_ratio_required = trained_min_ratio
             edge_ratio_live = expected_edge_pct / max(expected_drawdown_pct, 0.25)
-            min_conviction = self._leader_min_conviction if leader_symbol else self._min_conviction
+            min_conviction = self._conviction_floor(signal, leader_symbol)
             take_trade = (
                 take_prob >= effective_threshold
                 and expected_edge_pct > min_edge_required
                 and edge_ratio_live >= min_ratio_required
                 and conviction >= min_conviction
             )
+            rescue_conviction_floor = max(0.30, min_conviction * 0.60)
+            rescue_probability_floor = max(0.18, effective_threshold - 0.05)
+            rescue_edge_floor = max(0.0, min_edge_required * 0.75)
+            rescue_ratio_floor = max(0.0, min_ratio_required * 0.85)
+            qualified_rescue = (
+                not take_trade
+                and reason in {"qualified_edge", "trained_qualified_edge", "weak_conviction"}
+                and take_prob >= rescue_probability_floor
+                and expected_edge_pct > rescue_edge_floor
+                and edge_ratio_live >= rescue_ratio_floor
+                and conviction >= rescue_conviction_floor
+            )
+            if qualified_rescue:
+                take_trade = True
+                reason = f"{reason}_rescue"
 
         return {
             "symbol": symbol,
