@@ -5569,7 +5569,14 @@ class MacroIntelligenceSystem:
         if self._components.get("security") is not None:
             logger.info(f"  Camera    : http://localhost:{port}/video_feed")
         logger.info(f"{'=' * 52}\n")
-        socketio.run(app, host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        socketio.run(
+            app,
+            host="0.0.0.0",
+            port=port,
+            debug=False,
+            use_reloader=False,
+            allow_unsafe_werkzeug=os.getenv("ALLOW_UNSAFE_WERKZEUG", "1").strip().lower() in {"1", "true", "yes", "on"},
+        )
 
     def _data_pipeline_loop(self):
         from pipeline.earnings_collector import EarningsEventPipeline
