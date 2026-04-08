@@ -103,9 +103,9 @@ def _triple_barrier_path_stats(
     if future_window is None or future_window.empty or entry_close <= 0:
         return {"edge_pct": 0.0, "drawdown_pct": 0.0, "hit": 0, "barrier": "none"}
 
-    highs = pd.to_numeric(future_window.get("high", future_window.get("close")), errors="coerce").fillna(method="ffill")
-    lows = pd.to_numeric(future_window.get("low", future_window.get("close")), errors="coerce").fillna(method="ffill")
-    closes = pd.to_numeric(future_window.get("close"), errors="coerce").fillna(method="ffill")
+    highs = pd.to_numeric(future_window.get("high", future_window.get("close")), errors="coerce").ffill()
+    lows = pd.to_numeric(future_window.get("low", future_window.get("close")), errors="coerce").ffill()
+    closes = pd.to_numeric(future_window.get("close"), errors="coerce").ffill()
     if closes.empty:
         return {"edge_pct": 0.0, "drawdown_pct": 0.0, "hit": 0, "barrier": "none"}
 

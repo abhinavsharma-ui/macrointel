@@ -1462,6 +1462,8 @@ class MacroIntelligenceSystem:
             return {}
 
         closed_rows = self._recent_closed_trade_rows(broker, lookback_days=self._governor_lookback_days)
+        drift_status = self._refresh_drift_status(broker)
+        drift_lanes = drift_status.get("lanes", {}) if isinstance(drift_status, dict) else {}
         lane_rows: Dict[str, List[Dict]] = defaultdict(list)
         for trade in closed_rows:
             lane = str((trade.get("metadata") or {}).get("lane") or "normal").lower()
