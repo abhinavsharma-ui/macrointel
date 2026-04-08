@@ -15,6 +15,9 @@ Architecture:
 
 import json
 import time
+import os
+import queue
+import random
 import logging
 import threading
 from datetime import datetime, timezone
@@ -58,12 +61,28 @@ class RealTimePriceBuffer:
     Shared between all WebSocket threads and the signal engine.
     """
 
-    def __init__(self, buffer_size: int = 1000):
+    def __init__(self, buffer_size: int = 1000, *, dispatch_queue_size: int = 5000):
         self._buffer: Dict[str, deque] = defaultdict(lambda: deque(maxlen=buffer_size))
         self._latest: Dict[str, Tick] = {}
         self._lock = threading.RLock()
         self._subscribers: List[Callable] = []
         self._stats: Dict[str, int] = defaultdict(int)
+        self._dispatch_queue: "queue.Queue[Optional[Tick]]" = queue.Queue(maxsize=max(1, int(dispatch_queue_size)))
+        self._dispatcher = threading.Thread(target=self._dispatch_loop, daemon=True, name="realtime-tick-dispatcher")
+        self._dispatcher.start()
+
+    def _dispatch_loop(self):
+        while True:
+            tick = self._dispatch_queue.get()
+            if tick is None:
+                return
+            with self._lock:
+                callbacks = list(self._subscribers)
+            for callback in callbacks:
+                try:
+                    callback(tick)
+                except Exception as exc:
+                    logger.debug(f"Subscriber callback error: {exc}")
 
     def push(self, tick: Tick):
         """Push a new tick into the buffer. Thread-safe."""
@@ -72,16 +91,18 @@ class RealTimePriceBuffer:
             self._latest[tick.symbol] = tick
             self._stats["total_ticks"] += 1
 
-        # Notify subscribers (on separate thread to avoid blocking WebSocket)
-        for callback in self._subscribers:
+        # Notify subscribers (async to avoid blocking WebSocket threads)
+        if self._subscribers:
             try:
-                callback(tick)
-            except Exception as e:
-                logger.debug(f"Subscriber callback error: {e}")
+                self._dispatch_queue.put_nowait(tick)
+            except queue.Full:
+                with self._lock:
+                    self._stats["dispatch_dropped_ticks"] += 1
 
     def latest(self, symbol: str) -> Optional[Tick]:
         """Get the most recent tick for a symbol."""
-        return self._latest.get(symbol)
+        with self._lock:
+            return self._latest.get(symbol)
 
     def recent_ticks(self, symbol: str, n: int = 50) -> List[Tick]:
         """Get the N most recent ticks for a symbol."""
@@ -114,14 +135,17 @@ class RealTimePriceBuffer:
 
     def subscribe(self, callback: Callable[[Tick], None]):
         """Subscribe to all incoming ticks."""
-        self._subscribers.append(callback)
+        with self._lock:
+            self._subscribers.append(callback)
 
     def active_symbols(self) -> Set[str]:
-        return set(self._latest.keys())
+        with self._lock:
+            return set(self._latest.keys())
 
     @property
     def stats(self) -> Dict:
-        return dict(self._stats)
+        with self._lock:
+            return dict(self._stats)
 
 
 class PublicDepthBuffer:
@@ -346,16 +370,41 @@ class BinancePublicDepthWebSocket:
         self.source = "binance_testnet" if self.testnet else "binance"
         self.ws: Optional[websocket.WebSocketApp] = None
         self._running = False
+        self._message_queue: "queue.Queue[Optional[str]]" = queue.Queue(
+            maxsize=max(1, int(os.getenv("BINANCE_WS_MESSAGE_QUEUE_SIZE", "20000")))
+        )
+        self._worker_thread: Optional[threading.Thread] = None
+        self._watchdog_thread: Optional[threading.Thread] = None
+        self._reconnect_base_delay_seconds = float(os.getenv("BINANCE_WS_RECONNECT_BASE_DELAY_SECONDS", "3"))
+        self._reconnect_max_delay_seconds = float(os.getenv("BINANCE_WS_RECONNECT_MAX_DELAY_SECONDS", "60"))
+        self._ping_interval_seconds = float(os.getenv("BINANCE_WS_PING_INTERVAL_SECONDS", "30"))
+        self._ping_timeout_seconds = float(os.getenv("BINANCE_WS_PING_TIMEOUT_SECONDS", "20"))
+        self._depth_update_ms = int(os.getenv("BINANCE_WS_DEPTH_UPDATE_MS", "100"))
+        self._stale_seconds = float(os.getenv("BINANCE_WS_STALE_SECONDS", "90"))
+        self._last_message_ts = 0.0
+        self._dropped_messages = 0
+        self._last_drop_log_ts = 0.0
 
     def _build_url(self) -> str:
+        depth_update_ms = self._depth_update_ms if self._depth_update_ms in (100, 1000) else 1000
         streams: List[str] = []
         for symbol in self.symbols:
-            streams.extend([f"{symbol}@trade", f"{symbol}@bookTicker", f"{symbol}@depth20@100ms"])
+            streams.extend(
+                [f"{symbol}@trade", f"{symbol}@bookTicker", f"{symbol}@depth20@{depth_update_ms}ms"]
+            )
         base = self.TESTNET_WS_BASE if self.testnet else self.WS_BASE
         return base + "/".join(streams)
 
     def start(self, daemon: bool = True):
         self._running = True
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._worker_thread = threading.Thread(target=self._process_messages, daemon=True, name="binance-ws-worker")
+            self._worker_thread.start()
+        if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_loop, daemon=True, name="binance-ws-watchdog"
+            )
+            self._watchdog_thread.start()
         thread = threading.Thread(target=self._run_forever, daemon=daemon)
         thread.start()
         logger.info(f"Binance public depth WebSocket started for {len(self.symbols)} crypto symbols")
@@ -364,9 +413,71 @@ class BinancePublicDepthWebSocket:
         self._running = False
         if self.ws:
             self.ws.close()
+        try:
+            self._message_queue.put_nowait(None)
+        except Exception:
+            pass
+
+    def _enqueue_message(self, message: str):
+        try:
+            self._message_queue.put_nowait(message)
+            return
+        except queue.Full:
+            pass
+
+        # Drop the oldest message and try again (depth updates are high-frequency).
+        try:
+            _ = self._message_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._message_queue.put_nowait(message)
+        except queue.Full:
+            self._dropped_messages += 1
+
+    def _process_messages(self):
+        while self._running:
+            try:
+                message = self._message_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if message is None:
+                return
+            self._handle_message(message)
+
+            # Rate-limit queue-drop logging to avoid log spam.
+            now = time.time()
+            if self._dropped_messages and now - self._last_drop_log_ts > 60:
+                dropped = self._dropped_messages
+                self._dropped_messages = 0
+                self._last_drop_log_ts = now
+                logger.warning(f"Binance public depth WebSocket worker dropped {dropped} messages (queue full)")
+
+    def _watchdog_loop(self):
+        while self._running:
+            time.sleep(5)
+            if not self._running or self._stale_seconds <= 0:
+                continue
+            last_ts = float(self._last_message_ts or 0.0)
+            if last_ts <= 0:
+                continue
+            if time.time() - last_ts > float(self._stale_seconds):
+                logger.warning(
+                    f"Binance public depth WebSocket stale for >{int(self._stale_seconds)}s; forcing reconnect"
+                )
+                try:
+                    if self.ws:
+                        self.ws.close()
+                except Exception:
+                    pass
 
     def _run_forever(self):
+        delay = max(0.5, float(self._reconnect_base_delay_seconds))
+        max_delay = max(delay, float(self._reconnect_max_delay_seconds))
+        ping_interval = self._ping_interval_seconds if self._ping_interval_seconds > 0 else None
+        ping_timeout = self._ping_timeout_seconds if self._ping_timeout_seconds > 0 else None
         while self._running:
+            start_ts = time.time()
             try:
                 self.ws = websocket.WebSocketApp(
                     self._build_url(),
@@ -375,16 +486,33 @@ class BinancePublicDepthWebSocket:
                     on_error=self._on_error,
                     on_close=self._on_close,
                 )
-                self.ws.run_forever(ping_interval=20, ping_timeout=10)
+                self.ws.run_forever(ping_interval=ping_interval, ping_timeout=ping_timeout)
             except Exception as exc:
                 logger.warning(f"Binance public depth WebSocket error: {exc}")
             if self._running:
-                time.sleep(3)
+                runtime = time.time() - start_ts
+                # If the connection flaps quickly, back off exponentially with jitter.
+                if runtime < 15:
+                    delay = min(max_delay, delay * 2.0)
+                else:
+                    delay = max(0.5, float(self._reconnect_base_delay_seconds))
+                time.sleep(min(max_delay, delay) + random.random())
 
     def _on_open(self, ws):
+        if self._depth_update_ms not in (100, 1000):
+            logger.warning(
+                f"BINANCE_WS_DEPTH_UPDATE_MS={self._depth_update_ms} unsupported; using 1000ms instead"
+            )
+        self._last_message_ts = time.time()
         logger.info("Binance public depth WebSocket connected")
 
     def _on_message(self, ws, message):
+        if not message:
+            return
+        self._last_message_ts = time.time()
+        self._enqueue_message(message)
+
+    def _handle_message(self, message: str):
         try:
             payload = json.loads(message)
         except Exception:
@@ -464,7 +592,7 @@ class BinancePublicDepthWebSocket:
         logger.warning(f"Binance public depth WebSocket error: {error}")
 
     def _on_close(self, ws, close_status_code, close_msg):
-        logger.info(f"Binance public depth WebSocket closed: {close_status_code}")
+        logger.info(f"Binance public depth WebSocket closed: {close_status_code} {close_msg or ''}".strip())
 
 
 class BybitPublicDepthWebSocket:

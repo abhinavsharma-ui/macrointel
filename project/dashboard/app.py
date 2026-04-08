@@ -1307,6 +1307,7 @@ def create_app(
             "lane_targets":     (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("lane_targets", {})),
             "universe_sync":    (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("universe_sync", {})),
             "pipeline_selection": (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("pipeline_selection", {})),
+            "data_pipeline":   (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("data_pipeline", {})),
             "uptime_seconds":   round(time.time() - _startup_time),
             "timestamp":        datetime.now(timezone.utc).isoformat(),
         })

@@ -118,6 +118,7 @@ class MacroIntelligenceSystem:
         self._universe_sync_summary: Dict[str, Any] = {}
         self._source_selection_summary: Dict[str, Dict[str, Any]] = {}
         self._pipeline_rotation_offsets: Dict[str, int] = defaultdict(int)
+        self._data_pipeline_status: Dict[str, Any] = {}
         self._pipeline_priority_symbol_cap = max(0, int(os.getenv("PIPELINE_PRIORITY_SYMBOL_CAP", "0") or 0))
         self._source_symbol_caps = {
             "prices": max(0, int(os.getenv("PRICE_PIPELINE_SYMBOL_CAP", "0") or 0)),
@@ -620,6 +621,7 @@ class MacroIntelligenceSystem:
         self._system_health: Dict[str, Any] = {}
         self._components["data_health"] = self._data_health
         self._components["system_health"] = self._system_health
+        self._components["data_pipeline_status"] = self._data_pipeline_status
         self._load_runtime_state()
         self._refresh_system_health()
 
@@ -956,6 +958,7 @@ class MacroIntelligenceSystem:
                     "active_symbols": active_symbols,
                     "universe_sync": dict(self._components.get("universe_sync", {}) or {}),
                     "pipeline_selection": dict(self._source_selection_summary),
+                    "data_pipeline": dict(self._data_pipeline_status),
                 },
             }
         )
@@ -1325,43 +1328,97 @@ class MacroIntelligenceSystem:
         return deduped[:limit] if limit > 0 else deduped
 
     def _select_pipeline_symbols(self, source_name: str, symbols: List[str]) -> List[str]:
+        source_key = str(source_name or "").lower()
         ordered = list(dict.fromkeys(str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()))
-        cap = max(0, int(self._source_symbol_caps.get(source_name, 0) or 0))
+        cap = max(0, int(self._source_symbol_caps.get(source_key, 0) or 0))
+        bootstrap_cap = self._source_bootstrap_symbol_cap(source_key, len(ordered), configured_cap=cap)
+        effective_cap = cap
+        if bootstrap_cap > 0:
+            effective_cap = bootstrap_cap if effective_cap <= 0 else min(effective_cap, bootstrap_cap)
         if not ordered:
-            self._source_selection_summary[source_name] = {
+            self._source_selection_summary[source_key] = {
                 "selected_symbols": 0,
                 "total_symbols": 0,
                 "priority_symbols": 0,
                 "rotation_offset": 0,
+                "configured_cap": cap,
+                "effective_cap": 0,
+                "bootstrap_active": False,
             }
             return []
-        if cap <= 0 or len(ordered) <= cap:
-            self._source_selection_summary[source_name] = {
+        if effective_cap <= 0 or len(ordered) <= effective_cap:
+            self._source_selection_summary[source_key] = {
                 "selected_symbols": len(ordered),
                 "total_symbols": len(ordered),
                 "priority_symbols": min(len(ordered), len(self._priority_pipeline_symbols(ordered))),
                 "rotation_offset": 0,
+                "configured_cap": cap,
+                "effective_cap": len(ordered),
+                "bootstrap_active": False,
             }
             return ordered
 
         priority = self._priority_pipeline_symbols(ordered)
-        selected = list(priority[:cap])
-        remaining_slots = max(0, cap - len(selected))
+        selected = list(priority[:effective_cap])
+        remaining_slots = max(0, effective_cap - len(selected))
         remainder = [symbol for symbol in ordered if symbol not in selected]
         next_offset = 0
         if remaining_slots > 0 and remainder:
-            offset = self._pipeline_rotation_offsets.get(source_name, 0) % len(remainder)
+            offset = self._pipeline_rotation_offsets.get(source_key, 0) % len(remainder)
             rotated = remainder[offset:] + remainder[:offset]
             selected.extend(rotated[:remaining_slots])
             next_offset = (offset + remaining_slots) % len(remainder)
-        self._pipeline_rotation_offsets[source_name] = next_offset
-        self._source_selection_summary[source_name] = {
+        self._pipeline_rotation_offsets[source_key] = next_offset
+        self._source_selection_summary[source_key] = {
             "selected_symbols": len(selected),
             "total_symbols": len(ordered),
-            "priority_symbols": len(priority[:cap]),
+            "priority_symbols": len(priority[:effective_cap]),
             "rotation_offset": next_offset,
+            "configured_cap": cap,
+            "effective_cap": effective_cap,
+            "bootstrap_active": bootstrap_cap > 0 and effective_cap == bootstrap_cap,
         }
         return selected
+
+    def _source_bootstrap_symbol_cap(self, source_name: str, total_symbols: int, *, configured_cap: int = 0) -> int:
+        source_key = str(source_name or "").lower()
+        if total_symbols <= 0:
+            return 0
+        if self._data_versions.get(source_key, 0) > 0:
+            return 0
+        default_caps = {
+            "prices": 160,
+            "sentiment": 80,
+            "earnings": 160,
+            "altdata": 48,
+        }
+        env_names = {
+            "prices": "PRICE_PIPELINE_BOOTSTRAP_SYMBOL_CAP",
+            "sentiment": "SENTIMENT_PIPELINE_BOOTSTRAP_SYMBOL_CAP",
+            "earnings": "EARNINGS_PIPELINE_BOOTSTRAP_SYMBOL_CAP",
+            "altdata": "ALTDATA_PIPELINE_BOOTSTRAP_SYMBOL_CAP",
+        }
+        raw_cap = os.getenv(
+            env_names.get(source_key, f"{source_key.upper()}_PIPELINE_BOOTSTRAP_SYMBOL_CAP"),
+            os.getenv("PIPELINE_BOOTSTRAP_SYMBOL_CAP", str(default_caps.get(source_key, 0))),
+        )
+        try:
+            cap = max(0, int(float(raw_cap or 0)))
+        except Exception:
+            cap = default_caps.get(source_key, 0)
+        candidate_total = min(total_symbols, max(0, int(configured_cap or 0))) if max(0, int(configured_cap or 0)) > 0 else total_symbols
+        if cap <= 0 or candidate_total <= cap:
+            return 0
+        return min(candidate_total, cap)
+
+    def _set_data_pipeline_status(self, **fields: Any) -> None:
+        self._data_pipeline_status.clear()
+        self._data_pipeline_status.update(
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                **fields,
+            }
+        )
 
     def _start_chunked_component(self, component_key: str, factory, symbols: List[str], chunk_size: int, **kwargs) -> int:
         ordered = list(dict.fromkeys(str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()))
@@ -5579,24 +5636,44 @@ class MacroIntelligenceSystem:
         )
 
     def _data_pipeline_loop(self):
-        from pipeline.earnings_collector import EarningsEventPipeline
-        from pipeline.price_collector import PriceDataPipeline
-
-        target_symbols = self._get_target_symbols()
-        earnings_pipeline = EarningsEventPipeline(pit_db=self._components.get("pit_db"))
+        price_pipeline_cls = None
+        earnings_pipeline_cls = None
+        earnings_pipeline = None
         last_price_refresh = 0.0
         last_sentiment_refresh = 0.0
         last_earnings_refresh = 0.0
         last_altdata_refresh = 0.0
+        self._set_data_pipeline_status(status="starting", source="", selected_symbols=0, total_symbols=0)
+        self._refresh_system_health()
 
         while self._running:
             try:
+                if price_pipeline_cls is None:
+                    from pipeline.price_collector import PriceDataPipeline as _PriceDataPipeline
+
+                    price_pipeline_cls = _PriceDataPipeline
+                if earnings_pipeline_cls is None:
+                    from pipeline.earnings_collector import EarningsEventPipeline as _EarningsEventPipeline
+
+                    earnings_pipeline_cls = _EarningsEventPipeline
+                if earnings_pipeline is None:
+                    earnings_pipeline = earnings_pipeline_cls(pit_db=self._components.get("pit_db"))
+
+                target_symbols = self._get_target_symbols()
                 now = time.time()
                 refreshed = []
 
                 if not self._components.get("price_data") or (now - last_price_refresh) >= self._price_refresh_seconds:
                     price_symbols = self._select_pipeline_symbols("prices", target_symbols)
-                    self._components["price_data"] = PriceDataPipeline(symbols=price_symbols).run_incremental_update()
+                    self._set_data_pipeline_status(
+                        status="refreshing",
+                        source="prices",
+                        selected_symbols=len(price_symbols),
+                        total_symbols=len(target_symbols),
+                        bootstrap_active=bool((self._source_selection_summary.get("prices") or {}).get("bootstrap_active")),
+                    )
+                    self._refresh_system_health()
+                    self._components["price_data"] = price_pipeline_cls(symbols=price_symbols).run_incremental_update()
                     last_price_refresh = now
                     self._data_versions["prices"] += 1
                     self._record_source_refresh("prices", self._components["price_data"])
@@ -5604,6 +5681,14 @@ class MacroIntelligenceSystem:
 
                 if not self._components.get("sentiment_data") or (now - last_sentiment_refresh) >= self._sentiment_refresh_seconds:
                     sentiment_symbols = self._select_pipeline_symbols("sentiment", target_symbols)
+                    self._set_data_pipeline_status(
+                        status="refreshing",
+                        source="sentiment",
+                        selected_symbols=len(sentiment_symbols),
+                        total_symbols=len(target_symbols),
+                        bootstrap_active=bool((self._source_selection_summary.get("sentiment") or {}).get("bootstrap_active")),
+                    )
+                    self._refresh_system_health()
                     self._components["sentiment_data"] = self._collect_sentiment_batched(symbols=sentiment_symbols, days_back=3, save=True)
                     last_sentiment_refresh = now
                     self._data_versions["sentiment"] += 1
@@ -5613,6 +5698,14 @@ class MacroIntelligenceSystem:
 
                 if not self._components.get("earnings_data") or (now - last_earnings_refresh) >= self._earnings_refresh_seconds:
                     earnings_symbols = self._select_pipeline_symbols("earnings", target_symbols)
+                    self._set_data_pipeline_status(
+                        status="refreshing",
+                        source="earnings",
+                        selected_symbols=len(earnings_symbols),
+                        total_symbols=len(target_symbols),
+                        bootstrap_active=bool((self._source_selection_summary.get("earnings") or {}).get("bootstrap_active")),
+                    )
+                    self._refresh_system_health()
                     self._components["earnings_data"] = earnings_pipeline.run(symbols=earnings_symbols, save=True)
                     last_earnings_refresh = now
                     self._data_versions["earnings"] += 1
@@ -5621,6 +5714,14 @@ class MacroIntelligenceSystem:
 
                 if not self._components.get("altdata_data") or (now - last_altdata_refresh) >= self._altdata_refresh_seconds:
                     altdata_symbols = self._select_pipeline_symbols("altdata", target_symbols)
+                    self._set_data_pipeline_status(
+                        status="refreshing",
+                        source="altdata",
+                        selected_symbols=len(altdata_symbols),
+                        total_symbols=len(target_symbols),
+                        bootstrap_active=bool((self._source_selection_summary.get("altdata") or {}).get("bootstrap_active")),
+                    )
+                    self._refresh_system_health()
                     self._components["altdata_data"] = self._collect_altdata(symbols=altdata_symbols)
                     last_altdata_refresh = now
                     self._data_versions["altdata"] += 1
@@ -5631,6 +5732,13 @@ class MacroIntelligenceSystem:
                     if self._event_intel_enabled and self._components.get("sentiment_data") and not self._components.get("event_intel"):
                         self._refresh_event_intelligence()
                     self._components["data_versions"] = dict(self._data_versions)
+                    self._set_data_pipeline_status(
+                        status="idle",
+                        source="",
+                        selected_symbols=0,
+                        total_symbols=len(target_symbols),
+                        refreshed_sources=list(refreshed),
+                    )
                     self._refresh_system_health()
                     self._persist_runtime_state()
                     logger.info(
@@ -5638,7 +5746,17 @@ class MacroIntelligenceSystem:
                         f"({', '.join(refreshed)})"
                     )
             except Exception as exc:
-                logger.error(f"Data pipeline error: {exc}")
+                self._set_data_pipeline_status(
+                    status="error",
+                    source=str(self._data_pipeline_status.get("source") or ""),
+                    selected_symbols=int(self._data_pipeline_status.get("selected_symbols", 0) or 0),
+                    total_symbols=int(self._data_pipeline_status.get("total_symbols", 0) or 0),
+                    error=str(exc),
+                )
+                logger.exception("Data pipeline error")
+                price_pipeline_cls = None
+                earnings_pipeline_cls = None
+                earnings_pipeline = None
                 self._refresh_system_health()
                 self._persist_runtime_state()
             time.sleep(30)
