@@ -131,6 +131,8 @@ class VirtualBroker:
         self._partial_fill_min_ratio = min(1.0, max(0.05, float(os.getenv("PAPER_PARTIAL_FILL_MIN_RATIO", "0.35"))))
         self._simulated_latency_ms = max(0.0, float(os.getenv("PAPER_SIMULATED_LATENCY_MS", "220")))
         self._simulated_latency_jitter_ms = max(0.0, float(os.getenv("PAPER_SIMULATED_LATENCY_JITTER_MS", "180")))
+        self._headline_win_rate_window = max(5, int(os.getenv("PAPER_WIN_RATE_WINDOW_TRADES", "50")))
+        self._headline_win_rate_min_trades = max(1, int(os.getenv("PAPER_WIN_RATE_MIN_TRADES", "5")))
 
         from core.backtesting import TransactionCostModel
         self._cost_model = TransactionCostModel()
@@ -345,8 +347,19 @@ class VirtualBroker:
         self._maybe_reset_session_kill_switch()
         self._refresh_session_risk_controls()
         realized_pnl = sum(t.get("realized_pnl", 0) for t in self.trade_log)
-        winning_trades = sum(1 for t in self.trade_log if t.get("realized_pnl", 0) > 0)
-        total_trades = len([t for t in self.trade_log if t.get("realized_pnl") is not None])
+        closed_trade_log = self._closed_trade_log()
+        lifetime_win_rate = self._win_rate_snapshot(closed_trade_log, "lifetime")
+        recent_win_rate = self._win_rate_snapshot(
+            closed_trade_log[-self._headline_win_rate_window :],
+            "recent",
+            sample_size_override=min(len(closed_trade_log), self._headline_win_rate_window),
+        )
+        session_win_rate = self._win_rate_snapshot(self._session_closed_trade_log(closed_trade_log), "session")
+        headline_win_rate = lifetime_win_rate
+        if recent_win_rate["closed_trades"] >= self._headline_win_rate_min_trades:
+            headline_win_rate = recent_win_rate
+        elif session_win_rate["closed_trades"] >= self._headline_win_rate_min_trades:
+            headline_win_rate = session_win_rate
         daily_realized_pnl, daily_loss_pct, consecutive_losses = self._session_risk_snapshot()
 
         return {
@@ -361,7 +374,19 @@ class VirtualBroker:
             "total_commissions_paid": round(sum(t.get("commission", 0) for t in self.trade_log), 2),
             "open_positions": sum(1 for pos in self.positions.values() if getattr(pos, "quantity", 0) != 0),
             "total_trades": len(self.orders),
-            "win_rate_pct": round(winning_trades / max(total_trades, 1) * 100, 1),
+            "closed_trades": lifetime_win_rate["closed_trades"],
+            "winning_closed_trades": lifetime_win_rate["wins"],
+            "losing_closed_trades": lifetime_win_rate["losses"],
+            "breakeven_closed_trades": lifetime_win_rate["breakeven"],
+            "lifetime_win_rate_pct": lifetime_win_rate["win_rate_pct"],
+            "recent_win_rate_pct": recent_win_rate["win_rate_pct"],
+            "recent_closed_trades": recent_win_rate["closed_trades"],
+            "session_win_rate_pct": session_win_rate["win_rate_pct"],
+            "session_closed_trades": session_win_rate["closed_trades"],
+            "win_rate_pct": headline_win_rate["win_rate_pct"],
+            "win_rate_basis": headline_win_rate["basis"],
+            "win_rate_label": headline_win_rate["label"],
+            "win_rate_sample_size": headline_win_rate["closed_trades"],
             "kill_switch_active": self._kill_switch_activated,
             "kill_switch_reason": self._kill_switch_reason,
             "session_guardrails_enabled": self.session_guardrails_enabled,
@@ -394,6 +419,57 @@ class VirtualBroker:
         if not self.trade_log:
             return pd.DataFrame()
         return pd.DataFrame(self.trade_log)
+
+    def _closed_trade_log(self) -> List[Dict]:
+        closed: List[Dict] = []
+        for trade in self.trade_log:
+            if trade.get("realized_pnl") is None or not trade.get("filled_at"):
+                continue
+            closed.append(trade)
+        return closed
+
+    def _session_closed_trade_log(self, closed_trade_log: Optional[List[Dict]] = None) -> List[Dict]:
+        today = datetime.now(timezone.utc).date()
+        rows = closed_trade_log if closed_trade_log is not None else self._closed_trade_log()
+        session_rows: List[Dict] = []
+        for trade in rows:
+            try:
+                filled_at = datetime.fromisoformat(str(trade.get("filled_at")))
+            except Exception:
+                continue
+            if filled_at.astimezone(timezone.utc).date() == today:
+                session_rows.append(trade)
+        return session_rows
+
+    @staticmethod
+    def _win_rate_snapshot(rows: List[Dict], basis: str, sample_size_override: Optional[int] = None) -> Dict:
+        wins = 0
+        losses = 0
+        breakeven = 0
+        for trade in rows:
+            realized = float(trade.get("realized_pnl", 0.0) or 0.0)
+            if realized > 1e-9:
+                wins += 1
+            elif realized < -1e-9:
+                losses += 1
+            else:
+                breakeven += 1
+        closed_trades = int(sample_size_override if sample_size_override is not None else len(rows))
+        labels = {
+            "recent": f"last {closed_trades} closed paper trades",
+            "session": f"today • {closed_trades} closed paper trades",
+            "lifetime": f"lifetime • {closed_trades} closed paper trades",
+        }
+        win_rate_pct = round((wins / max(closed_trades, 1)) * 100.0, 1) if closed_trades else 0.0
+        return {
+            "basis": basis,
+            "label": labels.get(basis, f"{closed_trades} closed paper trades"),
+            "closed_trades": closed_trades,
+            "wins": wins,
+            "losses": losses,
+            "breakeven": breakeven,
+            "win_rate_pct": win_rate_pct,
+        }
 
     def _session_risk_snapshot(self) -> tuple[float, float, int]:
         today = datetime.now(timezone.utc).date()

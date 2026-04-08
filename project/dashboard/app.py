@@ -1585,7 +1585,7 @@ body.theme-light{background:
       <div class="metrics">
         <div class="met"><div class="ml">Portfolio value</div><div class="mv up" id="mpv">$100,000</div><div class="ms" id="mret">+0.00%</div></div>
         <div class="met"><div class="ml">Directional signals</div><div class="mv" style="color:var(--blue)" id="mns">0</div><div class="ms" id="msp">0 buy • 0 sell • 0 trade-ready</div></div>
-        <div class="met"><div class="ml">Win rate (paper)</div><div class="mv" id="mwr">-</div><div class="ms">rolling paper fills</div></div>
+        <div class="met"><div class="ml">Win rate (paper)</div><div class="mv" id="mwr">-</div><div class="ms" id="mwrsub">recent closed paper trades</div></div>
         <div class="met"><div class="ml">Stress grade</div><div class="mv" style="color:var(--amber)" id="msg">-</div><div class="ms" id="msgs">black swan score</div></div>
         <div class="met"><div class="ml">Meta ML</div><div class="mv" id="mmeta">-</div><div class="ms" id="mmetas">heuristic fallback</div></div>
         <div class="met"><div class="ml">Model learning</div><div class="mv" id="learnv">-</div><div class="ms" id="learns">feature store not ready</div></div>
@@ -2575,6 +2575,7 @@ function applyPortfolioSummary(d){
   const mret = document.getElementById('mret');
   const hp = document.getElementById('hp');
   const mwr = document.getElementById('mwr');
+  const mwrsub = document.getElementById('mwrsub');
   if(mpv){
     mpv.textContent = '$' + Math.round(val).toLocaleString();
     mpv.style.color = ret >= 0 ? 'var(--green)' : 'var(--red)';
@@ -2585,6 +2586,11 @@ function applyPortfolioSummary(d){
   }
   if(hp) hp.textContent = '$' + Math.round(val).toLocaleString();
   if(mwr) mwr.textContent = d.win_rate_pct != null ? Number(d.win_rate_pct).toFixed(1) + '%' : '-';
+  if(mwrsub){
+    const sample = Number(d.win_rate_sample_size ?? 0);
+    const label = d.win_rate_label || 'recent closed paper trades';
+    mwrsub.textContent = sample > 0 ? label : 'waiting for closed paper trades';
+  }
   if(!eq.length || eq[eq.length - 1] !== val){
     eq.push(val);
     if(eq.length > 200) eq.shift();
