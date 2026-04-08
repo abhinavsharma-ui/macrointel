@@ -459,6 +459,28 @@ def create_app(
             pass
         return str(value)
 
+    def _snapshot_mapping(value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            try:
+                return dict(value or {})
+            except Exception:
+                return {}
+        try:
+            return value.copy()
+        except Exception:
+            try:
+                return dict(value)
+            except Exception:
+                return {}
+
+    def _signal_store_snapshot() -> Dict[str, Dict[str, Any]]:
+        snapshot = _snapshot_mapping(_signal_store)
+        return {
+            str(symbol): dict(payload)
+            for symbol, payload in snapshot.items()
+            if isinstance(payload, dict)
+        }
+
     def _to_datetime(value: Any) -> Optional[datetime]:
         if isinstance(value, datetime):
             return value
@@ -778,12 +800,11 @@ def create_app(
         )
         return output
 
-    def _flatten_signal_store() -> List[Dict]:
+    def _flatten_signal_store(signal_snapshot: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict]:
         rows: List[Dict] = []
         seen_keys: set[str] = set()
-        for raw in _signal_store.values():
-            if not isinstance(raw, dict):
-                continue
+        snapshot = signal_snapshot if signal_snapshot is not None else _signal_store_snapshot()
+        for raw in snapshot.values():
             symbol = str(raw.get("symbol") or "")
             if not symbol:
                 continue
@@ -824,15 +845,16 @@ def create_app(
         return rows
 
     def _build_daily_report() -> Dict[str, Any]:
-        signal_rows = _flatten_signal_store()
+        signal_snapshot = _signal_store_snapshot()
+        signal_rows = _flatten_signal_store(signal_snapshot)
         trades_today = _today_trade_rows()
-        current_positions = getattr(paper_broker, "positions", {}) if paper_broker is not None else {}
+        current_positions = _snapshot_mapping(getattr(paper_broker, "positions", {})) if paper_broker is not None else {}
         lane_positions = defaultdict(int)
         for position_key, position in current_positions.items():
             if getattr(position, "quantity", 0) <= 0:
                 continue
             symbol = str(getattr(position, "symbol", position_key) or position_key)
-            signal = _signal_store.get(symbol, {}) if isinstance(_signal_store.get(symbol), dict) else {}
+            signal = signal_snapshot.get(symbol, {})
             lane_positions[_infer_lane(symbol, payload=signal, metadata={"position_key": position_key})] += 1
 
         signal_counts = defaultdict(int)
@@ -965,7 +987,7 @@ def create_app(
     @app.route("/api/signals")
     def get_signals():
         lane_filter = (request.args.get("lane") or "").strip().lower()
-        sigs = _flatten_signal_store()
+        sigs = _flatten_signal_store(_signal_store_snapshot())
         if lane_filter in {"normal", "day", "crypto"}:
             sigs = [s for s in sigs if str(s.get("lane", "")).lower() == lane_filter]
         sigs.sort(key=lambda s: (
@@ -987,7 +1009,7 @@ def create_app(
 
     @app.route("/api/signals/<symbol>")
     def get_signal(symbol):
-        sig = _signal_store.get(symbol.upper())
+        sig = _signal_store_snapshot().get(symbol.upper())
         if not sig:
             return jsonify({"error": f"No signal for {symbol}"}), 404
         return jsonify(_enrich_signal_row(dict(sig)))
@@ -1087,10 +1109,11 @@ def create_app(
 
     @app.route("/api/diagnostics")
     def get_diagnostics():
-        if not _signal_store:
+        snapshot = _signal_store_snapshot()
+        if not snapshot:
             return jsonify({"error": "No signals yet",
                             "hint": "Wait ~5 min for first inference cycle"})
-        sigs = list(_signal_store.values())
+        sigs = list(snapshot.values())
         directions = [s.get("signal", "neutral") for s in sigs]
         confidences = [s.get("confidence", 0) for s in sigs]
         regimes = [s.get("regime", "unknown") for s in sigs]
@@ -1266,11 +1289,12 @@ def create_app(
     def health():
         buf = price_buffer.stats if price_buffer else {}
         broker_summary = paper_broker.get_summary() if paper_broker is not None else {}
+        signal_snapshot = _signal_store_snapshot()
         return jsonify({
             "status":           "ok",
             "tick_count":       buf.get("total_ticks", 0),
             "active_symbols":   len(price_buffer.active_symbols()) if price_buffer else 0,
-            "signal_count":     len(_signal_store),
+            "signal_count":     len(signal_snapshot),
             "broker_connected": paper_broker is not None,
             "execution_mode":   broker_summary.get("execution_mode", "paper"),
             "shadow_router":    broker_summary.get("shadow_router", {}),
@@ -1293,8 +1317,9 @@ def create_app(
     def handle_connect():
         _client_count[0] += 1
         logger.debug(f"Client connected [{_client_count[0]}]")
-        if _signal_store:
-            emit("signals_update", {"signals": _limit_values(_flatten_signal_store(), _dashboard_signal_limit)})
+        signal_snapshot = _signal_store_snapshot()
+        if signal_snapshot:
+            emit("signals_update", {"signals": _limit_values(_flatten_signal_store(signal_snapshot), _dashboard_signal_limit)})
         if paper_broker:
             emit("portfolio_update", _reprice_paper_broker_summary(paper_broker.get_summary()))
         if _stress_results:
@@ -1313,7 +1338,7 @@ def create_app(
                 emit("price_update", {"symbol": sym, "price": tick.price,
                                       "market": tick.market,
                                       "timestamp": tick.timestamp.isoformat()})
-        sig = _signal_store.get(sym)
+        sig = _signal_store_snapshot().get(sym)
         if sig:
             emit("signal_detail", sig)
 
@@ -1352,15 +1377,16 @@ def create_app(
                         socketio.emit("prices_update", {"prices": prices})
 
                 # Signals
-                cur_ids = set(_signal_store.keys())
+                signal_snapshot = _signal_store_snapshot()
+                cur_ids = set(signal_snapshot.keys())
                 new_ids = cur_ids - _last_ids
                 for sid in new_ids:
-                    sig = _signal_store.get(sid)
+                    sig = signal_snapshot.get(sid)
                     if sig:
                         socketio.emit("new_signal", sig)
                 _last_ids.update(new_ids)
                 if cur_ids:
-                    limited_signals = _limit_values(_flatten_signal_store(), _dashboard_signal_limit)
+                    limited_signals = _limit_values(_flatten_signal_store(signal_snapshot), _dashboard_signal_limit)
                     fingerprint = "|".join(
                         f"{sig.get('signal_key', sig.get('symbol'))}:{sig.get('signal')}:{round(float(sig.get('confidence', 0.0)), 4)}:{round(float(sig.get('conviction_score', 0.0)), 2)}:{round(float(sig.get('rank_score', 0.0)), 4)}:{sig.get('lane')}:{sig.get('trade_eligible')}"
                         for sig in limited_signals
