@@ -1223,14 +1223,35 @@ class MacroIntelligenceSystem:
         execution_reference_price = self._get_latest_close(symbol)
         if execution_reference_price is not None:
             metadata["execution_reference_price"] = round(float(execution_reference_price), 8)
-        for field in ("best_bid", "best_ask", "spread_pct", "tick_age_seconds", "depth_age_seconds", "signal_age_seconds"):
-            value = intraday.get(field)
+        for field in (
+            "best_bid",
+            "best_ask",
+            "best_bid_qty",
+            "best_ask_qty",
+            "bid_depth_qty",
+            "ask_depth_qty",
+            "spread_pct",
+            "tick_age_seconds",
+            "depth_age_seconds",
+            "signal_age_seconds",
+            "book_pressure",
+            "book_imbalance",
+            "top_book_imbalance",
+            "order_flow_imbalance",
+            "spread_velocity",
+            "microprice_bias",
+            "flicker_filter_retention",
+        ):
+            value = intraday.get(field, payload.get(field))
             if value is None:
                 continue
             try:
                 metadata[field] = float(value)
             except Exception:
                 metadata[field] = value
+        execution_mode = payload.get("execution_mode")
+        if execution_mode:
+            metadata["execution_mode"] = str(execution_mode)
         return metadata
 
     @staticmethod
@@ -2292,6 +2313,10 @@ class MacroIntelligenceSystem:
             "book_pressure": round(book_pressure, 4),
             "spread_velocity": round(spread_velocity, 8),
             "microprice_bias": round(microprice_bias, 4),
+            "best_bid_qty": round(best_bid_qty, 6),
+            "best_ask_qty": round(best_ask_qty, 6),
+            "bid_depth_qty": round(bid_depth_qty, 6),
+            "ask_depth_qty": round(ask_depth_qty, 6),
             "depth_available": depth_available,
             "flicker_filter_retention": round(self._safe_number(depth_snapshot.get("flicker_filter_retention"), 1.0), 4),
             "session_vwap": round(session_vwap, 4),
@@ -2398,12 +2423,18 @@ class MacroIntelligenceSystem:
                 "setup": "depth_imbalance_breakout" if direction != "neutral" else "quote_balance_watch",
                 "book_pressure": round(book_imbalance, 4),
                 "book_imbalance": round(book_imbalance, 4),
+                "top_book_imbalance": round(book_imbalance, 4),
                 "trend_score": round(book_imbalance * 0.75, 4),
                 "volume_spike": 1.0,
                 "score": round(book_imbalance * 1.9, 4),
                 "news_boost": 0.0,
                 "order_flow_imbalance": round(book_imbalance * 0.85, 4),
                 "spread_velocity": round(self._safe_number(depth_snapshot.get("spread_velocity"), 0.0), 8),
+                "microprice_bias": 0.0,
+                "best_bid_qty": round(bid_qty, 6),
+                "best_ask_qty": round(ask_qty, 6),
+                "bid_depth_qty": round(bid_qty, 6),
+                "ask_depth_qty": round(ask_qty, 6),
                 "flicker_filter_retention": round(self._safe_number(depth_snapshot.get("flicker_filter_retention"), 1.0), 4),
                 "vwap_bias": 0.0,
                 "ret_5m": 0.0,
@@ -2542,6 +2573,10 @@ class MacroIntelligenceSystem:
                 "flicker_filter_retention": round(self._safe_number(depth_snapshot.get("flicker_filter_retention"), 1.0), 4),
                 "best_bid": round(best_bid, 8) if best_bid > 0 else None,
                 "best_ask": round(best_ask, 8) if best_ask > 0 else None,
+                "best_bid_qty": round(float(overlay.get("best_bid_qty", depth_snapshot.get("best_bid_qty", 0.0)) or 0.0), 6),
+                "best_ask_qty": round(float(overlay.get("best_ask_qty", depth_snapshot.get("best_ask_qty", 0.0)) or 0.0), 6),
+                "bid_depth_qty": round(float(overlay.get("bid_depth_qty", depth_snapshot.get("bid_depth_qty", 0.0)) or 0.0), 6),
+                "ask_depth_qty": round(float(overlay.get("ask_depth_qty", depth_snapshot.get("ask_depth_qty", 0.0)) or 0.0), 6),
                 "spread_pct": round((((best_ask - best_bid) / ((best_bid + best_ask) / 2.0)) * 100.0), 5)
                 if best_bid > 0 and best_ask > 0
                 else None,

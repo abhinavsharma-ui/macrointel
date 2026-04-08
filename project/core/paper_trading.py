@@ -184,25 +184,38 @@ class VirtualBroker:
             logger.warning(f"Order rejected: {order.symbol} â€” {reason}")
             return {"status": "rejected", "reason": reason}
 
-        # Simulate fill with slippage and imperfect liquidity.
+        # Simulate fill with live-quote slippage and imperfect liquidity.
         fill_price = float(fill_outcome["fill_price"])
         order.quantity = float(fill_outcome["filled_quantity"])
+        execution_market = str((order.metadata or {}).get("market") or self.market or "US")
+        execution_mode = str(fill_outcome.get("execution_mode") or self._execution_mode(order))
+        fee_pct_override = (order.metadata or {}).get("fee_pct_override")
+        if fee_pct_override is None and execution_market.upper() in {"CRYPTO", "BINANCE", "BINANCEUS", "CRYPTOUSD", "BYBIT"}:
+            fee_pct_override = (order.metadata or {}).get(
+                "maker_fee_pct" if execution_mode == "maker" else "taker_fee_pct"
+            )
         order.metadata = {
             **dict(order.metadata or {}),
             "requested_quantity": requested_quantity,
             "fill_ratio": float(fill_outcome.get("fill_ratio", 1.0) or 1.0),
             "simulated_latency_ms": float(fill_outcome.get("simulated_latency_ms", 0.0) or 0.0),
             "partial_fill": bool(fill_outcome.get("partial_fill", False)),
+            "execution_mode": execution_mode,
+            "execution_reference_price": float(fill_outcome.get("reference_price", current_price) or current_price),
+            "quoted_spread_bps": float(fill_outcome.get("quoted_spread_bps", 0.0) or 0.0),
+            "liquidity_ratio": float(fill_outcome.get("liquidity_ratio", 0.0) or 0.0),
+            "queue_pressure": float(fill_outcome.get("queue_pressure", 0.0) or 0.0),
+            "adverse_selection": float(fill_outcome.get("adverse_selection", 0.0) or 0.0),
         }
-        execution_market = str((order.metadata or {}).get("market") or self.market or "US")
         trade_value = abs(order.quantity) * fill_price
-        commission = self._cost_model.compute_cost(
+        commission = self._cost_model.compute_explicit_fee(
             trade_value=trade_value,
             market=execution_market,
             side=order.side.value,
             shares=abs(order.quantity),
-            order_size_usd=trade_value,
-        ) * trade_value
+            execution_mode=execution_mode,
+            fee_pct_override=fee_pct_override,
+        )
 
         # Execute the fill
         order.filled_price = fill_price
@@ -558,11 +571,113 @@ class VirtualBroker:
         market = str(metadata.get("market") or "").upper()
         return market in {"CRYPTO", "BINANCE", "BINANCEUS", "CRYPTOUSD"} or symbol.endswith(("USDT", "USDC", "BUSD"))
 
-    def _simulate_fill_outcome(self, order: Order, market_price: float) -> Dict:
+    def _execution_mode(self, order: Order) -> str:
         metadata = dict(order.metadata or {})
+        mode = str(metadata.get("execution_mode") or order.order_type or "taker").strip().lower()
+        if mode in {"market", "taker"}:
+            return "taker"
+        if mode in {"limit", "maker"}:
+            return "maker"
+        return "taker"
+
+    def _market_microstructure(self, order: Order, market_price: float) -> Dict[str, float]:
+        metadata = dict(order.metadata or {})
+        best_bid = self._safe_float(metadata.get("best_bid"), 0.0)
+        best_ask = self._safe_float(metadata.get("best_ask"), 0.0)
         spread_pct = max(0.0, self._safe_float(metadata.get("spread_pct"), 0.0))
+        if best_bid <= 0 or best_ask <= 0 or best_ask < best_bid:
+            half_spread = max(market_price * (spread_pct / 100.0) / 2.0, market_price * 0.00005)
+            best_bid = max(1e-9, market_price - half_spread)
+            best_ask = max(best_bid, market_price + half_spread)
+        mid_price = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else max(market_price, 1e-9)
+        quoted_spread = max(best_ask - best_bid, mid_price * max(spread_pct / 100.0, 1e-6))
+
+        best_bid_qty = max(0.0, self._safe_float(metadata.get("best_bid_qty"), 0.0))
+        best_ask_qty = max(0.0, self._safe_float(metadata.get("best_ask_qty"), 0.0))
+        bid_depth_qty = max(0.0, self._safe_float(metadata.get("bid_depth_qty"), best_bid_qty))
+        ask_depth_qty = max(0.0, self._safe_float(metadata.get("ask_depth_qty"), best_ask_qty))
         tick_age_seconds = max(0.0, self._safe_float(metadata.get("tick_age_seconds"), 0.0))
+        depth_age_seconds = max(0.0, self._safe_float(metadata.get("depth_age_seconds"), tick_age_seconds))
         signal_age_seconds = max(0.0, self._safe_float(metadata.get("signal_age_seconds"), 0.0))
+        book_pressure = self._safe_float(metadata.get("book_pressure"), 0.0)
+        book_imbalance = self._safe_float(metadata.get("book_imbalance"), book_pressure)
+        top_book_imbalance = self._safe_float(metadata.get("top_book_imbalance"), book_imbalance)
+        order_flow_imbalance = self._safe_float(metadata.get("order_flow_imbalance"), 0.0)
+        microprice_bias = self._safe_float(metadata.get("microprice_bias"), 0.0)
+        spread_velocity = self._safe_float(metadata.get("spread_velocity"), 0.0)
+        relative_volume = max(0.0, self._safe_float(metadata.get("relative_volume"), 1.0))
+        flicker_filter_retention = min(1.0, max(0.0, self._safe_float(metadata.get("flicker_filter_retention"), 1.0)))
+
+        direction = 1.0 if order.side == OrderSide.BUY else -1.0
+        requested_qty = abs(float(order.quantity))
+        side_top_qty = best_ask_qty if order.side == OrderSide.BUY else best_bid_qty
+        side_depth_qty = ask_depth_qty if order.side == OrderSide.BUY else bid_depth_qty
+        accessible_depth_qty = max(side_top_qty, side_depth_qty * 0.45, 1e-9)
+        liquidity_ratio = requested_qty / accessible_depth_qty if accessible_depth_qty > 0 else 0.0
+        top_level_ratio = requested_qty / max(side_top_qty, 1e-9) if side_top_qty > 0 else liquidity_ratio
+
+        age_penalty = 0.0
+        if self._max_tick_age_seconds > 0:
+            age_penalty += min(1.0, tick_age_seconds / max(self._max_tick_age_seconds, 1e-9)) * 0.45
+            age_penalty += min(1.0, depth_age_seconds / max(self._max_tick_age_seconds * 2.0, 1e-9)) * 0.20
+        if self._max_signal_age_seconds > 0:
+            age_penalty += min(1.0, signal_age_seconds / max(self._max_signal_age_seconds, 1e-9)) * 0.35
+
+        directional_pressure = max(0.0, direction * book_pressure)
+        directional_top = max(0.0, direction * top_book_imbalance)
+        directional_flow = max(0.0, direction * order_flow_imbalance)
+        directional_micro = max(0.0, direction * microprice_bias)
+        adverse_selection = min(
+            1.75,
+            (directional_pressure * 0.45)
+            + (directional_top * 0.20)
+            + (directional_flow * 0.15)
+            + (directional_micro * 0.10)
+            + (max(0.0, spread_velocity) * 18.0),
+        )
+        queue_pressure = min(
+            2.5,
+            max(0.0, top_level_ratio - 0.65) * 0.55
+            + max(0.0, liquidity_ratio - 0.85) * 0.45
+            + (1.0 - flicker_filter_retention) * 0.35
+            + max(0.0, 1.0 - min(relative_volume, 1.0)) * 0.15
+            + adverse_selection * 0.10,
+        )
+        return {
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "mid_price": mid_price,
+            "quoted_spread": quoted_spread,
+            "quoted_spread_bps": ((quoted_spread / max(mid_price, 1e-9)) * 10_000.0) if mid_price > 0 else 0.0,
+            "spread_pct": spread_pct,
+            "best_bid_qty": best_bid_qty,
+            "best_ask_qty": best_ask_qty,
+            "bid_depth_qty": bid_depth_qty,
+            "ask_depth_qty": ask_depth_qty,
+            "tick_age_seconds": tick_age_seconds,
+            "depth_age_seconds": depth_age_seconds,
+            "signal_age_seconds": signal_age_seconds,
+            "book_pressure": book_pressure,
+            "book_imbalance": book_imbalance,
+            "top_book_imbalance": top_book_imbalance,
+            "order_flow_imbalance": order_flow_imbalance,
+            "microprice_bias": microprice_bias,
+            "spread_velocity": spread_velocity,
+            "relative_volume": relative_volume,
+            "flicker_filter_retention": flicker_filter_retention,
+            "liquidity_ratio": liquidity_ratio,
+            "top_level_ratio": top_level_ratio,
+            "age_penalty": age_penalty,
+            "adverse_selection": adverse_selection,
+            "queue_pressure": queue_pressure,
+            "execution_mode": self._execution_mode(order),
+        }
+
+    def _simulate_fill_outcome(self, order: Order, market_price: float) -> Dict:
+        market_state = self._market_microstructure(order, market_price)
+        spread_pct = max(0.0, float(market_state.get("spread_pct", 0.0) or 0.0))
+        tick_age_seconds = max(0.0, float(market_state.get("tick_age_seconds", 0.0) or 0.0))
+        signal_age_seconds = max(0.0, float(market_state.get("signal_age_seconds", 0.0) or 0.0))
         trade_value = abs(order.quantity) * max(market_price, 1e-9)
         position_value_cap = max(self.portfolio_value * self.max_position_pct, 1.0)
         size_pressure = min(1.0, trade_value / position_value_cap)
@@ -576,27 +691,56 @@ class VirtualBroker:
                 return {"rejected": True, "reason": f"stale signal ({signal_age_seconds:.1f}s old)"}
 
             rejection_probability = self._base_rejection_probability
-            rejection_probability += min(0.18, size_pressure * 0.18)
+            rejection_probability += min(0.20, size_pressure * 0.12)
             if self._max_spread_pct > 0:
-                rejection_probability += min(0.18, (spread_pct / max(self._max_spread_pct, 1e-9)) * 0.10)
+                rejection_probability += min(0.18, (spread_pct / max(self._max_spread_pct, 1e-9)) * 0.06)
             if self._max_tick_age_seconds > 0:
-                rejection_probability += min(0.16, (tick_age_seconds / max(self._max_tick_age_seconds, 1e-9)) * 0.08)
+                rejection_probability += min(0.16, (tick_age_seconds / max(self._max_tick_age_seconds, 1e-9)) * 0.05)
+            rejection_probability += min(0.20, float(market_state.get("liquidity_ratio", 0.0) or 0.0) * 0.12)
+            rejection_probability += min(0.18, float(market_state.get("queue_pressure", 0.0) or 0.0) * 0.14)
+            rejection_probability += min(0.16, float(market_state.get("adverse_selection", 0.0) or 0.0) * 0.12)
+            rejection_probability += min(0.12, float(market_state.get("age_penalty", 0.0) or 0.0) * 0.15)
+            rejection_probability += min(
+                0.12,
+                max(0.0, 1.0 - float(market_state.get("flicker_filter_retention", 1.0) or 1.0)) * 0.20,
+            )
+            if market_state.get("execution_mode") == "maker":
+                rejection_probability += min(0.10, float(market_state.get("queue_pressure", 0.0) or 0.0) * 0.08)
             if self._order_noise(order, "reject") < rejection_probability:
                 return {"rejected": True, "reason": "liquidity miss / queue loss"}
 
         latency_ms = self._simulated_latency_ms + (self._order_noise(order, "latency") * self._simulated_latency_jitter_ms)
-        fill_price = self._simulate_fill_price(order, market_price, latency_ms=latency_ms)
+        fill_price = self._simulate_fill_price(order, market_price, latency_ms=latency_ms, market_state=market_state)
         fill_ratio = 1.0
 
         eligible_for_partial = self._partial_fill_enabled and (
             not self._partial_fill_entry_only or order.side == OrderSide.BUY
         )
         if eligible_for_partial:
-            partial_probability = min(0.80, 0.08 + (size_pressure * 0.55) + min(0.20, spread_pct * 0.20))
+            partial_probability = min(
+                0.95,
+                0.05
+                + (size_pressure * 0.18)
+                + min(0.30, float(market_state.get("liquidity_ratio", 0.0) or 0.0) * 0.45)
+                + min(0.22, float(market_state.get("queue_pressure", 0.0) or 0.0) * 0.18)
+                + min(0.18, float(market_state.get("adverse_selection", 0.0) or 0.0) * 0.14)
+                + min(0.08, float(market_state.get("age_penalty", 0.0) or 0.0) * 0.08),
+            )
+            if market_state.get("execution_mode") == "maker":
+                partial_probability = min(0.98, partial_probability + 0.12)
             if self._order_noise(order, "partial_trigger") < partial_probability:
                 ratio_draw = self._order_noise(order, "partial_ratio")
-                pressure_penalty = min(0.55, size_pressure * 0.45 + min(0.15, spread_pct * 0.08))
-                fill_ratio = max(self._partial_fill_min_ratio, 1.0 - pressure_penalty - (ratio_draw * 0.25))
+                pressure_penalty = min(
+                    0.90,
+                    size_pressure * 0.10
+                    + min(0.35, float(market_state.get("liquidity_ratio", 0.0) or 0.0) * 0.40)
+                    + min(0.30, float(market_state.get("queue_pressure", 0.0) or 0.0) * 0.25)
+                    + min(0.20, float(market_state.get("adverse_selection", 0.0) or 0.0) * 0.15)
+                    + min(0.10, float(market_state.get("age_penalty", 0.0) or 0.0) * 0.10),
+                )
+                if market_state.get("execution_mode") == "maker":
+                    pressure_penalty += 0.05
+                fill_ratio = max(self._partial_fill_min_ratio, 1.0 - pressure_penalty - (ratio_draw * 0.15))
 
         requested_quantity = abs(float(order.quantity))
         filled_quantity = requested_quantity * fill_ratio
@@ -613,32 +757,72 @@ class VirtualBroker:
             "fill_ratio": fill_ratio,
             "partial_fill": filled_quantity < requested_quantity,
             "simulated_latency_ms": latency_ms,
+            "execution_mode": str(market_state.get("execution_mode") or "taker"),
+            "reference_price": float(market_state.get("mid_price", market_price) or market_price),
+            "quoted_spread_bps": float(market_state.get("quoted_spread_bps", 0.0) or 0.0),
+            "liquidity_ratio": float(market_state.get("liquidity_ratio", 0.0) or 0.0),
+            "queue_pressure": float(market_state.get("queue_pressure", 0.0) or 0.0),
+            "adverse_selection": float(market_state.get("adverse_selection", 0.0) or 0.0),
         }
 
-    def _simulate_fill_price(self, order: Order, market_price: float, *, latency_ms: float = 0.0) -> float:
+    def _simulate_fill_price(
+        self,
+        order: Order,
+        market_price: float,
+        *,
+        latency_ms: float = 0.0,
+        market_state: Optional[Dict[str, float]] = None,
+    ) -> float:
         """Simulate realistic fill with slippage."""
         from core.backtesting import TransactionCostModel
         model = TransactionCostModel()
-        metadata = dict(order.metadata or {})
-        best_bid = self._safe_float(metadata.get("best_bid"), 0.0)
-        best_ask = self._safe_float(metadata.get("best_ask"), 0.0)
-        spread_pct = max(0.0, self._safe_float(metadata.get("spread_pct"), 0.0))
+        market_state = dict(market_state or self._market_microstructure(order, market_price))
+        best_bid = self._safe_float(market_state.get("best_bid"), 0.0)
+        best_ask = self._safe_float(market_state.get("best_ask"), 0.0)
+        mid_price = max(self._safe_float(market_state.get("mid_price"), market_price), 1e-9)
+        quoted_spread = max(self._safe_float(market_state.get("quoted_spread"), 0.0), mid_price * 1e-6)
+        spread_pct = max(0.0, self._safe_float(market_state.get("spread_pct"), 0.0))
         trade_value = abs(order.quantity) * max(market_price, 1e-9)
         size_impact = min(1.8, (abs(order.quantity) / 2500.0) + (trade_value / 150_000.0))
+        liquidity_ratio = max(0.0, self._safe_float(market_state.get("liquidity_ratio"), 0.0))
+        queue_pressure = max(0.0, self._safe_float(market_state.get("queue_pressure"), 0.0))
+        adverse_selection = max(0.0, self._safe_float(market_state.get("adverse_selection"), 0.0))
+        spread_velocity = self._safe_float(market_state.get("spread_velocity"), 0.0)
+        execution_mode = str(market_state.get("execution_mode") or "taker")
 
-        if best_bid > 0 and best_ask > 0 and best_ask >= best_bid:
-            spread = max(best_ask - best_bid, market_price * model.base_slippage_pct)
-            impact = max(spread * 0.35, market_price * model.base_slippage_pct) * (1.0 + size_impact)
+        spread = max(quoted_spread, market_price * max(model.base_slippage_pct, spread_pct / 100.0 * 0.20))
+        latency_factor = min(4.0, latency_ms / 150.0) if latency_ms > 0 else 0.0
+        if execution_mode == "maker":
+            inside_offset = spread * (0.12 + min(0.22, queue_pressure * 0.10))
+            passive_price = (best_bid + inside_offset) if order.side == OrderSide.BUY else max(1e-9, best_ask - inside_offset)
+            maker_drift = spread * (
+                0.04
+                + min(0.10, adverse_selection * 0.04)
+                + min(0.06, max(0.0, spread_velocity) * 4.0)
+            )
+            fill_price = passive_price + maker_drift if order.side == OrderSide.BUY else max(1e-9, passive_price - maker_drift)
+        elif best_bid > 0 and best_ask > 0 and best_ask >= best_bid:
+            walk_component = spread * (
+                0.55
+                + min(0.45, liquidity_ratio * 0.30)
+                + min(0.25, queue_pressure * 0.20)
+                + min(0.22, adverse_selection * 0.14)
+            )
+            impact = max(spread * 0.35, market_price * model.base_slippage_pct) * (1.0 + size_impact) + walk_component
             fill_price = (best_ask + impact) if order.side == OrderSide.BUY else max(1e-9, best_bid - impact)
         else:
             impact = max(
                 market_price * model.base_slippage_pct,
                 market_price * (spread_pct / 100.0) * 0.20,
-            ) * (1.0 + size_impact)
+            ) * (1.0 + size_impact + liquidity_ratio * 0.20 + adverse_selection * 0.10)
             fill_price = (market_price + impact) if order.side == OrderSide.BUY else max(1e-9, market_price - impact)
 
         if latency_ms > 0:
-            latency_impact = market_price * model.base_slippage_pct * min(3.0, latency_ms / 150.0)
+            latency_impact = market_price * model.base_slippage_pct * (
+                latency_factor
+                + min(0.50, max(0.0, spread_velocity) * 6.0)
+                + min(0.35, adverse_selection * 0.18)
+            )
             fill_price = (fill_price + latency_impact) if order.side == OrderSide.BUY else max(1e-9, fill_price - latency_impact)
 
         if order.limit_price is not None and order.order_type == "limit":

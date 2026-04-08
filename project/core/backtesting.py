@@ -61,9 +61,12 @@ class TransactionCostModel:
     # US (NYSE/NASDAQ)
     us_sec_fee_per_dollar: float = 0.0000229
     us_brokerage_per_share: float = 0.0  # Commission-free brokers
+    us_taf_fee_per_share: float = 0.000166
+    us_taf_fee_cap: float = 8.30
     us_spread_pct: float = 0.0002        # 0.02% half-spread (2 cents on $100)
 
     # Crypto (Binance-style taker assumptions)
+    crypto_maker_fee_pct: float = 0.0010
     crypto_taker_fee_pct: float = 0.0010
     crypto_spread_pct: float = 0.0004
     crypto_base_slippage_pct: float = 0.0006
@@ -119,6 +122,35 @@ class TransactionCostModel:
         slippage = (self.crypto_base_slippage_pct + self.size_impact_factor * order_size_usd / 1_000_000) * trade_value
         total = fee + spread + slippage
         return total / trade_value
+
+    def compute_explicit_fee(
+        self,
+        trade_value: float,
+        market: str = "US",
+        side: str = "buy",
+        shares: float = 100,
+        execution_mode: str = "taker",
+        fee_pct_override: Optional[float] = None,
+    ) -> float:
+        market_key = str(market or "US").upper()
+        side_key = str(side or "buy").lower()
+        if trade_value <= 0:
+            return 0.0
+        if market_key in ("IN", "NSE", "BSE", "INDIA"):
+            return self._india_cost(trade_value, side_key) * trade_value
+        if market_key in ("CRYPTO", "BINANCE", "BINANCEUS", "CRYPTOUSD", "BYBIT"):
+            fee_pct = fee_pct_override
+            if fee_pct is None:
+                mode = str(execution_mode or "taker").lower()
+                fee_pct = self.crypto_maker_fee_pct if mode == "maker" else self.crypto_taker_fee_pct
+            return trade_value * max(0.0, float(fee_pct))
+        sec_fee = 0.0
+        taf_fee = 0.0
+        if side_key == "sell":
+            sec_fee = max(0.0, self.us_sec_fee_per_dollar) * trade_value
+            taf_fee = min(max(0.0, self.us_taf_fee_cap), max(0.0, self.us_taf_fee_per_share) * max(float(shares), 0.0))
+        brokerage = max(0.0, self.us_brokerage_per_share) * max(float(shares), 0.0)
+        return sec_fee + taf_fee + brokerage
 
 
 # ─────────────────────────────────────────────────────────────
