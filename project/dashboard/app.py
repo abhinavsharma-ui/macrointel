@@ -2492,7 +2492,7 @@ function renderLaneOverview(){
     const accent = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--text)';
     return `<div class="laneCard clickable${active ? ' active' : ''}" onclick="openLaneView('${lane}')">
       <div class="lanel">${LANE_LABELS[lane]}</div>
-      <div class="lanev" style="color:${actionable.length ? 'var(--blue)' : accent}">${actionable.length}</div>
+      <div class="lanev" style="color:${laneSignals.length ? 'var(--blue)' : accent}">${laneSignals.length}</div>
       <div class="laneSub">${actionable.length} trade-ready • ${laneSignals.length} total signals<br>${buys} buy • ${sells} sell • ${watch} watch</div>
       <div class="laneStatRow">
         <span class="lanePill">${status}</span>
@@ -2501,7 +2501,8 @@ function renderLaneOverview(){
     </div>`;
   });
   const totalActionable = Object.values(signals).filter(isTradeReady).length;
-  pill.textContent = `${totalActionable} trade-ready across 3 domains`;
+  const totalSignals = Object.values(signals).length;
+  pill.textContent = `${totalSignals} live signals • ${totalActionable} trade-ready across 3 domains`;
   grid.innerHTML = cards.join('');
 }
 
@@ -2825,16 +2826,16 @@ function renderSidebar(){
       renderSection(`Watchlist (${broaderWatch.length})`, broaderWatch, `No ${LANE_LABELS[laneFilter]} watchlist signals yet`),
     ].filter(Boolean).join('');
     if(metaEl) metaEl.textContent = `${arr.length} ${LANE_LABELS[laneFilter].toLowerCase()} signals - ${actionable.length} trade-ready`;
-  }else{
-    el.innerHTML = [
-      renderSection(`Normal Trading (${laneMap.normal.length})`, laneMap.normal, 'No normal-trading signals yet'),
-      renderSection(`Day Trading (${laneMap.day.length})`, laneMap.day, 'No day-trading signals yet'),
-      renderSection(`Crypto Scalper (${laneMap.crypto.length})`, laneMap.crypto, 'No crypto scalper signals yet'),
-    ].filter(Boolean).join('');
-    if(metaEl) metaEl.textContent = `${arr.length} total lane signals - ${actionable.length} trade-ready - ${broaderWatch.length} on watch`;
+    }else{
+      el.innerHTML = [
+        renderSection(`Normal Trading (${laneMap.normal.length})`, laneMap.normal, 'No normal-trading signals yet'),
+        renderSection(`Day Trading (${laneMap.day.length})`, laneMap.day, 'No day-trading signals yet'),
+        renderSection(`Crypto Scalper (${laneMap.crypto.length})`, laneMap.crypto, 'No crypto scalper signals yet'),
+      ].filter(Boolean).join('');
+      if(metaEl) metaEl.textContent = `${arr.length} total lane signals - ${actionable.length} trade-ready - ${broaderWatch.length} on watch`;
+    }
+    if(countEl) countEl.textContent = String(filtered.length);
   }
-  if(countEl) countEl.textContent = String(actionable.length);
-}
 
 function updateMetrics(){
   const arr = Object.values(signals);
@@ -2846,10 +2847,10 @@ function updateMetrics(){
   const mns = document.getElementById('mns');
   const msp = document.getElementById('msp');
   const warming = !arr.length && Number(healthSnapshot.active_symbols || 0) > 0;
-  if(mns) mns.textContent = warming ? 'WARMING' : String(actionable.length);
+  if(mns) mns.textContent = warming ? 'WARMING' : String(filtered.length);
   if(msp) msp.textContent = warming
     ? `signal engine warming up from ${Number(healthSnapshot.active_symbols || 0)} live symbols`
-    : `${buys} live buy - ${sells} live sell - ${watch} watch${activeLane !== 'all' && activeLane !== 'reports' ? ` - ${LANE_LABELS[activeLane]}` : ''}`;
+    : `${actionable.length} trade-ready - ${buys} live buy - ${sells} live sell - ${watch} watch${activeLane !== 'all' && activeLane !== 'reports' ? ` - ${LANE_LABELS[activeLane]}` : ''}`;
 }
 
 function selectSig(sym){
