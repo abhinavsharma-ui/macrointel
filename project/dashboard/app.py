@@ -409,6 +409,10 @@ def create_app(
     _meta_model_status = meta_model_status if meta_model_status is not None else {}
     _learning_status = learning_status if learning_status is not None else {}
     _client_count   = [0]
+    _dual_lane_variants_enabled = os.getenv(
+        "DASHBOARD_DUAL_LANE_VARIANTS_ENABLED",
+        os.getenv("DUAL_LANE_VARIANTS_ENABLED", "0"),
+    ).strip().lower() in {"1", "true", "yes", "on"}
     live_broker = UpstoxPortfolioClient(os.environ.get("UPSTOX_ACCESS_TOKEN", ""))
     manual_broker = ManualPortfolioClient(_live_portfolio_path, _live_portfolio_csv_path)
 
@@ -745,6 +749,7 @@ def create_app(
 
     def _flatten_signal_store() -> List[Dict]:
         rows: List[Dict] = []
+        seen_keys: set[str] = set()
         for raw in _signal_store.values():
             if not isinstance(raw, dict):
                 continue
@@ -752,7 +757,12 @@ def create_app(
             if not symbol:
                 continue
             actual = _enrich_signal_row(dict(raw))
-            rows.append(actual)
+            actual_key = str(actual.get("signal_key") or f"{symbol}::{actual.get('lane', 'normal')}")
+            if actual_key not in seen_keys:
+                rows.append(actual)
+                seen_keys.add(actual_key)
+            if not _dual_lane_variants_enabled:
+                continue
             normal_lane = raw.get("normal_lane_signal")
             if isinstance(normal_lane, dict):
                 variant = _enrich_signal_row(dict(normal_lane))
@@ -761,7 +771,10 @@ def create_app(
                 variant["lane_label"] = _lane_label("normal")
                 variant["signal_key"] = variant.get("signal_key") or f"{symbol}::normal"
                 variant["scenario"] = variant.get("lane_label")
-                rows.append(variant)
+                variant_key = str(variant.get("signal_key"))
+                if variant_key not in seen_keys:
+                    rows.append(variant)
+                    seen_keys.add(variant_key)
         return rows
 
     def _today_trade_rows() -> List[Dict]:
@@ -1828,6 +1841,7 @@ const io_sock = SOCKET_AVAILABLE ? io({transports:['websocket','polling']}) : { 
 const MARKET_BOARD_LIMIT = 36;
 const LEADER_SYMBOLS = ['AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','AMD','NFLX','QCOM','AVGO','JPM','WMT','XOM','SPY','QQQ','DIA','IWM','RELIANCE.NS','TCS.NS','INFY.NS'];
 const TV_AMEX_SYMBOLS = new Set(['SPY','DIA','IWM','GLD','SLV','TLT','HYG','VTI','XLF','XLE','XLK','XLY','XLI','XLV','XLP','XLB','XLU']);
+const TV_NASDAQ_SYMBOLS = new Set(['AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','AMD','NFLX','QCOM','AVGO','INTC','ORCL','ADBE','CSCO','PEP','COST','TMUS','TXN','AMAT','ADP','ISRG','BKNG','LRCX','MELI','MU','PANW','SNPS','CDNS','KLAC','ASML','SHOP','CRWD','DDOG','MDB','TEAM','ZS']);
 const TV_NYSE_SYMBOLS = new Set(['JPM','BAC','WMT','DIS','KO','JNJ','XOM','CVX','UNH','HD','MCD','NKE','BA','CAT','GS','V','MA','PG','IBM','GE','F','GM','T','VZ','PFE','MRK','ABBV','CRM','ORCL','UBER','SNOW']);
 const TV_INDEX_SYMBOLS = {
   '^VIX': 'TVC:VIX',
@@ -1855,6 +1869,8 @@ const LANE_LABELS = {
 const SIGNAL_LANES = ['normal', 'day', 'crypto'];
 let signals = {}, sel = null, eq = [100000], chart = null, sd = 'conviction', activeLane = 'all', activePage = 'overview', reportData = null, eventIntel = null, livePrices = {};
 let healthSnapshot = {};
+let metaStatusFailures = 0;
+let learningStatusFailures = 0;
 const SYMBOL_CHART_WINDOWS = { '5m': 300, '30m': 1800, '2h': 7200, '1d': 86400 };
 let tvState = { symbol: '', window: '30m', fetchedAt: 0 };
 let chartSelection = { symbol: '', signalKey: '', lane: 'normal', market: '', source: 'auto', laneLabel: '' };
@@ -2088,6 +2104,7 @@ function tradingViewSymbol(symbol, marketHint=''){
   if(market.includes('NYSE')) return `NYSE:${clean}`;
   if(market.includes('AMEX') || market.includes('ARCA') || TV_AMEX_SYMBOLS.has(clean)) return `AMEX:${clean}`;
   if(market.includes('NASDAQ')) return `NASDAQ:${clean}`;
+  if(TV_NASDAQ_SYMBOLS.has(clean)) return `NASDAQ:${clean}`;
   if(TV_NYSE_SYMBOLS.has(clean)) return `NYSE:${clean}`;
   if(TV_AMEX_SYMBOLS.has(clean)) return `AMEX:${clean}`;
   return clean;
@@ -3244,6 +3261,7 @@ function refreshMetaModel(){
   const sub = document.getElementById('mmetas');
   if(!label || !sub) return;
   fetch('/api/meta-model').then(r => r.json()).then(d => {
+    metaStatusFailures = 0;
     if(d.note){
       label.textContent = '-';
       label.style.color = 'var(--muted)';
@@ -3258,6 +3276,15 @@ function refreshMetaModel(){
     const prec = d.mean_precision != null ? `${Number(d.mean_precision).toFixed(2)} precision` : 'precision -';
     sub.textContent = `${active ? 'trained meta' : 'heuristic fallback'} - ${edge} - ${hit} - ${prec}`;
   }).catch(() => {
+    metaStatusFailures += 1;
+    if(metaStatusFailures < 4){
+      if(sub.textContent && !sub.textContent.includes('reconnecting')){
+        sub.textContent = `${sub.textContent} • reconnecting`;
+      }else if(!sub.textContent){
+        sub.textContent = 'meta reconnecting';
+      }
+      return;
+    }
     label.textContent = '-';
     label.style.color = 'var(--muted)';
     sub.textContent = 'meta status unavailable';
@@ -3269,6 +3296,7 @@ function refreshLearningStatus(){
   const sub = document.getElementById('learns');
   if(!label || !sub) return;
   fetch('/api/learning-status').then(r => r.json()).then(d => {
+    learningStatusFailures = 0;
     if(d.note){
       label.textContent = '-';
       label.style.color = 'var(--muted)';
@@ -3283,6 +3311,15 @@ function refreshLearningStatus(){
     const metaEdge = d.meta_edge_pct != null ? `${Number(d.meta_edge_pct).toFixed(2)}% edge` : 'edge -';
     sub.textContent = `${files} - ${metaEdge} - refresh ${Math.round((d.learning_refresh_seconds || 0) / 3600)}h`;
   }).catch(() => {
+    learningStatusFailures += 1;
+    if(learningStatusFailures < 4){
+      if(sub.textContent && !sub.textContent.includes('reconnecting')){
+        sub.textContent = `${sub.textContent} • reconnecting`;
+      }else if(!sub.textContent){
+        sub.textContent = 'learning reconnecting';
+      }
+      return;
+    }
     label.textContent = '-';
     label.style.color = 'var(--muted)';
     sub.textContent = 'learning status unavailable';

@@ -85,6 +85,25 @@ class MacroIntelligenceSystem:
             if symbol.strip()
         ]
         self._crypto_signal_stale_seconds = max(15, int(os.getenv("CRYPTO_SIGNAL_STALE_SECONDS", "45")))
+        self._crypto_signal_hold_grace_seconds = max(
+            30,
+            int(os.getenv("CRYPTO_SIGNAL_HOLD_GRACE_SECONDS", "420")),
+        )
+        self._crypto_signal_stale_retention_seconds = max(
+            self._crypto_signal_hold_grace_seconds,
+            int(
+                os.getenv(
+                    "CRYPTO_SIGNAL_STALE_RETENTION_SECONDS",
+                    str(self._crypto_signal_hold_grace_seconds * 3),
+                )
+            ),
+        )
+        self._allow_dual_lane_variants = os.getenv("DUAL_LANE_VARIANTS_ENABLED", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         self._live_feature_overlay_enabled = os.getenv("LIVE_FEATURE_OVERLAY_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
         self._live_signal_max_tick_age_seconds = max(5, int(os.getenv("LIVE_SIGNAL_MAX_TICK_AGE_SECONDS", "120")))
         self._crypto_min_notional_usd = max(5.0, float(os.getenv("CRYPTO_MIN_NOTIONAL_USD", "75")))
@@ -444,6 +463,7 @@ class MacroIntelligenceSystem:
             },
         }
         self._last_feature_signature: Dict[str, str] = {}
+        self._crypto_last_signal_ts: Dict[str, float] = {}
         self._position_plans: Dict[str, Dict] = {}
         self._last_trade_timestamps: Dict[str, float] = {}
         self._last_execution_backtest_ts = 0.0
@@ -536,15 +556,15 @@ class MacroIntelligenceSystem:
 
         self._auto_trade_min_conviction = min(
             self._auto_trade_min_conviction,
-            max(0.0, float(os.getenv("EVENT_WINDOW_MIN_CONVICTION", "2.2"))),
+            max(0.0, float(os.getenv("EVENT_WINDOW_MIN_CONVICTION", "1.8"))),
         )
         self._auto_trade_top_k = max(
             self._auto_trade_top_k,
-            max(24, int(os.getenv("EVENT_WINDOW_TOP_K", "96"))),
+            max(24, int(os.getenv("EVENT_WINDOW_TOP_K", "128"))),
         )
         self._auto_trade_max_new_per_cycle = max(
             self._auto_trade_max_new_per_cycle,
-            max(6, int(os.getenv("EVENT_WINDOW_MAX_NEW_PER_CYCLE", "24"))),
+            max(6, int(os.getenv("EVENT_WINDOW_MAX_NEW_PER_CYCLE", "32"))),
         )
         self._auto_trade_max_open_positions = max(
             self._auto_trade_max_open_positions,
@@ -560,28 +580,33 @@ class MacroIntelligenceSystem:
         )
         self._auto_trade_leader_min_conviction = min(
             self._auto_trade_leader_min_conviction,
-            max(0.0, float(os.getenv("EVENT_WINDOW_LEADER_MIN_CONVICTION", "2.0"))),
+            max(0.0, float(os.getenv("EVENT_WINDOW_LEADER_MIN_CONVICTION", "1.6"))),
         )
         self._auto_trade_leader_min_take_probability = min(
             self._auto_trade_leader_min_take_probability,
-            min(0.99, max(0.0, float(os.getenv("EVENT_WINDOW_LEADER_MIN_TAKE_PROBABILITY", "0.30")))),
+            min(0.99, max(0.0, float(os.getenv("EVENT_WINDOW_LEADER_MIN_TAKE_PROBABILITY", "0.24")))),
         )
         self._auto_trade_leader_min_rank_score = min(
             self._auto_trade_leader_min_rank_score,
-            max(0.0, float(os.getenv("EVENT_WINDOW_LEADER_MIN_RANK_SCORE", "0.40"))),
+            max(0.0, float(os.getenv("EVENT_WINDOW_LEADER_MIN_RANK_SCORE", "0.32"))),
         )
         self._auto_trade_zero_weight_min_take_probability = min(
             self._auto_trade_zero_weight_min_take_probability,
-            min(0.99, max(0.0, float(os.getenv("EVENT_WINDOW_ZERO_WEIGHT_MIN_TAKE_PROBABILITY", "0.32")))),
+            min(0.99, max(0.0, float(os.getenv("EVENT_WINDOW_ZERO_WEIGHT_MIN_TAKE_PROBABILITY", "0.24")))),
         )
         self._auto_trade_zero_weight_min_rank_score = min(
             self._auto_trade_zero_weight_min_rank_score,
-            max(0.0, float(os.getenv("EVENT_WINDOW_ZERO_WEIGHT_MIN_RANK_SCORE", "0.40"))),
+            max(0.0, float(os.getenv("EVENT_WINDOW_ZERO_WEIGHT_MIN_RANK_SCORE", "0.32"))),
         )
         self._auto_trade_replace_margin = min(
             self._auto_trade_replace_margin,
-            max(0.02, float(os.getenv("EVENT_WINDOW_REPLACE_MARGIN", "0.05"))),
+            max(0.01, float(os.getenv("EVENT_WINDOW_REPLACE_MARGIN", "0.03"))),
         )
+        dual_lane_raw = os.getenv("EVENT_WINDOW_DUAL_LANE_VARIANTS_ENABLED")
+        if dual_lane_raw is None:
+            self._allow_dual_lane_variants = False
+        else:
+            self._allow_dual_lane_variants = dual_lane_raw.strip().lower() in {"1", "true", "yes", "on"}
 
         self._lane_base_allocations.update(
             {
@@ -592,32 +617,71 @@ class MacroIntelligenceSystem:
         )
 
         normal_cfg = self._lane_engine_config["normal"]
-        normal_cfg["top_k"] = max(normal_cfg["top_k"], int(os.getenv("EVENT_WINDOW_NORMAL_TOP_K", "72")))
-        normal_cfg["max_new_per_cycle"] = max(normal_cfg["max_new_per_cycle"], int(os.getenv("EVENT_WINDOW_NORMAL_MAX_NEW", "14")))
-        normal_cfg["max_open_positions"] = max(normal_cfg["max_open_positions"], int(os.getenv("EVENT_WINDOW_NORMAL_MAX_OPEN", "30")))
-        normal_cfg["min_conviction"] = min(normal_cfg["min_conviction"], float(os.getenv("EVENT_WINDOW_NORMAL_MIN_CONVICTION", "2.7")))
-        normal_cfg["min_take_probability"] = min(normal_cfg["min_take_probability"], float(os.getenv("EVENT_WINDOW_NORMAL_MIN_TAKE_PROBABILITY", "0.33")))
+        normal_cfg["top_k"] = max(normal_cfg["top_k"], int(os.getenv("EVENT_WINDOW_NORMAL_TOP_K", "96")))
+        normal_cfg["max_new_per_cycle"] = max(normal_cfg["max_new_per_cycle"], int(os.getenv("EVENT_WINDOW_NORMAL_MAX_NEW", "20")))
+        normal_cfg["max_open_positions"] = max(normal_cfg["max_open_positions"], int(os.getenv("EVENT_WINDOW_NORMAL_MAX_OPEN", "36")))
+        normal_cfg["min_conviction"] = min(normal_cfg["min_conviction"], float(os.getenv("EVENT_WINDOW_NORMAL_MIN_CONVICTION", "2.3")))
+        normal_cfg["min_take_probability"] = min(normal_cfg["min_take_probability"], float(os.getenv("EVENT_WINDOW_NORMAL_MIN_TAKE_PROBABILITY", "0.30")))
 
         day_cfg = self._lane_engine_config["day"]
-        day_cfg["top_k"] = max(day_cfg["top_k"], int(os.getenv("EVENT_WINDOW_DAY_TOP_K", "96")))
-        day_cfg["max_new_per_cycle"] = max(day_cfg["max_new_per_cycle"], int(os.getenv("EVENT_WINDOW_DAY_MAX_NEW", "24")))
-        day_cfg["max_open_positions"] = max(day_cfg["max_open_positions"], int(os.getenv("EVENT_WINDOW_DAY_MAX_OPEN", "42")))
-        day_cfg["cooldown_seconds"] = min(day_cfg["cooldown_seconds"], int(os.getenv("EVENT_WINDOW_DAY_COOLDOWN_SECONDS", "15")))
-        day_cfg["min_hold_seconds"] = min(day_cfg["min_hold_seconds"], int(os.getenv("EVENT_WINDOW_DAY_MIN_HOLD_SECONDS", "120")))
-        day_cfg["min_conviction"] = min(day_cfg["min_conviction"], float(os.getenv("EVENT_WINDOW_DAY_MIN_CONVICTION", "2.2")))
-        day_cfg["min_take_probability"] = min(day_cfg["min_take_probability"], float(os.getenv("EVENT_WINDOW_DAY_MIN_TAKE_PROBABILITY", "0.28")))
+        day_cfg["top_k"] = max(day_cfg["top_k"], int(os.getenv("EVENT_WINDOW_DAY_TOP_K", "128")))
+        day_cfg["max_new_per_cycle"] = max(day_cfg["max_new_per_cycle"], int(os.getenv("EVENT_WINDOW_DAY_MAX_NEW", "32")))
+        day_cfg["max_open_positions"] = max(day_cfg["max_open_positions"], int(os.getenv("EVENT_WINDOW_DAY_MAX_OPEN", "48")))
+        day_cfg["cooldown_seconds"] = min(day_cfg["cooldown_seconds"], int(os.getenv("EVENT_WINDOW_DAY_COOLDOWN_SECONDS", "10")))
+        day_cfg["min_hold_seconds"] = min(day_cfg["min_hold_seconds"], int(os.getenv("EVENT_WINDOW_DAY_MIN_HOLD_SECONDS", "90")))
+        day_cfg["min_conviction"] = min(day_cfg["min_conviction"], float(os.getenv("EVENT_WINDOW_DAY_MIN_CONVICTION", "1.8")))
+        day_cfg["min_take_probability"] = min(day_cfg["min_take_probability"], float(os.getenv("EVENT_WINDOW_DAY_MIN_TAKE_PROBABILITY", "0.22")))
 
         crypto_cfg = self._lane_engine_config["crypto"]
-        crypto_cfg["top_k"] = max(crypto_cfg["top_k"], int(os.getenv("EVENT_WINDOW_CRYPTO_TOP_K", "48")))
-        crypto_cfg["max_new_per_cycle"] = max(crypto_cfg["max_new_per_cycle"], int(os.getenv("EVENT_WINDOW_CRYPTO_MAX_NEW", "18")))
-        crypto_cfg["max_open_positions"] = max(crypto_cfg["max_open_positions"], int(os.getenv("EVENT_WINDOW_CRYPTO_MAX_OPEN", "20")))
-        crypto_cfg["cooldown_seconds"] = min(crypto_cfg["cooldown_seconds"], int(os.getenv("EVENT_WINDOW_CRYPTO_COOLDOWN_SECONDS", "8")))
-        crypto_cfg["min_hold_seconds"] = min(crypto_cfg["min_hold_seconds"], int(os.getenv("EVENT_WINDOW_CRYPTO_MIN_HOLD_SECONDS", "30")))
-        crypto_cfg["min_conviction"] = min(crypto_cfg["min_conviction"], float(os.getenv("EVENT_WINDOW_CRYPTO_MIN_CONVICTION", "2.2")))
-        crypto_cfg["min_take_probability"] = min(crypto_cfg["min_take_probability"], float(os.getenv("EVENT_WINDOW_CRYPTO_MIN_TAKE_PROBABILITY", "0.24")))
+        crypto_cfg["top_k"] = max(crypto_cfg["top_k"], int(os.getenv("EVENT_WINDOW_CRYPTO_TOP_K", "64")))
+        crypto_cfg["max_new_per_cycle"] = max(crypto_cfg["max_new_per_cycle"], int(os.getenv("EVENT_WINDOW_CRYPTO_MAX_NEW", "24")))
+        crypto_cfg["max_open_positions"] = max(crypto_cfg["max_open_positions"], int(os.getenv("EVENT_WINDOW_CRYPTO_MAX_OPEN", "28")))
+        crypto_cfg["cooldown_seconds"] = min(crypto_cfg["cooldown_seconds"], int(os.getenv("EVENT_WINDOW_CRYPTO_COOLDOWN_SECONDS", "5")))
+        crypto_cfg["min_hold_seconds"] = min(crypto_cfg["min_hold_seconds"], int(os.getenv("EVENT_WINDOW_CRYPTO_MIN_HOLD_SECONDS", "20")))
+        crypto_cfg["min_conviction"] = min(crypto_cfg["min_conviction"], float(os.getenv("EVENT_WINDOW_CRYPTO_MIN_CONVICTION", "1.6")))
+        crypto_cfg["min_take_probability"] = min(crypto_cfg["min_take_probability"], float(os.getenv("EVENT_WINDOW_CRYPTO_MIN_TAKE_PROBABILITY", "0.16")))
         self._crypto_scalper_min_take_probability = min(
             self._crypto_scalper_min_take_probability,
             crypto_cfg["min_take_probability"],
+        )
+        self._crypto_signal_stale_seconds = max(
+            self._crypto_signal_stale_seconds,
+            max(30, int(os.getenv("EVENT_WINDOW_CRYPTO_SIGNAL_STALE_SECONDS", "240"))),
+        )
+        self._crypto_signal_hold_grace_seconds = max(
+            self._crypto_signal_hold_grace_seconds,
+            max(60, int(os.getenv("EVENT_WINDOW_CRYPTO_SIGNAL_HOLD_GRACE_SECONDS", "1800"))),
+        )
+        self._crypto_signal_stale_retention_seconds = max(
+            self._crypto_signal_stale_retention_seconds,
+            max(
+                self._crypto_signal_hold_grace_seconds,
+                int(os.getenv("EVENT_WINDOW_CRYPTO_SIGNAL_STALE_RETENTION_SECONDS", "21600")),
+            ),
+        )
+        self._crypto_scalper_max_spread_pct = max(
+            self._crypto_scalper_max_spread_pct,
+            max(0.05, float(os.getenv("EVENT_WINDOW_CRYPTO_MAX_SPREAD_PCT", "0.24"))),
+        )
+        self._crypto_scalper_max_depth_age_seconds = max(
+            self._crypto_scalper_max_depth_age_seconds,
+            max(2.0, float(os.getenv("EVENT_WINDOW_CRYPTO_MAX_DEPTH_AGE_SECONDS", "20.0"))),
+        )
+        self._crypto_scalper_max_tick_age_seconds = max(
+            self._crypto_scalper_max_tick_age_seconds,
+            max(2.0, float(os.getenv("EVENT_WINDOW_CRYPTO_MAX_TICK_AGE_SECONDS", "20.0"))),
+        )
+        self._crypto_scalper_max_signal_age_seconds = max(
+            self._crypto_scalper_max_signal_age_seconds,
+            max(3.0, float(os.getenv("EVENT_WINDOW_CRYPTO_MAX_SIGNAL_AGE_SECONDS", "30.0"))),
+        )
+        self._crypto_scalper_min_book_pressure = min(
+            self._crypto_scalper_min_book_pressure,
+            max(0.0, float(os.getenv("EVENT_WINDOW_CRYPTO_MIN_BOOK_PRESSURE", "0.015"))),
+        )
+        self._crypto_scalper_min_depth_imbalance = min(
+            self._crypto_scalper_min_depth_imbalance,
+            max(0.0, float(os.getenv("EVENT_WINDOW_CRYPTO_MIN_DEPTH_IMBALANCE", "0.01"))),
         )
 
     def _chunk_symbols(self, symbols: List[str], batch_size: int) -> List[List[str]]:
@@ -733,6 +797,10 @@ class MacroIntelligenceSystem:
                 "Event window mode: active | %s-day high-volatility preset | event digests -> %s",
                 self._event_window_days,
                 self._event_intel_dir,
+            )
+            logger.info(
+                "Event window lane split: dual-lane variants %s",
+                "enabled" if self._allow_dual_lane_variants else "disabled",
             )
         if self._day_trading_mode:
             logger.info(
@@ -1240,7 +1308,8 @@ class MacroIntelligenceSystem:
                     items.append((primary_lane, symbol, primary))
                     seen.add(key)
             normal_variant = self._get_lane_signal(symbol, "normal")
-            if normal_variant and (symbol, "normal") not in seen:
+            include_normal_variant = self._allow_dual_lane_variants or primary_lane != "day"
+            if normal_variant and include_normal_variant and (symbol, "normal") not in seen:
                 items.append(("normal", symbol, normal_variant))
                 seen.add((symbol, "normal"))
         return items
@@ -1591,7 +1660,8 @@ class MacroIntelligenceSystem:
             return {"allow": False, "reason": "crypto_weak_book_pressure", "size_multiplier": 0.0}
         if depth_imbalance < self._crypto_scalper_min_depth_imbalance:
             return {"allow": False, "reason": "crypto_weak_depth_imbalance", "size_multiplier": 0.0}
-        if not trade_window_active and self._safe_number(intraday.get("confidence"), 0.0) < 0.80:
+        trade_window_confidence_floor = 0.62 if self._event_window_mode else 0.80
+        if not trade_window_active and self._safe_number(intraday.get("confidence"), 0.0) < trade_window_confidence_floor:
             return {"allow": False, "reason": "crypto_outside_prime_window", "size_multiplier": 0.0}
         size_multiplier = 1.0
         if spread_pct > (self._crypto_scalper_max_spread_pct * 0.65):
@@ -2496,6 +2566,7 @@ class MacroIntelligenceSystem:
         } if broker else set()
         latest_feature_rows = latest_feature_rows or {}
         updated = 0
+        now_ts = time.time()
 
         for symbol in self._crypto_symbols:
             try:
@@ -2504,10 +2575,33 @@ class MacroIntelligenceSystem:
                 logger.warning(f"Crypto signal build failed for {symbol}: {exc}")
                 continue
             if signal is None:
+                last_live_ts = self._crypto_last_signal_ts.get(symbol, 0.0)
+                signal_age_seconds = now_ts - last_live_ts
+                within_hold_grace = signal_age_seconds <= self._crypto_signal_hold_grace_seconds
+                within_stale_retention = signal_age_seconds <= self._crypto_signal_stale_retention_seconds
+                existing = self._signal_store.get(symbol)
+                if within_stale_retention and isinstance(existing, dict):
+                    if str(existing.get("lane", "")).lower() == "crypto":
+                        meta = existing.get("meta_decision")
+                        if isinstance(meta, dict):
+                            if within_hold_grace:
+                                meta.setdefault("reason", "crypto_refresh_gap_soft")
+                            else:
+                                meta["take_trade"] = False
+                                meta["reason"] = "crypto_refresh_gap"
+                        if not within_hold_grace:
+                            existing["trade_eligible"] = False
+                        existing["stale_reason"] = "crypto_refresh_gap_soft" if within_hold_grace else "crypto_refresh_gap"
+                        existing["stale_seconds"] = round(max(signal_age_seconds, 0.0), 2)
+                        continue
                 if symbol not in held_symbols and symbol not in latest_feature_rows:
                     self._signal_store.pop(symbol, None)
+                    self._crypto_last_signal_ts.pop(symbol, None)
                 continue
+            signal.pop("stale_reason", None)
+            signal.pop("stale_seconds", None)
             self._signal_store[symbol] = signal
+            self._crypto_last_signal_ts[symbol] = now_ts
             updated += 1
 
         return updated
@@ -3954,7 +4048,7 @@ class MacroIntelligenceSystem:
             intraday_daytrade_override = (
                 lane == "day"
                 and portfolio_target_pct <= 0
-                and take_probability >= 0.48
+                and take_probability >= (0.40 if self._event_window_mode else 0.48)
                 and conviction >= (min_conviction * 0.9)
                 and float(intraday.get("confidence", 0.0) or 0.0) >= 0.48
                 and intraday.get("direction") == "buy"
@@ -3972,17 +4066,25 @@ class MacroIntelligenceSystem:
                 )
                 continue
             if meta and not meta.get("take_trade", False):
-                self._record_execution_event(
-                    symbol,
-                    "buy",
-                    "skipped",
-                    str(meta.get("reason", "meta_skip")),
-                    signal=signal,
-                    position_key=position_key,
-                    score=rank_score,
-                    conviction=conviction,
-                )
-                continue
+                if (
+                    lane == "crypto"
+                    and self._event_window_mode
+                    and take_probability >= (lane_config.get("min_take_probability", 0.0) * 0.85)
+                    and conviction >= (min_conviction * 0.90)
+                ):
+                    signal["meta_override"] = "event_window_crypto"
+                else:
+                    self._record_execution_event(
+                        symbol,
+                        "buy",
+                        "skipped",
+                        str(meta.get("reason", "meta_skip")),
+                        signal=signal,
+                        position_key=position_key,
+                        score=rank_score,
+                        conviction=conviction,
+                    )
+                    continue
             if lane == "day":
                 trade_window_active = bool(intraday.get("trade_window_active", True))
                 exceptional_signal = (
@@ -4555,6 +4657,7 @@ class MacroIntelligenceSystem:
         from models.xgboost_model import XGBoostSignalModel
         from pipeline.feature_bridge import FeatureBridge
         from pipeline.feature_engineering import FeaturePipeline
+        from pipeline.universe import is_day_trade_symbol
 
         scorer = MultiFactorScorer()
         explainer = SignalExplainer()
@@ -4760,7 +4863,9 @@ class MacroIntelligenceSystem:
                         "factor_weights": dict(scored.get("factor_weights", {}) or {}),
                         "xgb_alignment": scored.get("xgb_alignment"),
                     }
-                    self._apply_day_trading_overlay(symbol, latest_row, scored)
+                    symbol_day_mode = self._day_trading_mode and is_day_trade_symbol(symbol)
+                    if symbol_day_mode:
+                        self._apply_day_trading_overlay(symbol, latest_row, scored)
 
                     if xgb_model is not None and bridge._feature_cols is not None:
                         try:
@@ -4828,10 +4933,10 @@ class MacroIntelligenceSystem:
 
                     signal = _build_signal_payload(
                         scored,
-                        "day_trade_intraday" if self._day_trading_mode else "swing_event",
-                        lane_override="day" if self._day_trading_mode else "normal",
+                        "day_trade_intraday" if symbol_day_mode else "swing_event",
+                        lane_override="day" if symbol_day_mode else "normal",
                     )
-                    if self._day_trading_mode:
+                    if symbol_day_mode and self._allow_dual_lane_variants:
                         signal["normal_lane_signal"] = _build_signal_payload(
                             base_scored,
                             "swing_event",
