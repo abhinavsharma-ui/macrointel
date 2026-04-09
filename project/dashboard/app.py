@@ -2541,7 +2541,17 @@ function renderLaneOverview(){
   });
   const totalActionable = Object.values(signals).filter(isTradeReady).length;
   const totalSignals = Object.values(signals).length;
-  pill.textContent = `${totalSignals} live signals • ${totalActionable} trade-ready across 3 domains`;
+  const srv = Number(healthSnapshot.signal_count || 0);
+  const livePx = Number(healthSnapshot.active_symbols || 0);
+  if(totalSignals){
+    pill.textContent = `${totalSignals} live signals • ${totalActionable} trade-ready across 3 domains`;
+  }else if(srv > 0){
+    pill.textContent = `Server reports ${srv} signals (UI empty) — hard refresh`;
+  }else if(livePx > 0){
+    pill.textContent = `No signals yet • ${livePx} symbols on price feed`;
+  }else{
+    pill.textContent = `0 live signals • ${totalActionable} trade-ready across 3 domains`;
+  }
   grid.innerHTML = cards.join('');
 }
 
@@ -2833,12 +2843,19 @@ function renderSidebar(){
   if(!arr.length){
     const activeSymbols = Number(healthSnapshot.active_symbols || 0);
     const tickCount = Number(healthSnapshot.tick_count || 0);
+    const serverSignalCount = Number(healthSnapshot.signal_count || 0);
+    if(serverSignalCount > 0){
+      if(countEl) countEl.textContent = String(serverSignalCount);
+      if(metaEl) metaEl.textContent = `Server reports ${serverSignalCount} signals — browser list empty (hard refresh or check /api/signals)`;
+      el.innerHTML = `<div class="empty">The API has signals but this page did not load them. Hard refresh (Ctrl+Shift+R), or DevTools → Network → failed /api/signals. Mixed http/https or an old tab can cause this.</div>`;
+      return;
+    }
     const warming = activeSymbols > 0 || tickCount > 0;
     if(countEl) countEl.textContent = warming ? 'warming' : '0';
     if(metaEl) metaEl.textContent = warming
-      ? `Signal engine warming up • ${activeSymbols} symbols live • ${tickCount.toLocaleString()} ticks`
+      ? `Live prices (${activeSymbols} symbols • ${tickCount.toLocaleString()} ticks) — no signals in memory yet; inference/bootstrap may still be running`
       : 'Waiting for signal stream...';
-    el.innerHTML = `<div class="empty">${warming ? 'Signal engine is warming up from live data...' : 'No signals yet...'}</div>`;
+    el.innerHTML = `<div class="empty">${warming ? 'Price feed is live, but the scored signal store is still empty. If this persists for many minutes, check the VM: curl -s 127.0.0.1:5050/api/health | head -c 400 and logs/system.out for inference or blocking_reasons.' : 'No signals yet...'}</div>`;
     return;
   }
   arr.sort(compareSignals);
@@ -2896,11 +2913,16 @@ function updateMetrics(){
   const watch = filtered.length - actionable.length;
   const mns = document.getElementById('mns');
   const msp = document.getElementById('msp');
-  const warming = !arr.length && Number(healthSnapshot.active_symbols || 0) > 0;
-  if(mns) mns.textContent = warming ? 'WARMING' : String(filtered.length);
-  if(msp) msp.textContent = warming
-    ? `signal engine warming up from ${Number(healthSnapshot.active_symbols || 0)} live symbols`
-    : `${actionable.length} trade-ready - ${buys} live buy - ${sells} live sell - ${watch} watch${activeLane !== 'all' && activeLane !== 'reports' ? ` - ${LANE_LABELS[activeLane]}` : ''}`;
+  const serverSignalCount = Number(healthSnapshot.signal_count || 0);
+  const liveSyms = Number(healthSnapshot.active_symbols || 0);
+  const warming = !arr.length && liveSyms > 0 && serverSignalCount === 0;
+  const desync = !arr.length && serverSignalCount > 0;
+  if(mns) mns.textContent = desync ? 'SYNC' : (warming ? 'WARMING' : String(filtered.length));
+  if(msp) msp.textContent = desync
+    ? `server has ${serverSignalCount} signals — reload page or verify /api/signals`
+    : (warming
+      ? `prices live for ${liveSyms} symbols; signal_count=0 — scoring not populated (see logs)`
+      : `${actionable.length} trade-ready - ${buys} live buy - ${sells} live sell - ${watch} watch${activeLane !== 'all' && activeLane !== 'reports' ? ` - ${LANE_LABELS[activeLane]}` : ''}`);
 }
 
 function selectSig(sym){

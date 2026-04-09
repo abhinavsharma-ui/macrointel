@@ -61,6 +61,28 @@ def _safe_float(value, default: float = 0.0) -> float:
         return float(default)
 
 
+def _calendar_feature_dict(as_of: pd.Timestamp) -> Dict[str, float]:
+    """Encode calendar position so the meta model can use multi-year feature history."""
+    ts = pd.Timestamp(as_of)
+    if pd.isna(ts):
+        ts = pd.Timestamp.utcnow()
+    y = float(ts.year)
+    meta_year_norm = float(np.clip((y - 2000.0) / 32.0, 0.0, 1.0))
+    month = int(ts.month)
+    meta_month_sin = float(np.sin(2.0 * np.pi * (month - 1) / 12.0))
+    meta_month_cos = float(np.cos(2.0 * np.pi * (month - 1) / 12.0))
+    dow = int(ts.dayofweek)
+    meta_dow_sin = float(np.sin(2.0 * np.pi * dow / 7.0))
+    meta_dow_cos = float(np.cos(2.0 * np.pi * dow / 7.0))
+    return {
+        "meta_year_norm": meta_year_norm,
+        "meta_month_sin": meta_month_sin,
+        "meta_month_cos": meta_month_cos,
+        "meta_dow_sin": meta_dow_sin,
+        "meta_dow_cos": meta_dow_cos,
+    }
+
+
 def _adaptive_horizon_days(frame: pd.DataFrame, idx: int, base_horizon_days: int) -> Tuple[int, float]:
     row = frame.iloc[idx]
     multiplier = 1.0
@@ -252,6 +274,11 @@ class MetaFeatureBuilder:
         "short_book_pressure_reversal_edge",
         "short_earnings_miss_propagation_edge",
         "is_nse_symbol",
+        "meta_year_norm",
+        "meta_month_sin",
+        "meta_month_cos",
+        "meta_dow_sin",
+        "meta_dow_cos",
     ]
 
     FACTOR_MAP = {
@@ -311,6 +338,15 @@ class MetaFeatureBuilder:
         direction = str(signal.get("signal", "neutral") or "neutral").lower()
         xgb_alignment = str(signal.get("xgb_alignment", "") or "")
 
+        as_of = pd.Timestamp.utcnow()
+        if feature_row is not None and getattr(feature_row, "name", None) is not None:
+            try:
+                as_of = pd.Timestamp(feature_row.name)
+                if pd.isna(as_of):
+                    as_of = pd.Timestamp.utcnow()
+            except Exception:
+                as_of = pd.Timestamp.utcnow()
+
         payload = {
             "is_buy_signal": 1.0 if direction == "buy" else 0.0,
             "is_sell_signal": 1.0 if direction == "sell" else 0.0,
@@ -325,6 +361,7 @@ class MetaFeatureBuilder:
             "xgb_override_weak_signal": 1.0 if xgb_alignment == "override_weak_signal" else 0.0,
             "is_nse_symbol": 1.0 if symbol.endswith(".NS") else 0.0,
         }
+        payload.update(_calendar_feature_dict(as_of))
 
         for factor_name, col_name in cls.FACTOR_MAP.items():
             payload[col_name] = float(factor_scores.get(factor_name, 0.0) or 0.0)
@@ -618,8 +655,9 @@ class EventAwareXGBoostRetrainer:
 
     def _build_dataset(self, feature_matrices: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         rows = []
+        min_xgb_rows = max(80, int(os.getenv("XGB_MIN_FRAME_ROWS", "100") or 100))
         for symbol, frame in feature_matrices.items():
-            if frame is None or frame.empty or len(frame) < 120:
+            if frame is None or frame.empty or len(frame) < min_xgb_rows:
                 continue
             numeric = frame.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan)
             numeric = numeric.dropna(thresh=max(8, int(len(numeric.columns) * 0.6)))
@@ -758,7 +796,7 @@ class MetaModelTrainer:
         horizon_days: int = 5,
         take_threshold: float = 0.58,
         walk_forward_folds: int = 4,
-        min_train_days: int = 120,
+        min_train_days: int = 180,
     ):
         self.horizon_days = horizon_days
         self.take_threshold = take_threshold
@@ -797,11 +835,21 @@ class MetaModelTrainer:
         realized_edge = df["edge_pct"].to_numpy(dtype=float)
         realized_draw = df["drawdown_pct"].to_numpy(dtype=float)
         hit_rate_array = (realized_edge > 0).astype(float)
+        y_take = df["take_label"].astype(int).to_numpy()
 
-        threshold_grid = [0.48, 0.52, 0.56, 0.60, 0.64]
-        min_edge_grid = [0.05, 0.10, 0.20, 0.35]
-        min_ratio_grid = [0.05, 0.10, 0.15, 0.20, 0.30]
+        raw_thresholds = os.getenv("META_MODEL_THRESHOLD_GRID", "").strip()
+        if raw_thresholds:
+            threshold_grid = [float(x.strip()) for x in raw_thresholds.split(",") if x.strip()]
+        else:
+            threshold_grid = [0.48, 0.52, 0.56, 0.58, 0.62, 0.66, 0.70, 0.74, 0.78]
+        min_edge_grid = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40]
+        min_ratio_grid = [0.05, 0.08, 0.12, 0.16, 0.20, 0.28, 0.36]
         edge_ratio_pred = edge_pred / np.maximum(drawdown_pred, 0.35)
+
+        min_count = max(25, int(os.getenv("META_MODEL_MIN_RULE_SAMPLES", "32")))
+        cov_min = float(os.getenv("META_MODEL_MIN_COVERAGE_PCT", "0.7"))
+        cov_max = float(os.getenv("META_MODEL_MAX_COVERAGE_PCT", "34"))
+        rule_mode = os.getenv("META_MODEL_RULE_OBJECTIVE", "precision").strip().lower()
 
         for threshold in threshold_grid:
             for min_edge in min_edge_grid:
@@ -813,12 +861,22 @@ class MetaModelTrainer:
                     )
                     coverage = float(mask.mean() * 100.0)
                     count = int(mask.sum())
-                    if count < 30 or coverage < 1.0 or coverage > 35.0:
+                    if count < min_count or coverage < cov_min or coverage > cov_max:
                         continue
                     avg_edge = float(realized_edge[mask].mean())
                     avg_draw = float(realized_draw[mask].mean())
                     hit_rate = float(hit_rate_array[mask].mean() * 100.0)
-                    objective = avg_edge - (0.32 * avg_draw) + ((hit_rate - 50.0) * 0.02)
+                    precision_take = float(y_take[mask].mean()) if count > 0 else 0.0
+                    if rule_mode == "legacy":
+                        objective = avg_edge - (0.32 * avg_draw) + ((hit_rate - 50.0) * 0.02)
+                    else:
+                        # Prefer setups where "take" aligns with positive take_label (precision on the rare class).
+                        objective = (
+                            108.0 * precision_take
+                            + 0.20 * hit_rate
+                            + 0.32 * float(np.clip(avg_edge, -3.0, 6.0))
+                            - 0.10 * float(np.clip(avg_draw, 0.0, 12.0))
+                        )
                     if objective > best["objective"]:
                         best = {
                             "decision_threshold": threshold,
@@ -859,27 +917,28 @@ class MetaModelTrainer:
             y_cal = y_take
 
         classifier = HistGradientBoostingClassifier(
-            learning_rate=0.05,
-            max_depth=4,
-            max_iter=320,
-            min_samples_leaf=24,
-            l2_regularization=0.15,
+            learning_rate=0.045,
+            max_depth=5,
+            max_iter=520,
+            min_samples_leaf=18,
+            l2_regularization=0.12,
             random_state=42,
+            class_weight="balanced",
         )
         edge_model = HistGradientBoostingRegressor(
-            learning_rate=0.05,
-            max_depth=5,
-            max_iter=320,
-            min_samples_leaf=24,
-            l2_regularization=0.10,
+            learning_rate=0.045,
+            max_depth=6,
+            max_iter=480,
+            min_samples_leaf=18,
+            l2_regularization=0.09,
             random_state=42,
         )
         drawdown_model = HistGradientBoostingRegressor(
-            learning_rate=0.05,
-            max_depth=5,
-            max_iter=320,
-            min_samples_leaf=24,
-            l2_regularization=0.10,
+            learning_rate=0.045,
+            max_depth=6,
+            max_iter=480,
+            min_samples_leaf=18,
+            l2_regularization=0.09,
             random_state=42,
             loss="absolute_error",
         )
@@ -922,13 +981,18 @@ class MetaModelTrainer:
 
         scorer = MultiFactorScorer()
         records = []
+        min_frame = max(
+            int(os.getenv("META_MODEL_MIN_FRAME_ROWS", "72") or 72),
+            self.horizon_days + 22,
+        )
+        warmup_rows = max(28, int(os.getenv("META_MODEL_WARMUP_ROWS", "42") or 42))
 
         for symbol, frame in feature_matrices.items():
-            if frame is None or frame.empty or len(frame) < max(90, self.horizon_days + 30):
+            if frame is None or frame.empty or len(frame) < min_frame:
                 continue
 
             ordered = frame.sort_index()
-            for idx in range(60, len(ordered) - 2):
+            for idx in range(warmup_rows, len(ordered) - 2):
                 row = ordered.iloc[idx]
                 signal_score = scorer.score(row)
                 direction = signal_score["direction"]
@@ -1177,6 +1241,14 @@ class MetaModelTrainer:
             },
             "deployment_rules": deployment_rules,
             "walk_forward": walk_forward,
+            "training_config": {
+                "rule_objective": os.getenv("META_MODEL_RULE_OBJECTIVE", "precision"),
+                "horizon_days": self.horizon_days,
+                "walk_forward_folds": self.walk_forward_folds,
+                "min_train_days": self.min_train_days,
+                "min_frame_rows_env": os.getenv("META_MODEL_MIN_FRAME_ROWS", ""),
+                "warmup_rows_env": os.getenv("META_MODEL_WARMUP_ROWS", ""),
+            },
         }
         META_REPORT_PATH.write_text(json.dumps(report, indent=2))
         logger.info(
@@ -1194,12 +1266,14 @@ class InstitutionalTrainingPipeline:
         meta_horizon: int = 5,
         meta_take_threshold: float = 0.58,
         meta_walk_forward_folds: int = 4,
+        meta_min_train_days: int = 180,
     ):
         self.xgb_retrainer = EventAwareXGBoostRetrainer(horizon=xgb_horizon)
         self.meta_trainer = MetaModelTrainer(
             horizon_days=meta_horizon,
             take_threshold=meta_take_threshold,
             walk_forward_folds=meta_walk_forward_folds,
+            min_train_days=meta_min_train_days,
         )
 
     def train_all(self, feature_matrices: Dict[str, pd.DataFrame], run_optuna: bool = False) -> Dict:

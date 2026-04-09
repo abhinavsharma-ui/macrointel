@@ -3,6 +3,13 @@ Guarded retraining entrypoint for the institutional model stack.
 
 Usage:
     python retrain_institutional_models.py
+
+Meta model quality scales with **years of daily rows** in data/features/*.parquet.
+Tune via env (see .env.example): META_MODEL_HORIZON_DAYS, META_MODEL_WALKFORWARD_FOLDS,
+META_MODEL_MIN_TRAIN_DAYS, META_MODEL_MIN_FRAME_ROWS, META_MODEL_WARMUP_ROWS,
+META_MODEL_RULE_OBJECTIVE=precision|legacy, META_MODEL_THRESHOLD_GRID, etc.
+Walk-forward metrics near ~70% precision/hit are **not guaranteed** (markets are noisy);
+the trainer now biases toward **precision on take_label** when RULE_OBJECTIVE=precision.
 """
 
 from __future__ import annotations
@@ -65,9 +72,10 @@ def main():
 
     trainer = InstitutionalTrainingPipeline(
         xgb_horizon=max(1, int(os.getenv("XGB_RETRAIN_HORIZON_DAYS", "5"))),
-        meta_horizon=max(1, int(os.getenv("META_MODEL_HORIZON_DAYS", "5"))),
+        meta_horizon=max(1, int(os.getenv("META_MODEL_HORIZON_DAYS", "8"))),
         meta_take_threshold=float(os.getenv("META_MODEL_TAKE_THRESHOLD", "0.58")),
-        meta_walk_forward_folds=max(2, int(os.getenv("META_MODEL_WALKFORWARD_FOLDS", "4"))),
+        meta_walk_forward_folds=max(3, int(os.getenv("META_MODEL_WALKFORWARD_FOLDS", "6"))),
+        meta_min_train_days=max(90, int(os.getenv("META_MODEL_MIN_TRAIN_DAYS", "200"))),
     )
     logger.info("Starting institutional retraining pipeline")
     report = trainer.train_all(
