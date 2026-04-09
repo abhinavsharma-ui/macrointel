@@ -372,6 +372,12 @@ class MacroIntelligenceSystem:
         self._feature_store_save_seconds = max(300, int(os.getenv("FEATURE_STORE_SAVE_SECONDS", "1800")))
         self._feature_store_dir = _resolve_root_path(os.getenv("FEATURE_STORE_DIR", "data/features"))
         self._inference_feature_chunk_size = max(25, int(os.getenv("INFERENCE_FEATURE_CHUNK_SIZE", "250") or 250))
+        self._inference_idle_wait_seconds = max(5, int(os.getenv("INFERENCE_IDLE_WAIT_SECONDS", "15") or 15))
+        bootstrap_file_cap_default = self._source_symbol_caps.get("prices", 0) or 600
+        self._signal_bootstrap_feature_file_cap = max(
+            0,
+            int(os.getenv("SIGNAL_BOOTSTRAP_FEATURE_FILE_CAP", str(bootstrap_file_cap_default)) or bootstrap_file_cap_default),
+        )
         self._event_intel_enabled = os.getenv("EVENT_INTEL_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
         self._event_intel_dir = _resolve_root_path(os.getenv("EVENT_INTEL_DIR", "data/event_intel"))
         self._auto_retrain_on_start = os.getenv("AUTO_RETRAIN_ON_START", "1").strip().lower() not in {"0", "false", "off"}
@@ -589,6 +595,7 @@ class MacroIntelligenceSystem:
         if self._throughput_mode:
             self._apply_throughput_mode()
         self._last_feature_signature: Dict[str, str] = {}
+        self._feature_store_bootstrap_attempted = False
         self._crypto_last_signal_ts: Dict[str, float] = {}
         self._position_plans: Dict[str, Dict] = {}
         self._last_trade_timestamps: Dict[str, float] = {}
@@ -663,6 +670,7 @@ class MacroIntelligenceSystem:
     def _serialize_runtime_state(self) -> Dict[str, Any]:
         return {
             "saved_at": datetime.now(timezone.utc).isoformat(),
+            "signal_store": self._signal_store,
             "position_plans": self._position_plans,
             "last_trade_timestamps": self._last_trade_timestamps,
             "execution_trace": self._execution_trace[-self._execution_trace_limit :],
@@ -699,6 +707,23 @@ class MacroIntelligenceSystem:
         self._execution_trace.extend(
             [dict(row) for row in (payload.get("execution_trace") or []) if isinstance(row, dict)][-self._execution_trace_limit :]
         )
+        self._signal_store.clear()
+        for symbol_key, signal in (payload.get("signal_store") or {}).items():
+            if not isinstance(signal, dict):
+                continue
+            symbol = str(signal.get("symbol") or symbol_key or "").strip().upper()
+            if not symbol:
+                continue
+            restored_signal = self._mark_signal_warmup_only(symbol, signal, reason="runtime_restore")
+            normal_lane = restored_signal.get("normal_lane_signal")
+            if isinstance(normal_lane, dict):
+                restored_signal["normal_lane_signal"] = self._mark_signal_warmup_only(
+                    symbol,
+                    normal_lane,
+                    reason="runtime_restore",
+                    lane_override="normal",
+                )
+            self._signal_store[symbol] = restored_signal
         self._execution_reconciliation.clear()
         self._execution_reconciliation.extend(
             [dict(row) for row in (payload.get("execution_reconciliation") or []) if isinstance(row, dict)][-self._execution_trace_limit :]
@@ -730,11 +755,78 @@ class MacroIntelligenceSystem:
             self._system_health.update(payload["system_health"])
 
         logger.info(
-            "Runtime state restored: %s plans | %s execution events | %s reconciliations",
+            "Runtime state restored: %s signals | %s plans | %s execution events | %s reconciliations",
+            len(self._signal_store),
             len(self._position_plans),
             len(self._execution_trace),
             len(self._execution_reconciliation),
         )
+
+    def _mark_signal_warmup_only(
+        self,
+        symbol: str,
+        signal: Optional[Dict[str, Any]],
+        *,
+        reason: str,
+        lane_override: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload = self._decorate_signal(str(symbol or "").upper(), signal or {}, lane_override=lane_override)
+        payload["warmup_only"] = True
+        payload["trade_eligible"] = False
+        payload["stale_reason"] = reason
+        payload["stale_seconds"] = None
+        meta = payload.get("meta_decision")
+        if isinstance(meta, dict):
+            meta = dict(meta)
+            meta["take_trade"] = False
+            meta.setdefault("reason", reason)
+            payload["meta_decision"] = meta
+        return payload
+
+    def _load_feature_store_bootstrap(self) -> Dict[str, pd.DataFrame]:
+        if self._feature_store_bootstrap_attempted:
+            return {}
+        self._feature_store_bootstrap_attempted = True
+        if not self._feature_store_enabled or not self._feature_store_dir.exists():
+            return {}
+
+        feature_paths = {path.stem.upper(): path for path in self._feature_store_dir.glob("*.parquet")}
+        if not feature_paths:
+            return {}
+
+        ordered_symbols = [symbol for symbol in self._get_target_symbols() if symbol in feature_paths]
+        if not ordered_symbols:
+            ordered_symbols = sorted(
+                feature_paths.keys(),
+                key=lambda symbol: feature_paths[symbol].stat().st_mtime,
+                reverse=True,
+            )
+
+        cap = self._signal_bootstrap_feature_file_cap
+        if cap > 0:
+            ordered_symbols = ordered_symbols[:cap]
+
+        loaded: Dict[str, pd.DataFrame] = {}
+        for symbol in ordered_symbols:
+            path = feature_paths.get(symbol)
+            if path is None:
+                continue
+            try:
+                frame = pd.read_parquet(path)
+            except Exception as exc:
+                logger.debug("Feature store bootstrap skip %s: %s", path.name, exc)
+                continue
+            if frame is None or getattr(frame, "empty", True):
+                continue
+            loaded[symbol] = frame
+
+        if loaded:
+            logger.info(
+                "Signal bootstrap loaded %s feature files from %s",
+                len(loaded),
+                self._feature_store_dir,
+            )
+        return loaded
 
     def _sync_runtime_state_with_broker(self, broker) -> None:
         if broker is None:
@@ -6036,14 +6128,7 @@ class MacroIntelligenceSystem:
             try:
                 _reload_runtime_models()
                 price_data = self._components.get("price_data", {})
-                if not price_data:
-                    time.sleep(60)
-                    continue
-
-                daily_prices = price_data.get("price_daily_recent", {})
-                if not daily_prices:
-                    time.sleep(60)
-                    continue
+                daily_prices = price_data.get("price_daily_recent", {}) if isinstance(price_data, dict) else {}
 
                 latest_feature_rows = self._components.get("latest_feature_rows")
                 if not isinstance(latest_feature_rows, dict):
@@ -6053,11 +6138,13 @@ class MacroIntelligenceSystem:
                 def _refresh_signal_for_symbol(symbol: str, features: Optional[pd.DataFrame], earnings_events) -> int:
                     if features is None or getattr(features, "empty", True):
                         latest_feature_rows.pop(symbol, None)
+                        self._signal_store.pop(symbol, None)
+                        self._last_feature_signature.pop(symbol, None)
                         return 0
 
                     latest_feature_rows[symbol] = features.iloc[-1]
                     signature = self._build_feature_signature(symbol, features, earnings_events)
-                    if self._last_feature_signature.get(symbol) == signature:
+                    if self._last_feature_signature.get(symbol) == signature and isinstance(self._signal_store.get(symbol), dict):
                         return 0
 
                     latest_row = features.iloc[-1]
@@ -6155,6 +6242,100 @@ class MacroIntelligenceSystem:
                     self._signal_store[symbol] = signal
                     self._last_feature_signature[symbol] = signature
                     return 1
+
+                def _apply_meta_decisions() -> None:
+                    meta_decisions = meta_engine.evaluate_universe(self._signal_store, feature_rows=latest_feature_rows)
+                    for symbol, meta in meta_decisions.items():
+                        signal = self._signal_store.get(symbol)
+                        if not isinstance(signal, dict):
+                            continue
+                        signal["warmup_only"] = False
+                        signal["meta_decision"] = meta
+                        signal["trade_eligible"] = meta.get("take_trade", False)
+                        signal["take_probability"] = meta.get("take_probability", 0.0)
+                        signal["skip_probability"] = meta.get("skip_probability", 1.0)
+                        signal["expected_edge_pct"] = meta.get("expected_edge_pct", 0.0)
+                        signal["expected_drawdown_pct"] = meta.get("expected_drawdown_pct", 0.0)
+                        signal["rank_score"] = meta.get("rank_score", 0.0)
+                        signal["rank_percentile"] = meta.get("rank_percentile", 0.0)
+                        signal["size_multiplier"] = meta.get("size_multiplier", 0.0)
+                        signal["meta_source"] = meta.get("source", "heuristic")
+                        signal.pop("stale_reason", None)
+                        signal.pop("stale_seconds", None)
+                        normal_signal = signal.get("normal_lane_signal")
+                        if isinstance(normal_signal, dict):
+                            normal_signal["warmup_only"] = False
+                            normal_meta = meta_engine.evaluate_universe(
+                                {symbol: normal_signal},
+                                feature_rows={symbol: latest_feature_rows.get(symbol)} if symbol in latest_feature_rows else {},
+                            ).get(symbol, {})
+                            normal_signal["meta_decision"] = normal_meta
+                            normal_signal["trade_eligible"] = normal_meta.get("take_trade", False)
+                            normal_signal["take_probability"] = normal_meta.get("take_probability", 0.0)
+                            normal_signal["skip_probability"] = normal_meta.get("skip_probability", 1.0)
+                            normal_signal["expected_edge_pct"] = normal_meta.get("expected_edge_pct", 0.0)
+                            normal_signal["expected_drawdown_pct"] = normal_meta.get("expected_drawdown_pct", 0.0)
+                            normal_signal["rank_score"] = normal_meta.get("rank_score", 0.0)
+                            normal_signal["rank_percentile"] = normal_meta.get("rank_percentile", 0.0)
+                            normal_signal["size_multiplier"] = normal_meta.get("size_multiplier", 0.0)
+                            normal_signal["meta_source"] = normal_meta.get("source", "heuristic")
+                            normal_signal.pop("stale_reason", None)
+                            normal_signal.pop("stale_seconds", None)
+
+                if not daily_prices and not self._signal_store:
+                    bootstrap_frames = self._load_feature_store_bootstrap()
+                    if bootstrap_frames:
+                        feature_cache = self._components.get("feature_matrices")
+                        if not isinstance(feature_cache, dict):
+                            feature_cache = {}
+                            self._components["feature_matrices"] = feature_cache
+                        feature_cache.update(bootstrap_frames)
+                        earnings_events = self._components.get("earnings_data", {}).get("earnings_events")
+                        bootstrapped_signals = 0
+                        bootstrap_symbols = list(bootstrap_frames.keys())
+                        bootstrap_batches = self._chunk_symbols(bootstrap_symbols, self._inference_feature_chunk_size)
+                        for batch_idx, batch_symbols in enumerate(bootstrap_batches, start=1):
+                            for symbol in batch_symbols:
+                                features = bootstrap_frames.get(symbol)
+                                if features is None or getattr(features, "empty", True):
+                                    continue
+                                bootstrapped_signals += _refresh_signal_for_symbol(symbol, features, earnings_events)
+                                signal = self._signal_store.get(symbol)
+                                if isinstance(signal, dict):
+                                    self._signal_store[symbol] = self._mark_signal_warmup_only(
+                                        symbol,
+                                        signal,
+                                        reason="feature_store_bootstrap",
+                                        lane_override=signal.get("lane"),
+                                    )
+                                    normal_signal = self._signal_store[symbol].get("normal_lane_signal")
+                                    if isinstance(normal_signal, dict):
+                                        self._signal_store[symbol]["normal_lane_signal"] = self._mark_signal_warmup_only(
+                                            symbol,
+                                            normal_signal,
+                                            reason="feature_store_bootstrap",
+                                            lane_override="normal",
+                                        )
+                            if len(bootstrap_batches) > 1:
+                                logger.info(
+                                    "Signal bootstrap progress: batch %s/%s | %s/%s signals restored",
+                                    batch_idx,
+                                    len(bootstrap_batches),
+                                    min(batch_idx * self._inference_feature_chunk_size, len(bootstrap_symbols)),
+                                    len(bootstrap_symbols),
+                                )
+                        logger.info(
+                            "Signal bootstrap ready: %s cached signals restored while live data warms",
+                            len(self._signal_store),
+                        )
+
+                if not price_data:
+                    time.sleep(self._inference_idle_wait_seconds)
+                    continue
+
+                if not daily_prices:
+                    time.sleep(self._inference_idle_wait_seconds)
+                    continue
 
                 current_versions = dict(self._data_versions)
                 sources_changed = any(
@@ -6289,37 +6470,7 @@ class MacroIntelligenceSystem:
 
                 updated_symbols += self._refresh_crypto_signals(latest_feature_rows)
 
-                meta_decisions = meta_engine.evaluate_universe(self._signal_store, feature_rows=latest_feature_rows)
-                for symbol, meta in meta_decisions.items():
-                    signal = self._signal_store.get(symbol)
-                    if not isinstance(signal, dict):
-                        continue
-                    signal["meta_decision"] = meta
-                    signal["trade_eligible"] = meta.get("take_trade", False)
-                    signal["take_probability"] = meta.get("take_probability", 0.0)
-                    signal["skip_probability"] = meta.get("skip_probability", 1.0)
-                    signal["expected_edge_pct"] = meta.get("expected_edge_pct", 0.0)
-                    signal["expected_drawdown_pct"] = meta.get("expected_drawdown_pct", 0.0)
-                    signal["rank_score"] = meta.get("rank_score", 0.0)
-                    signal["rank_percentile"] = meta.get("rank_percentile", 0.0)
-                    signal["size_multiplier"] = meta.get("size_multiplier", 0.0)
-                    signal["meta_source"] = meta.get("source", "heuristic")
-                    normal_signal = signal.get("normal_lane_signal")
-                    if isinstance(normal_signal, dict):
-                        normal_meta = meta_engine.evaluate_universe(
-                            {symbol: normal_signal},
-                            feature_rows={symbol: latest_feature_rows.get(symbol)} if symbol in latest_feature_rows else {},
-                        ).get(symbol, {})
-                        normal_signal["meta_decision"] = normal_meta
-                        normal_signal["trade_eligible"] = normal_meta.get("take_trade", False)
-                        normal_signal["take_probability"] = normal_meta.get("take_probability", 0.0)
-                        normal_signal["skip_probability"] = normal_meta.get("skip_probability", 1.0)
-                        normal_signal["expected_edge_pct"] = normal_meta.get("expected_edge_pct", 0.0)
-                        normal_signal["expected_drawdown_pct"] = normal_meta.get("expected_drawdown_pct", 0.0)
-                        normal_signal["rank_score"] = normal_meta.get("rank_score", 0.0)
-                        normal_signal["rank_percentile"] = normal_meta.get("rank_percentile", 0.0)
-                        normal_signal["size_multiplier"] = normal_meta.get("size_multiplier", 0.0)
-                        normal_signal["meta_source"] = normal_meta.get("source", "heuristic")
+                _apply_meta_decisions()
 
                 self._auto_trade()
                 self._maybe_refresh_execution_backtest(feature_matrices)

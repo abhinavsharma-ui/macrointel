@@ -2525,7 +2525,7 @@ function normalizeSignal(s){
 }
 
 function isTradeReady(s){
-  return !!(s && (s.trade_eligible || (s.meta_decision && s.meta_decision.take_trade)));
+  return !!(s && !s.warmup_only && (s.trade_eligible || (s.meta_decision && s.meta_decision.take_trade)));
 }
 
 function rankedSortValue(a, b){
@@ -3607,5 +3607,4 @@ if __name__ == "__main__":
         app, socketio = create_app(price_buffer=PRICE_BUFFER, paper_broker=broker,
                                    signal_store=sig_store, stress_results=stress)
         socketio.run(app, host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
 
