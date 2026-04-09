@@ -1399,9 +1399,17 @@ class MacroIntelligenceSystem:
             "earnings": "EARNINGS_PIPELINE_BOOTSTRAP_SYMBOL_CAP",
             "altdata": "ALTDATA_PIPELINE_BOOTSTRAP_SYMBOL_CAP",
         }
-        raw_cap = os.getenv(
-            env_names.get(source_key, f"{source_key.upper()}_PIPELINE_BOOTSTRAP_SYMBOL_CAP"),
-            os.getenv("PIPELINE_BOOTSTRAP_SYMBOL_CAP", str(default_caps.get(source_key, 0))),
+        bootstrap_env_name = env_names.get(source_key, f"{source_key.upper()}_PIPELINE_BOOTSTRAP_SYMBOL_CAP")
+        source_bootstrap_env = os.getenv(bootstrap_env_name)
+        global_bootstrap_env = os.getenv("PIPELINE_BOOTSTRAP_SYMBOL_CAP")
+        if max(0, int(configured_cap or 0)) > 0 and source_bootstrap_env is None and global_bootstrap_env is None:
+            return 0
+        raw_cap = (
+            source_bootstrap_env
+            if source_bootstrap_env is not None
+            else global_bootstrap_env
+            if global_bootstrap_env is not None
+            else str(default_caps.get(source_key, 0))
         )
         try:
             cap = max(0, int(float(raw_cap or 0)))
