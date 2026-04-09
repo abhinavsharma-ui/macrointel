@@ -206,6 +206,7 @@ class MacroIntelligenceSystem:
                 )
             ),
         )
+        self._crypto_signal_refresh_seconds = max(2.0, float(os.getenv("CRYPTO_SIGNAL_REFRESH_SECONDS", "5")))
         self._allow_dual_lane_variants = os.getenv("DUAL_LANE_VARIANTS_ENABLED", "1").strip().lower() in {
             "1",
             "true",
@@ -1812,6 +1813,9 @@ class MacroIntelligenceSystem:
 
         logger.info("[6/8] Starting signal inference loop...")
         threading.Thread(target=self._inference_loop, daemon=True).start()
+        if self._crypto_depth_enabled and self._crypto_symbols:
+            logger.info("Starting dedicated crypto signal loop...")
+            threading.Thread(target=self._crypto_signal_loop, daemon=True).start()
 
         if run_security:
             logger.info("[7/8] Starting Humanizer Security Suite...")
@@ -3693,6 +3697,73 @@ class MacroIntelligenceSystem:
             updated += 1
 
         return updated
+
+    def _apply_live_meta_decisions(self, symbols: List[str], latest_feature_rows: Optional[Dict[str, pd.Series]] = None) -> int:
+        if not symbols:
+            return 0
+        signal_subset = {
+            symbol: self._signal_store.get(symbol)
+            for symbol in symbols
+            if isinstance(self._signal_store.get(symbol), dict)
+        }
+        if not signal_subset:
+            return 0
+        feature_rows = {}
+        if isinstance(latest_feature_rows, dict):
+            feature_rows = {
+                symbol: latest_feature_rows[symbol]
+                for symbol in signal_subset
+                if symbol in latest_feature_rows
+            }
+        try:
+            meta_decisions = self._get_meta_engine().evaluate_universe(signal_subset, feature_rows=feature_rows)
+        except Exception as exc:
+            logger.debug(f"Live meta evaluation failed: {exc}")
+            return 0
+        applied = 0
+        for symbol, meta in meta_decisions.items():
+            signal = self._signal_store.get(symbol)
+            if not isinstance(signal, dict):
+                continue
+            signal["warmup_only"] = False
+            signal["meta_decision"] = meta
+            signal["trade_eligible"] = meta.get("take_trade", False)
+            signal["take_probability"] = meta.get("take_probability", 0.0)
+            signal["skip_probability"] = meta.get("skip_probability", 1.0)
+            signal["expected_edge_pct"] = meta.get("expected_edge_pct", 0.0)
+            signal["expected_drawdown_pct"] = meta.get("expected_drawdown_pct", 0.0)
+            signal["rank_score"] = meta.get("rank_score", 0.0)
+            signal["rank_percentile"] = meta.get("rank_percentile", 0.0)
+            signal["size_multiplier"] = meta.get("size_multiplier", 0.0)
+            signal["meta_source"] = meta.get("source", "heuristic")
+            signal.pop("stale_reason", None)
+            signal.pop("stale_seconds", None)
+            applied += 1
+        return applied
+
+    def _crypto_signal_loop(self):
+        while self._running:
+            try:
+                latest_feature_rows = self._components.get("latest_feature_rows")
+                if not isinstance(latest_feature_rows, dict):
+                    latest_feature_rows = {}
+                updated = self._refresh_crypto_signals(latest_feature_rows)
+                crypto_symbols = [
+                    symbol
+                    for symbol, signal in self._signal_store.items()
+                    if isinstance(signal, dict) and str(signal.get("lane") or "").lower() == "crypto"
+                ]
+                applied = self._apply_live_meta_decisions(crypto_symbols, latest_feature_rows)
+                if updated or applied:
+                    logger.info(
+                        "Crypto signals: %s updated | %s meta refreshed | total=%s",
+                        updated,
+                        applied,
+                        len(crypto_symbols),
+                    )
+            except Exception as exc:
+                logger.error(f"Crypto signal loop error: {exc}")
+            time.sleep(self._crypto_signal_refresh_seconds)
 
     def _get_portfolio_correlation_snapshot(self, symbol: str, broker) -> Dict[str, float]:
         import pandas as pd
