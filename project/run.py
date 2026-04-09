@@ -6488,7 +6488,15 @@ class MacroIntelligenceSystem:
                             normal_signal.pop("stale_reason", None)
                             normal_signal.pop("stale_seconds", None)
 
-                if not self._signal_store:
+                has_non_crypto_signals = any(
+                    isinstance(signal, dict)
+                    and (
+                        str(signal.get("lane") or self._signal_lane_meta(symbol, signal).get("lane") or "").lower() != "crypto"
+                        or isinstance(signal.get("normal_lane_signal"), dict)
+                    )
+                    for symbol, signal in self._signal_store.items()
+                )
+                if not has_non_crypto_signals:
                     bootstrap_paths = self._select_feature_store_bootstrap_paths()
                     if bootstrap_paths:
                         feature_cache = self._components.get("feature_matrices")
