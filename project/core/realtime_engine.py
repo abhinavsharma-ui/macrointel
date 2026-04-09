@@ -624,6 +624,7 @@ class BybitPublicDepthWebSocket:
         self._running = False
         self._books: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(lambda: {"bids": {}, "asks": {}})
         self._ping_thread: Optional[threading.Thread] = None
+        self._topics_per_subscribe = max(5, int(os.getenv("BYBIT_WS_TOPICS_PER_SUBSCRIBE", "20") or 20))
 
     def _ws_url(self) -> str:
         return self.TESTNET_WS_BASE if self.testnet else self.WS_BASE
@@ -671,10 +672,18 @@ class BybitPublicDepthWebSocket:
             time.sleep(20)
 
     def _on_open(self, ws):
-        ws.send(json.dumps({"op": "subscribe", "args": self._subscribe_topics()}))
+        topics = self._subscribe_topics()
+        for idx in range(0, len(topics), self._topics_per_subscribe):
+            chunk = topics[idx : idx + self._topics_per_subscribe]
+            ws.send(json.dumps({"op": "subscribe", "args": chunk}))
+            # Avoid rate-limit bursts on large topic sets.
+            time.sleep(0.05)
         self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
         self._ping_thread.start()
-        logger.info("Bybit public depth WebSocket connected")
+        logger.info(
+            f"Bybit public depth WebSocket connected | topics={len(topics)} | "
+            f"chunk_size={self._topics_per_subscribe}"
+        )
 
     @staticmethod
     def _normalize_level(level) -> Optional[Dict[str, float]]:
@@ -784,6 +793,11 @@ class BybitPublicDepthWebSocket:
             return
 
         if payload.get("op") in {"pong", "ping"} or str(payload.get("ret_msg", "")).lower() == "pong":
+            return
+        if payload.get("op") == "subscribe":
+            success = bool(payload.get("success", False))
+            if not success:
+                logger.warning(f"Bybit subscribe failed: {payload}")
             return
 
         topic = str(payload.get("topic", "") or "")
@@ -1301,4 +1315,3 @@ class LatencyMonitor:
 
 
 LATENCY = LatencyMonitor()
-
