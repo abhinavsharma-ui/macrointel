@@ -624,7 +624,7 @@ class BybitPublicDepthWebSocket:
         self._running = False
         self._books: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(lambda: {"bids": {}, "asks": {}})
         self._ping_thread: Optional[threading.Thread] = None
-        self._topics_per_subscribe = max(5, int(os.getenv("BYBIT_WS_TOPICS_PER_SUBSCRIBE", "20") or 20))
+        self._topics_per_subscribe = max(1, min(10, int(os.getenv("BYBIT_WS_TOPICS_PER_SUBSCRIBE", "10") or 10)))
 
     def _ws_url(self) -> str:
         return self.TESTNET_WS_BASE if self.testnet else self.WS_BASE
