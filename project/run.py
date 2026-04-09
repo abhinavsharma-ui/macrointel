@@ -783,16 +783,16 @@ class MacroIntelligenceSystem:
             payload["meta_decision"] = meta
         return payload
 
-    def _load_feature_store_bootstrap(self) -> Dict[str, pd.DataFrame]:
+    def _select_feature_store_bootstrap_paths(self) -> List[Tuple[str, Path]]:
         if self._feature_store_bootstrap_attempted:
-            return {}
+            return []
         self._feature_store_bootstrap_attempted = True
         if not self._feature_store_enabled or not self._feature_store_dir.exists():
-            return {}
+            return []
 
         feature_paths = {path.stem.upper(): path for path in self._feature_store_dir.glob("*.parquet")}
         if not feature_paths:
-            return {}
+            return []
 
         ordered_symbols = [symbol for symbol in self._get_target_symbols() if symbol in feature_paths]
         if not ordered_symbols:
@@ -806,27 +806,14 @@ class MacroIntelligenceSystem:
         if cap > 0:
             ordered_symbols = ordered_symbols[:cap]
 
-        loaded: Dict[str, pd.DataFrame] = {}
-        for symbol in ordered_symbols:
-            path = feature_paths.get(symbol)
-            if path is None:
-                continue
-            try:
-                frame = pd.read_parquet(path)
-            except Exception as exc:
-                logger.debug("Feature store bootstrap skip %s: %s", path.name, exc)
-                continue
-            if frame is None or getattr(frame, "empty", True):
-                continue
-            loaded[symbol] = frame
-
-        if loaded:
+        selected_paths = [(symbol, feature_paths[symbol]) for symbol in ordered_symbols if symbol in feature_paths]
+        if selected_paths:
             logger.info(
-                "Signal bootstrap loaded %s feature files from %s",
-                len(loaded),
+                "Signal bootstrap queued %s feature files from %s",
+                len(selected_paths),
                 self._feature_store_dir,
             )
-        return loaded
+        return selected_paths
 
     def _sync_runtime_state_with_broker(self, broker) -> None:
         if broker is None:
@@ -6282,31 +6269,43 @@ class MacroIntelligenceSystem:
                             normal_signal.pop("stale_reason", None)
                             normal_signal.pop("stale_seconds", None)
 
-                if not daily_prices and not self._signal_store:
-                    bootstrap_frames = self._load_feature_store_bootstrap()
-                    if bootstrap_frames:
+                if not self._signal_store:
+                    bootstrap_paths = self._select_feature_store_bootstrap_paths()
+                    if bootstrap_paths:
                         feature_cache = self._components.get("feature_matrices")
                         if not isinstance(feature_cache, dict):
                             feature_cache = {}
                             self._components["feature_matrices"] = feature_cache
-                        feature_cache.update(bootstrap_frames)
                         earnings_events = self._components.get("earnings_data", {}).get("earnings_events")
                         bootstrapped_signals = 0
-                        bootstrap_symbols = list(bootstrap_frames.keys())
+                        bootstrap_failures = 0
+                        bootstrap_map = {symbol: path for symbol, path in bootstrap_paths}
+                        bootstrap_symbols = list(bootstrap_map.keys())
                         bootstrap_batches = self._chunk_symbols(bootstrap_symbols, self._inference_feature_chunk_size)
                         for batch_idx, batch_symbols in enumerate(bootstrap_batches, start=1):
+                            batch_restored = 0
                             for symbol in batch_symbols:
-                                features = bootstrap_frames.get(symbol)
+                                path = bootstrap_map.get(symbol)
+                                if path is None:
+                                    continue
+                                try:
+                                    features = pd.read_parquet(path)
+                                except Exception as exc:
+                                    bootstrap_failures += 1
+                                    if bootstrap_failures <= 5:
+                                        logger.warning("Signal bootstrap read failed for %s: %s", path.name, exc)
+                                    continue
                                 if features is None or getattr(features, "empty", True):
                                     continue
+                                feature_cache[symbol] = features
                                 bootstrapped_signals += _refresh_signal_for_symbol(symbol, features, earnings_events)
                                 signal = self._signal_store.get(symbol)
                                 if isinstance(signal, dict):
+                                    batch_restored += 1
                                     self._signal_store[symbol] = self._mark_signal_warmup_only(
                                         symbol,
                                         signal,
                                         reason="feature_store_bootstrap",
-                                        lane_override=signal.get("lane"),
                                     )
                                     normal_signal = self._signal_store[symbol].get("normal_lane_signal")
                                     if isinstance(normal_signal, dict):
@@ -6318,15 +6317,19 @@ class MacroIntelligenceSystem:
                                         )
                             if len(bootstrap_batches) > 1:
                                 logger.info(
-                                    "Signal bootstrap progress: batch %s/%s | %s/%s signals restored",
+                                    "Signal bootstrap progress: batch %s/%s | %s/%s files loaded | %s restored | %s failures",
                                     batch_idx,
                                     len(bootstrap_batches),
                                     min(batch_idx * self._inference_feature_chunk_size, len(bootstrap_symbols)),
                                     len(bootstrap_symbols),
+                                    batch_restored,
+                                    bootstrap_failures,
                                 )
                         logger.info(
-                            "Signal bootstrap ready: %s cached signals restored while live data warms",
+                            "Signal bootstrap ready: %s cached signals restored while live data warms (%s files queued, %s failures)",
                             len(self._signal_store),
+                            len(bootstrap_symbols),
+                            bootstrap_failures,
                         )
 
                 if not price_data:
