@@ -1825,6 +1825,7 @@ class MacroIntelligenceSystem:
         from core.realtime_engine import (
             BinancePublicDepthWebSocket,
             BybitPublicDepthWebSocket,
+            BybitTickerPollingFeed,
             FinnhubWebSocket,
             MetaTrader5PollingFeed,
             PollingFallback,
@@ -1903,6 +1904,18 @@ class MacroIntelligenceSystem:
                     f"Crypto realtime feeds started: {', '.join(started_crypto_feeds)} | "
                     f"signal universe={len(self._crypto_symbols)} | primary_only={self._crypto_primary_feed_only_symbols}"
                 )
+            if os.getenv("BYBIT_TICKER_POLL_FALLBACK_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}:
+                bybit_poll_symbols = self._bybit_crypto_symbols or self._crypto_symbols
+                if bybit_poll_symbols:
+                    bybit_poll = BybitTickerPollingFeed(
+                        symbols=bybit_poll_symbols,
+                        buffer=PRICE_BUFFER,
+                        interval_seconds=float(os.getenv("BYBIT_TICKER_POLL_INTERVAL_SECONDS", "3.0")),
+                        timeout_seconds=float(os.getenv("BYBIT_TICKER_POLL_TIMEOUT_SECONDS", "8.0")),
+                        testnet=os.getenv("BYBIT_WS_TESTNET", "0").strip().lower() in {"1", "true", "yes", "on"},
+                    )
+                    bybit_poll.start()
+                    self._components["bybit_ticker_poll"] = bybit_poll
 
         if not polling_enabled:
             logger.info("Polling fallback disabled (POLLING_FALLBACK_ENABLED=0)")

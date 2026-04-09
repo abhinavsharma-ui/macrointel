@@ -816,6 +816,112 @@ class BybitPublicDepthWebSocket:
         logger.info("Bybit public depth WebSocket closed")
 
 
+class BybitTickerPollingFeed:
+    """
+    Public Bybit spot ticker poller.
+
+    This is a reliability fallback for crypto signals when websocket depth is
+    connected but not delivering enough live top-of-book updates to populate
+    the signal engine.
+    """
+
+    API_URL = "https://api.bybit.com/v5/market/tickers"
+    TESTNET_API_URL = "https://api-testnet.bybit.com/v5/market/tickers"
+
+    def __init__(
+        self,
+        symbols: List[str],
+        buffer: RealTimePriceBuffer = None,
+        depth_buffer: PublicDepthBuffer = None,
+        *,
+        testnet: bool = False,
+        interval_seconds: float = 3.0,
+        timeout_seconds: float = 8.0,
+    ):
+        self.symbols = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        self.buffer = buffer or PRICE_BUFFER
+        self.depth_buffer = depth_buffer or DEPTH_BUFFER
+        self.testnet = bool(testnet)
+        self.interval_seconds = max(1.0, float(interval_seconds))
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.source = "bybit_rest_testnet" if self.testnet else "bybit_rest"
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._warned_empty = False
+
+    def _url(self) -> str:
+        return self.TESTNET_API_URL if self.testnet else self.API_URL
+
+    def start(self, daemon: bool = True):
+        self._running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=daemon, name="bybit-ticker-poll")
+        self._thread.start()
+        logger.info(f"Bybit ticker polling feed started for {len(self.symbols)} crypto symbols")
+
+    def stop(self):
+        self._running = False
+
+    def _poll_loop(self):
+        while self._running:
+            started = time.time()
+            try:
+                response = requests.get(
+                    self._url(),
+                    params={"category": "spot"},
+                    timeout=self.timeout_seconds,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                entries = (((payload or {}).get("result") or {}).get("list") or [])
+                pushed = 0
+                for item in entries:
+                    symbol = str(item.get("symbol") or "").upper()
+                    if symbol not in self.symbols:
+                        continue
+                    last_price = float(item.get("lastPrice", 0.0) or 0.0)
+                    bid = float(item.get("bid1Price", 0.0) or 0.0)
+                    ask = float(item.get("ask1Price", 0.0) or 0.0)
+                    bid_qty = float(item.get("bid1Size", 0.0) or 0.0)
+                    ask_qty = float(item.get("ask1Size", 0.0) or 0.0)
+                    if last_price <= 0 and bid <= 0 and ask <= 0:
+                        continue
+                    if last_price <= 0 and bid > 0 and ask > 0:
+                        last_price = (bid + ask) / 2.0
+                    if bid > 0 and ask > 0:
+                        self.depth_buffer.update(
+                            symbol,
+                            {
+                                "best_bid": bid,
+                                "best_ask": ask,
+                                "best_bid_qty": bid_qty,
+                                "best_ask_qty": ask_qty,
+                                "source": self.source,
+                            },
+                        )
+                    self.buffer.push(
+                        Tick(
+                            symbol=symbol,
+                            price=last_price,
+                            volume=int(float(item.get("volume24h", 0.0) or 0.0)),
+                            timestamp=datetime.now(timezone.utc),
+                            bid=bid if bid > 0 else None,
+                            ask=ask if ask > 0 else None,
+                            market="CRYPTO",
+                            source=self.source,
+                        )
+                    )
+                    pushed += 1
+                if pushed == 0 and not self._warned_empty:
+                    logger.warning("Bybit ticker polling feed returned no matching symbols")
+                    self._warned_empty = True
+                elif pushed > 0:
+                    self._warned_empty = False
+            except Exception as exc:
+                logger.warning(f"Bybit ticker polling feed error: {exc}")
+            elapsed = time.time() - started
+            time.sleep(max(0.0, self.interval_seconds - elapsed))
+
+
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Finnhub WebSocket (US Markets)
