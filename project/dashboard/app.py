@@ -400,8 +400,16 @@ def create_app(
     app = Flask(__name__)
     app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "macro-intel-prod-2024")
     CORS(app)
-    socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading",
-                        logger=False, engineio_logger=False)
+    socketio = SocketIO(
+        app,
+        cors_allowed_origins="*",
+        async_mode="threading",
+        logger=False,
+        engineio_logger=False,
+        ping_timeout=60,
+        ping_interval=25,
+        max_http_buffer_size=10_000_000,
+    )
 
     _signal_store   = signal_store   if signal_store   is not None else {}
     _stress_results = stress_results if stress_results is not None else {}
@@ -1927,7 +1935,11 @@ body.theme-light{background:
 <script>
 const SOCKET_AVAILABLE = typeof window.io === 'function';
 const CHART_AVAILABLE = typeof window.Chart !== 'undefined';
-const io_sock = SOCKET_AVAILABLE ? io({
+const _ioOrigin = (typeof window !== 'undefined' && window.location && window.location.origin)
+  ? window.location.origin
+  : undefined;
+const _ioOpts = {
+  path: '/socket.io',
   transports: ['polling', 'websocket'],
   upgrade: true,
   reconnection: true,
@@ -1935,7 +1947,10 @@ const io_sock = SOCKET_AVAILABLE ? io({
   reconnectionDelay: 1000,
   reconnectionDelayMax: 8000,
   timeout: 20000,
-}) : { on(){}, emit(){} };
+};
+const io_sock = SOCKET_AVAILABLE
+  ? (_ioOrigin ? io(_ioOrigin, _ioOpts) : io(_ioOpts))
+  : { on(){}, emit(){} };
 const MARKET_BOARD_LIMIT = 36;
 const LEADER_SYMBOLS = ['AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','AMD','NFLX','QCOM','AVGO','JPM','WMT','XOM','SPY','QQQ','DIA','IWM','RELIANCE.NS','TCS.NS','INFY.NS'];
 const TV_AMEX_SYMBOLS = new Set(['SPY','DIA','IWM','GLD','SLV','TLT','HYG','VTI','XLF','XLE','XLK','XLY','XLI','XLV','XLP','XLB','XLU']);
@@ -3623,5 +3638,13 @@ if __name__ == "__main__":
         threading.Thread(target=_infer, daemon=True).start()
         app, socketio = create_app(price_buffer=PRICE_BUFFER, paper_broker=broker,
                                    signal_store=sig_store, stress_results=stress)
-        socketio.run(app, host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        socketio.run(
+            app,
+            host="0.0.0.0",
+            port=port,
+            debug=False,
+            use_reloader=False,
+            allow_unsafe_werkzeug=os.getenv("ALLOW_UNSAFE_WERKZEUG", "1").strip().lower()
+            in {"1", "true", "yes", "on"},
+        )
 
