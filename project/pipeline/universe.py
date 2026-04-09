@@ -10,6 +10,7 @@ Usage:
 """
 
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import List
 
@@ -288,10 +289,33 @@ def _expanded_day_trade_enabled() -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _full_day_trade_enabled() -> bool:
+    raw = os.getenv("DAY_TRADE_FULL_UNIVERSE", "").strip().lower()
+    if raw:
+        return raw in {"1", "true", "yes", "on"}
+    mode = str(os.getenv("UNIVERSE_MODE", "full") or "full").strip().lower()
+    return mode.startswith(("throughput", "daytrade"))
+
+
+@lru_cache(maxsize=4)
+def _resolved_day_trade_symbol_set(mode: str) -> set:
+    mode_key = str(mode or "full").strip().lower() or "full"
+    base_symbols = DAY_TRADE_EXPANDED_SYMBOLS if _expanded_day_trade_enabled() else DAY_TRADE_SYMBOLS
+    if _full_day_trade_enabled():
+        base_symbols = list(dict.fromkeys(base_symbols + get_universe(mode_key) + _extra_universe_symbols(mode_key)))
+    return {
+        symbol
+        for symbol in _dedupe_symbols(base_symbols)
+        if symbol and not symbol.endswith(("USDT", "USDC", "BUSD"))
+    }
+
+
 def is_day_trade_symbol(symbol: str) -> bool:
-    if _expanded_day_trade_enabled():
-        return symbol in DAY_TRADE_EXPANDED_SYMBOL_SET
-    return symbol in DAY_TRADE_SYMBOL_SET
+    symbol_key = str(symbol or "").strip().upper()
+    if not symbol_key:
+        return False
+    mode = str(os.getenv("UNIVERSE_MODE", "full") or "full").strip().lower() or "full"
+    return symbol_key in _resolved_day_trade_symbol_set(mode)
 
 
 def get_universe(mode: str = "core") -> list:
