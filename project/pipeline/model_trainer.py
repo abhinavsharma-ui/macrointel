@@ -41,6 +41,34 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# ── Platt calibration (already built in models/calibration.py, now wired in) ──
+def _fit_platt_calibrator(model, X_cal: np.ndarray, y_cal: np.ndarray):
+    """Fit a BinaryPlattCalibrator on calibration data and return it."""
+    try:
+        from models.calibration import BinaryPlattCalibrator
+        raw_probs = model.predict_proba(X_cal)[:, 1]
+        cal = BinaryPlattCalibrator(use_logit=True)
+        cal.fit(raw_probs, y_cal)
+        return cal if cal.fitted else None
+    except Exception as exc:
+        logger.warning(f"Platt calibrator fit failed: {exc}")
+        return None
+
+
+def _apply_calibration(calibrator, raw_buy_prob: float) -> float:
+    """Apply a fitted calibrator to a single probability, fall back gracefully."""
+    if calibrator is None:
+        return raw_buy_prob
+    try:
+        import numpy as np
+        from models.calibration import BinaryPlattCalibrator
+        if not isinstance(calibrator, BinaryPlattCalibrator) or not calibrator.fitted:
+            return raw_buy_prob
+        calibrated = calibrator.transform(np.array([raw_buy_prob]))
+        return float(np.clip(calibrated[0], 1e-6, 1.0 - 1e-6))
+    except Exception:
+        return raw_buy_prob
+
 MODEL_DIR  = Path("data/models")
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -93,6 +121,8 @@ class XGBoostTrainer:
         self.forward_days = forward_days
         self.us_model     = None
         self.nse_model    = None
+        self.us_calibrator  = None   # Platt calibrator for US model
+        self.nse_calibrator = None   # Platt calibrator for NSE model
         self.feature_names: list = []
 
     def train(self, price_data: Dict[str, pd.DataFrame]) -> Dict:
@@ -152,7 +182,7 @@ class XGBoostTrainer:
             X_all = np.vstack(us_X)
             y_all = np.concatenate(us_y)
             logger.info(f"Training US model: {len(X_all)} samples, {X_all.shape[1]} features")
-            self.us_model, metrics = self._fit(X_all, y_all, xgb, "US")
+            self.us_model, self.us_calibrator, metrics = self._fit(X_all, y_all, xgb, "US")
             report["us"] = metrics
 
         # Train NSE model
@@ -160,7 +190,7 @@ class XGBoostTrainer:
             X_all = np.vstack(nse_X)
             y_all = np.concatenate(nse_y)
             logger.info(f"Training NSE model: {len(X_all)} samples, {X_all.shape[1]} features")
-            self.nse_model, metrics = self._fit(X_all, y_all, xgb, "NSE")
+            self.nse_model, self.nse_calibrator, metrics = self._fit(X_all, y_all, xgb, "NSE")
             report["nse"] = metrics
 
         return report
@@ -205,31 +235,50 @@ class XGBoostTrainer:
         prec = precision_score(y_test, y_pred, zero_division=0)
         rec  = recall_score(y_test, y_pred, zero_division=0)
 
+        # ── Platt calibration: fit on held-out test probabilities ──────────
+        # Uses the last 30% of the test set as a calibration set so the
+        # calibrator never sees training data.  Falls back silently if it
+        # can't fit (e.g. only one class present in the slice).
+        cal_split  = int(len(X_test) * 0.70)
+        calibrator = _fit_platt_calibrator(model, X_test[cal_split:], y_test[cal_split:])
+        if calibrator is not None:
+            logger.info(f"{market} Platt calibrator fitted on {len(X_test) - cal_split} samples")
+        # ───────────────────────────────────────────────────────────────────
+
         logger.info(
             f"{market} model trained — "
             f"Accuracy: {acc:.1%}  Precision: {prec:.1%}  Recall: {rec:.1%}"
         )
 
-        return model, {
+        return model, calibrator, {
             "accuracy":  round(acc, 4),
             "precision": round(prec, 4),
             "recall":    round(rec, 4),
             "train_samples": len(X_train),
             "test_samples":  len(X_test),
+            "calibrator_fitted": calibrator is not None,
         }
 
     def save(self):
-        """Save trained models and feature names to disk."""
+        """Save trained models, calibrators, and feature names to disk."""
         payload = {"feature_names": self.feature_names}
 
         if self.us_model:
             with open(US_MODEL_PATH, "wb") as f:
-                pickle.dump({**payload, "model": self.us_model}, f)
+                pickle.dump({
+                    **payload,
+                    "model":      self.us_model,
+                    "calibrator": self.us_calibrator,   # None if fit failed
+                }, f)
             logger.info(f"US model saved → {US_MODEL_PATH}")
 
         if self.nse_model:
             with open(NSE_MODEL_PATH, "wb") as f:
-                pickle.dump({**payload, "model": self.nse_model}, f)
+                pickle.dump({
+                    **payload,
+                    "model":      self.nse_model,
+                    "calibrator": self.nse_calibrator,
+                }, f)
             logger.info(f"NSE model saved → {NSE_MODEL_PATH}")
 
     @staticmethod
@@ -311,8 +360,14 @@ class ModelPredictor:
 
         try:
             proba    = model.predict_proba(X)[0]
-            buy_prob = float(proba[1])
-            sel_prob = float(proba[0])
+
+            # ── Platt calibration: turn raw XGBoost probabilities into true
+            #    posterior probabilities before applying thresholds.
+            #    Falls back to raw proba silently if no calibrator was saved.
+            calibrator = payload.get("calibrator")
+            buy_prob = float(_apply_calibration(calibrator, float(proba[1])))
+            # Derive sell_prob as the complement so they always sum to 1
+            sel_prob = float(np.clip(1.0 - buy_prob, 1e-6, 1.0 - 1e-6))
 
             if buy_prob >= 0.60:
                 signal = "buy"
@@ -329,7 +384,7 @@ class ModelPredictor:
                 "confidence": round(conf, 4),
                 "buy_prob":   round(buy_prob, 4),
                 "sell_prob":  round(sel_prob, 4),
-                "model_used": f"xgboost_{'nse' if is_nse else 'us'}",
+                "model_used": f"xgboost_{'nse' if is_nse else 'us'}_calibrated",
             }
 
         except Exception as e:

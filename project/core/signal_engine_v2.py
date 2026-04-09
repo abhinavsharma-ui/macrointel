@@ -596,6 +596,28 @@ class MetaDecisionEngine:
                 )
                 take_prob += min(0.06, bearish_alignment * 0.10)
 
+        # ── Directional meta-scoring ───────────────────────────────────────
+        # Buy signals and sell signals have fundamentally different drivers.
+        # We add a direction-specific boost using the features that predict
+        # each side succeeding. Capped at 0.10 so existing thresholds hold.
+        if direction == "buy":
+            buy_directional_boost = (
+                max(float(factor_scores.get("trend", 0.0) or 0.0), 0.0) * 0.09
+                + max(float(factor_scores.get("momentum", 0.0) or 0.0), 0.0) * 0.07
+                + max(float(factor_scores.get("volume", 0.0) or 0.0), 0.0) * 0.04
+                + max(float(factor_scores.get("earnings_propagation", 0.0) or 0.0), 0.0) * 0.05
+            )
+            take_prob = float(np.clip(take_prob + min(buy_directional_boost, 0.10), 0.01, 0.99))
+        elif direction == "sell":
+            sell_directional_boost = (
+                max(-float(factor_scores.get("trend", 0.0) or 0.0), 0.0) * 0.09
+                + max(-float(factor_scores.get("momentum", 0.0) or 0.0), 0.0) * 0.07
+                + max(float(factor_scores.get("close_reversal", 0.0) or 0.0), 0.0) * 0.06
+                + max(-float(factor_scores.get("earnings_propagation", 0.0) or 0.0), 0.0) * 0.03
+            )
+            take_prob = float(np.clip(take_prob + min(sell_directional_boost, 0.10), 0.01, 0.99))
+        # ──────────────────────────────────────────────────────────────────
+
         take_prob = float(np.clip(take_prob, 0.01, 0.99))
         expected_edge_pct = round(
             (take_prob * take_profit_pct) - ((1.0 - take_prob) * stop_loss_pct),
