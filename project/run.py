@@ -207,7 +207,7 @@ class MacroIntelligenceSystem:
             ),
         )
         self._crypto_signal_refresh_seconds = max(2.0, float(os.getenv("CRYPTO_SIGNAL_REFRESH_SECONDS", "5")))
-        self._allow_dual_lane_variants = os.getenv("DUAL_LANE_VARIANTS_ENABLED", "1").strip().lower() in {
+        self._allow_dual_lane_variants = os.getenv("DUAL_LANE_VARIANTS_ENABLED", "0").strip().lower() in {
             "1",
             "true",
             "yes",
@@ -2252,7 +2252,11 @@ class MacroIntelligenceSystem:
         if not isinstance(raw, dict):
             return {}
         target_lane = str(lane or raw.get("lane") or "normal").lower()
-        if target_lane == "normal" and isinstance(raw.get("normal_lane_signal"), dict):
+        if (
+            target_lane == "normal"
+            and self._allow_dual_lane_variants
+            and isinstance(raw.get("normal_lane_signal"), dict)
+        ):
             variant = self._hydrate_signal_runtime_fields(symbol, raw["normal_lane_signal"])
             variant["symbol"] = symbol
             return self._decorate_signal(symbol, variant, lane_override="normal")
@@ -2279,7 +2283,7 @@ class MacroIntelligenceSystem:
                     items.append((primary_lane, symbol, primary))
                     seen.add(key)
             normal_variant = self._get_lane_signal(symbol, "normal")
-            include_normal_variant = bool(normal_variant) and (self._allow_dual_lane_variants or primary_lane != "normal")
+            include_normal_variant = bool(normal_variant) and self._allow_dual_lane_variants
             if normal_variant and include_normal_variant and (symbol, "normal") not in seen:
                 items.append(("normal", symbol, normal_variant))
                 seen.add((symbol, "normal"))
@@ -6439,7 +6443,7 @@ class MacroIntelligenceSystem:
                         "day_trade_intraday" if symbol_day_mode else "swing_event",
                         lane_override="day" if symbol_day_mode else "normal",
                     )
-                    if symbol_day_mode:
+                    if symbol_day_mode and self._allow_dual_lane_variants:
                         signal["normal_lane_signal"] = _build_signal_payload(
                             base_scored,
                             "swing_event",
