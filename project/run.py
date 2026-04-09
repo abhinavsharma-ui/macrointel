@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent
-load_dotenv(ROOT / ".env", override=True)
+load_dotenv(ROOT / ".env")
 load_dotenv(ROOT / ".env.example", override=False)
 
 import os
@@ -174,14 +174,14 @@ class MacroIntelligenceSystem:
         self._crypto_signal_stale_seconds = max(15, int(os.getenv("CRYPTO_SIGNAL_STALE_SECONDS", "45")))
         self._crypto_signal_hold_grace_seconds = max(
             30,
-            int(os.getenv("CRYPTO_SIGNAL_HOLD_GRACE_SECONDS", "1800")),
+            int(os.getenv("CRYPTO_SIGNAL_HOLD_GRACE_SECONDS", "420")),
         )
         self._crypto_signal_stale_retention_seconds = max(
             self._crypto_signal_hold_grace_seconds,
             int(
                 os.getenv(
                     "CRYPTO_SIGNAL_STALE_RETENTION_SECONDS",
-                    "7200",
+                    str(self._crypto_signal_hold_grace_seconds * 3),
                 )
             ),
         )
@@ -238,26 +238,26 @@ class MacroIntelligenceSystem:
         self._entry_require_live_price_normal = os.getenv("ENTRY_REQUIRE_LIVE_PRICE_NORMAL", "1").strip().lower() not in {"0", "false", "off"}
         self._entry_require_live_price_day = os.getenv("ENTRY_REQUIRE_LIVE_PRICE_DAY", "1").strip().lower() not in {"0", "false", "off"}
         self._entry_require_live_price_crypto = os.getenv("ENTRY_REQUIRE_LIVE_PRICE_CRYPTO", "1").strip().lower() not in {"0", "false", "off"}
-        self._auto_trade_min_conviction = max(0.0, float(os.getenv("AUTO_TRADE_MIN_CONVICTION", "1.0")))
-        self._auto_trade_top_k = max(1, int(os.getenv("AUTO_TRADE_TOP_K", "480")))
-        self._auto_trade_max_new_per_cycle = max(1, int(os.getenv("AUTO_TRADE_MAX_NEW_PER_CYCLE", "120")))
-        self._auto_trade_max_open_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "520")))
-        self._auto_trade_max_sector_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_SECTOR_POSITIONS", "80")))
-        self._auto_trade_cooldown_seconds = max(0, int(os.getenv("AUTO_TRADE_COOLDOWN_SECONDS", "45")))
+        self._auto_trade_min_conviction = max(0.0, float(os.getenv("AUTO_TRADE_MIN_CONVICTION", "1.2")))
+        self._auto_trade_top_k = max(1, int(os.getenv("AUTO_TRADE_TOP_K", "72")))
+        self._auto_trade_max_new_per_cycle = max(1, int(os.getenv("AUTO_TRADE_MAX_NEW_PER_CYCLE", "18")))
+        self._auto_trade_max_open_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "36")))
+        self._auto_trade_max_sector_positions = max(1, int(os.getenv("AUTO_TRADE_MAX_SECTOR_POSITIONS", "6")))
+        self._auto_trade_cooldown_seconds = max(0, int(os.getenv("AUTO_TRADE_COOLDOWN_SECONDS", "120")))
         self._auto_trade_min_hold_seconds = max(0, int(os.getenv("AUTO_TRADE_MIN_HOLD_SECONDS", "300")))
-        self._day_trade_force_exit_seconds = max(300, int(os.getenv("DAY_TRADE_FORCE_EXIT_SECONDS", "14400")))
-        self._day_trade_min_tick_count = max(4, int(os.getenv("DAY_TRADE_MIN_TICK_COUNT", "6")))
+        self._day_trade_force_exit_seconds = max(300, int(os.getenv("DAY_TRADE_FORCE_EXIT_SECONDS", "3600")))
+        self._day_trade_min_tick_count = max(6, int(os.getenv("DAY_TRADE_MIN_TICK_COUNT", "10")))
         self._day_trade_intraday_score_threshold = max(
             0.10,
-            float(os.getenv("DAY_TRADE_INTRADAY_SCORE_THRESHOLD", "0.10")),
+            float(os.getenv("DAY_TRADE_INTRADAY_SCORE_THRESHOLD", "0.18")),
         )
         self._day_trade_intraday_weight = min(
             0.95,
-            max(0.20, float(os.getenv("DAY_TRADE_INTRADAY_WEIGHT", "0.78"))),
+            max(0.20, float(os.getenv("DAY_TRADE_INTRADAY_WEIGHT", "0.70"))),
         )
         self._day_trade_news_boost_threshold = max(
             0.0,
-            float(os.getenv("DAY_TRADE_NEWS_BOOST_THRESHOLD", "0.10")),
+            float(os.getenv("DAY_TRADE_NEWS_BOOST_THRESHOLD", "0.15")),
         )
         self._day_trade_risk_per_trade_pct = min(
             0.02,
@@ -277,33 +277,33 @@ class MacroIntelligenceSystem:
         )
         self._day_trade_active_open_minutes = max(
             self._day_trade_opening_range_minutes,
-            int(os.getenv("DAY_TRADE_ACTIVE_OPEN_MINUTES", "240")),
+            int(os.getenv("DAY_TRADE_ACTIVE_OPEN_MINUTES", "90")),
         )
         self._day_trade_power_hour_minutes = max(
             15,
-            int(os.getenv("DAY_TRADE_POWER_HOUR_MINUTES", "240")),
+            int(os.getenv("DAY_TRADE_POWER_HOUR_MINUTES", "60")),
         )
         self._day_trade_vwap_pullback_atr_mult = max(
             0.05,
-            float(os.getenv("DAY_TRADE_VWAP_PULLBACK_ATR_MULT", "0.15")),
+            float(os.getenv("DAY_TRADE_VWAP_PULLBACK_ATR_MULT", "0.08")),
         )
         self._day_trade_ensemble_threshold = max(
             0.15,
-            float(os.getenv("DAY_TRADE_ENSEMBLE_THRESHOLD", "0.28")),
+            float(os.getenv("DAY_TRADE_ENSEMBLE_THRESHOLD", "0.42")),
         )
         self._day_trade_trail_stop_pct = max(
             0.0025,
             float(os.getenv("DAY_TRADE_TRAIL_STOP_PCT", "0.0065")),
         )
-        self._auto_trade_base_position_pct = max(0.001, float(os.getenv("AUTO_TRADE_BASE_POSITION_PCT", "0.006")))
+        self._auto_trade_base_position_pct = max(0.005, float(os.getenv("AUTO_TRADE_BASE_POSITION_PCT", "0.03")))
         self._auto_trade_max_position_pct = max(
             self._auto_trade_base_position_pct,
-            float(os.getenv("AUTO_TRADE_MAX_POSITION_PCT", "0.02")),
+            float(os.getenv("AUTO_TRADE_MAX_POSITION_PCT", "0.08")),
         )
         self._lane_target_open_positions = {
-            "normal": max(0, int(os.getenv("NORMAL_LANE_TARGET_OPEN_POSITIONS", os.getenv("LANE_TARGET_OPEN_POSITIONS", "180")))),
-            "day": max(0, int(os.getenv("DAY_LANE_TARGET_OPEN_POSITIONS", os.getenv("LANE_TARGET_OPEN_POSITIONS", "180")))),
-            "crypto": max(0, int(os.getenv("CRYPTO_LANE_TARGET_OPEN_POSITIONS", os.getenv("LANE_TARGET_OPEN_POSITIONS", "180")))),
+            "normal": max(0, int(os.getenv("NORMAL_LANE_TARGET_OPEN_POSITIONS", os.getenv("LANE_TARGET_OPEN_POSITIONS", "150")))),
+            "day": max(0, int(os.getenv("DAY_LANE_TARGET_OPEN_POSITIONS", os.getenv("LANE_TARGET_OPEN_POSITIONS", "150")))),
+            "crypto": max(0, int(os.getenv("CRYPTO_LANE_TARGET_OPEN_POSITIONS", os.getenv("LANE_TARGET_OPEN_POSITIONS", "150")))),
         }
         self._auto_trade_leader_min_conviction = max(
             0.0, float(os.getenv("AUTO_TRADE_LEADER_MIN_CONVICTION", "0.8"))
@@ -324,79 +324,6 @@ class MacroIntelligenceSystem:
         )
         self._auto_trade_zero_weight_min_rank_score = max(
             0.0, float(os.getenv("AUTO_TRADE_ZERO_WEIGHT_MIN_RANK_SCORE", "0.08"))
-        )
-        self._inventory_pressure_enabled = os.getenv("INVENTORY_PRESSURE_ENABLED", "1").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        self._inventory_pressure_start_ratio = min(
-            0.95,
-            max(0.0, float(os.getenv("INVENTORY_PRESSURE_START_RATIO", "0.15"))),
-        )
-        self._inventory_pressure_full_ratio = min(
-            1.0,
-            max(
-                self._inventory_pressure_start_ratio + 0.01,
-                float(os.getenv("INVENTORY_PRESSURE_FULL_RATIO", "0.75")),
-            ),
-        )
-        self._inventory_pressure_min_conviction_mult = min(
-            1.0,
-            max(0.05, float(os.getenv("INVENTORY_PRESSURE_MIN_CONVICTION_MULT", "0.25"))),
-        )
-        self._inventory_pressure_min_take_probability_mult = min(
-            1.0,
-            max(0.05, float(os.getenv("INVENTORY_PRESSURE_MIN_TAKE_PROBABILITY_MULT", "0.25"))),
-        )
-        self._inventory_pressure_min_rank_score_mult = min(
-            1.0,
-            max(0.05, float(os.getenv("INVENTORY_PRESSURE_MIN_RANK_SCORE_MULT", "0.25"))),
-        )
-        self._inventory_pressure_allow_meta_override = os.getenv("INVENTORY_PRESSURE_ALLOW_META_OVERRIDE", "1").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        self._inventory_pressure_allow_optimizer_override = os.getenv("INVENTORY_PRESSURE_ALLOW_OPTIMIZER_OVERRIDE", "1").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        self._inventory_pressure_allow_day_window_override = os.getenv("INVENTORY_PRESSURE_ALLOW_DAY_WINDOW_OVERRIDE", "1").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        self._inventory_pressure_neutral_buy_enabled = os.getenv("INVENTORY_PRESSURE_NEUTRAL_BUY_ENABLED", "1").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        self._inventory_pressure_neutral_buy_score_floor = max(
-            0.0,
-            float(os.getenv("INVENTORY_PRESSURE_NEUTRAL_BUY_SCORE_FLOOR", "0.08")),
-        )
-        self._inventory_pressure_neutral_buy_take_probability_floor = min(
-            0.99,
-            max(0.0, float(os.getenv("INVENTORY_PRESSURE_NEUTRAL_BUY_TAKE_PROBABILITY_FLOOR", "0.08"))),
-        )
-        self._inventory_pressure_neutral_buy_rank_score_floor = max(
-            0.0,
-            float(os.getenv("INVENTORY_PRESSURE_NEUTRAL_BUY_RANK_SCORE_FLOOR", "0.05")),
-        )
-        self._inventory_pressure_sector_cap_mult = max(
-            0.0,
-            float(os.getenv("INVENTORY_PRESSURE_SECTOR_CAP_MULT", "2.0")),
-        )
-        self._inventory_pressure_pair_corr_bonus = max(
-            0.0,
-            float(os.getenv("INVENTORY_PRESSURE_PAIR_CORR_BONUS", "0.02")),
         )
         self._auto_trade_replace_margin = max(0.0, float(os.getenv("AUTO_TRADE_REPLACE_MARGIN", "0.02")))
         self._auto_trade_stress_position_mult = min(
@@ -495,19 +422,6 @@ class MacroIntelligenceSystem:
             logger.warning(f"Unsupported BROKER_EXECUTION_MODE '{self._broker_execution_mode}', falling back to paper")
             self._broker_execution_mode = "paper"
         self._shadow_router_enabled = self._broker_execution_mode == "shadow"
-        fractional_equity_default = "1" if self._broker_execution_mode in {"paper", "shadow"} else "0"
-        self._allow_fractional_equities = os.getenv(
-            "AUTO_TRADE_ALLOW_FRACTIONAL_EQUITIES",
-            fractional_equity_default,
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        self._fractional_equity_min_quantity = max(
-            0.0001,
-            float(os.getenv("AUTO_TRADE_FRACTIONAL_EQUITY_MIN_QUANTITY", "0.02")),
-        )
-        self._fractional_equity_precision = min(
-            6,
-            max(2, int(os.getenv("AUTO_TRADE_FRACTIONAL_EQUITY_PRECISION", "4"))),
-        )
         self._shadow_reconciliation_log_path = str(
             os.getenv("SHADOW_RECONCILIATION_LOG_PATH", "data/shadow_execution_log.jsonl")
         ).strip() or "data/shadow_execution_log.jsonl"
@@ -572,30 +486,30 @@ class MacroIntelligenceSystem:
             1.0,
             max(0.25, float(os.getenv("GOVERNOR_LANE_THROTTLE_MULT", "0.75"))),
         )
-        self._crypto_scalper_max_spread_pct = max(0.001, float(os.getenv("CRYPTO_SCALPER_MAX_SPREAD_PCT", "0.12")))
+        self._crypto_scalper_max_spread_pct = max(0.001, float(os.getenv("CRYPTO_SCALPER_MAX_SPREAD_PCT", "0.08")))
         self._crypto_scalper_max_depth_age_seconds = max(
             0.2,
-            float(os.getenv("CRYPTO_SCALPER_MAX_DEPTH_AGE_SECONDS", "4.0")),
+            float(os.getenv("CRYPTO_SCALPER_MAX_DEPTH_AGE_SECONDS", "2.0")),
         )
         self._crypto_scalper_max_tick_age_seconds = max(
             0.2,
-            float(os.getenv("CRYPTO_SCALPER_MAX_TICK_AGE_SECONDS", "4.0")),
+            float(os.getenv("CRYPTO_SCALPER_MAX_TICK_AGE_SECONDS", "2.0")),
         )
         self._crypto_scalper_max_signal_age_seconds = max(
             0.5,
-            float(os.getenv("CRYPTO_SCALPER_MAX_SIGNAL_AGE_SECONDS", "6.0")),
+            float(os.getenv("CRYPTO_SCALPER_MAX_SIGNAL_AGE_SECONDS", "3.0")),
         )
         self._crypto_scalper_min_book_pressure = max(
             0.0,
-            float(os.getenv("CRYPTO_SCALPER_MIN_BOOK_PRESSURE", "0.03")),
+            float(os.getenv("CRYPTO_SCALPER_MIN_BOOK_PRESSURE", "0.08")),
         )
         self._crypto_scalper_min_depth_imbalance = max(
             0.0,
-            float(os.getenv("CRYPTO_SCALPER_MIN_DEPTH_IMBALANCE", "0.03")),
+            float(os.getenv("CRYPTO_SCALPER_MIN_DEPTH_IMBALANCE", "0.06")),
         )
         self._crypto_scalper_min_take_probability = min(
             0.99,
-            max(0.0, float(os.getenv("CRYPTO_SCALPER_MIN_TAKE_PROBABILITY", "0.18"))),
+            max(0.0, float(os.getenv("CRYPTO_SCALPER_MIN_TAKE_PROBABILITY", "0.32"))),
         )
         self._crypto_obi_min_lifetime_ms = max(50.0, float(os.getenv("CRYPTO_OBI_MIN_LIFETIME_MS", "200")))
         self._crypto_obi_max_updates_per_second = max(
@@ -627,13 +541,13 @@ class MacroIntelligenceSystem:
                 "max_new_per_cycle": max(1, int(os.getenv("NORMAL_LANE_MAX_NEW_PER_CYCLE", "20"))),
                 "max_open_positions": max(1, int(os.getenv("NORMAL_LANE_MAX_OPEN_POSITIONS", "40"))),
                 "cooldown_seconds": max(60, int(os.getenv("NORMAL_LANE_COOLDOWN_SECONDS", "300"))),
-                "min_hold_seconds": max(120, int(os.getenv("NORMAL_LANE_MIN_HOLD_SECONDS", "600"))),
+                "min_hold_seconds": max(300, int(os.getenv("NORMAL_LANE_MIN_HOLD_SECONDS", "1800"))),
                 "force_exit_seconds": 0,
                 "risk_per_trade_pct": min(0.02, max(0.001, float(os.getenv("NORMAL_LANE_RISK_PER_TRADE_PCT", "0.0075")))),
                 "base_position_pct": max(0.005, float(os.getenv("NORMAL_LANE_BASE_POSITION_PCT", "0.04"))),
                 "max_position_pct": max(0.01, float(os.getenv("NORMAL_LANE_MAX_POSITION_PCT", "0.10"))),
                 "min_conviction": max(0.0, float(os.getenv("NORMAL_LANE_MIN_CONVICTION", "1.0"))),
-                "min_take_probability": min(0.99, max(0.0, float(os.getenv("NORMAL_LANE_MIN_TAKE_PROBABILITY", "0.12")))),
+                "min_take_probability": min(0.99, max(0.0, float(os.getenv("NORMAL_LANE_MIN_TAKE_PROBABILITY", "0.18")))),
                 "sector_cap": max(1, int(os.getenv("NORMAL_LANE_MAX_SECTOR_POSITIONS", "12"))),
                 "pair_corr_cap": min(0.99, max(0.10, float(os.getenv("NORMAL_LANE_MAX_PAIR_CORRELATION", "0.97")))),
             },
@@ -645,10 +559,10 @@ class MacroIntelligenceSystem:
                 "min_hold_seconds": max(30, int(os.getenv("DAY_LANE_MIN_HOLD_SECONDS", str(self._auto_trade_min_hold_seconds)))),
                 "force_exit_seconds": max(0, int(os.getenv("DAY_LANE_FORCE_EXIT_SECONDS", str(self._day_trade_force_exit_seconds)))),
                 "risk_per_trade_pct": self._day_trade_risk_per_trade_pct,
-                "base_position_pct": max(0.001, float(os.getenv("DAY_LANE_BASE_POSITION_PCT", str(self._auto_trade_base_position_pct)))),
-                "max_position_pct": max(0.001, float(os.getenv("DAY_LANE_MAX_POSITION_PCT", str(self._auto_trade_max_position_pct)))),
-                "min_conviction": max(0.0, float(os.getenv("DAY_LANE_MIN_CONVICTION", "0.65"))),
-                "min_take_probability": min(0.99, max(0.0, float(os.getenv("DAY_LANE_MIN_TAKE_PROBABILITY", "0.08")))),
+                "base_position_pct": max(0.005, float(os.getenv("DAY_LANE_BASE_POSITION_PCT", str(self._auto_trade_base_position_pct)))),
+                "max_position_pct": max(0.005, float(os.getenv("DAY_LANE_MAX_POSITION_PCT", str(self._auto_trade_max_position_pct)))),
+                "min_conviction": max(0.0, float(os.getenv("DAY_LANE_MIN_CONVICTION", "0.75"))),
+                "min_take_probability": min(0.99, max(0.0, float(os.getenv("DAY_LANE_MIN_TAKE_PROBABILITY", "0.14")))),
                 "sector_cap": max(1, int(os.getenv("DAY_LANE_MAX_SECTOR_POSITIONS", str(self._auto_trade_max_sector_positions + 4)))),
                 "pair_corr_cap": min(0.99, max(0.10, float(os.getenv("DAY_LANE_MAX_PAIR_CORRELATION", "0.98")))),
             },
@@ -658,11 +572,11 @@ class MacroIntelligenceSystem:
                 "max_open_positions": max(1, int(os.getenv("CRYPTO_LANE_MAX_OPEN_POSITIONS", "16"))),
                 "cooldown_seconds": max(5, int(os.getenv("CRYPTO_LANE_COOLDOWN_SECONDS", "15"))),
                 "min_hold_seconds": max(15, int(os.getenv("CRYPTO_LANE_MIN_HOLD_SECONDS", "45"))),
-                "force_exit_seconds": max(0, int(os.getenv("CRYPTO_LANE_FORCE_EXIT_SECONDS", "7200"))),
+                "force_exit_seconds": max(0, int(os.getenv("CRYPTO_LANE_FORCE_EXIT_SECONDS", "1800"))),
                 "risk_per_trade_pct": min(0.02, max(0.001, float(os.getenv("CRYPTO_LANE_RISK_PER_TRADE_PCT", "0.004")))),
                 "base_position_pct": max(0.0025, float(os.getenv("CRYPTO_LANE_BASE_POSITION_PCT", "0.025"))),
                 "max_position_pct": max(0.005, float(os.getenv("CRYPTO_LANE_MAX_POSITION_PCT", "0.05"))),
-                "min_conviction": max(0.0, float(os.getenv("CRYPTO_LANE_MIN_CONVICTION", "0.4"))),
+                "min_conviction": max(0.0, float(os.getenv("CRYPTO_LANE_MIN_CONVICTION", "0.5"))),
                 "min_take_probability": self._crypto_scalper_min_take_probability,
                 "sector_cap": max(1, int(os.getenv("CRYPTO_LANE_MAX_SECTOR_POSITIONS", "12"))),
                 "pair_corr_cap": min(0.99, max(0.10, float(os.getenv("CRYPTO_LANE_MAX_PAIR_CORRELATION", "0.98")))),
@@ -1157,9 +1071,9 @@ class MacroIntelligenceSystem:
         )
 
         throughput_lane_defaults = {
-            "normal": {"top_k": 720, "max_new_per_cycle": 180, "max_open_positions": 260, "sector_cap": 120, "pair_corr_cap": 0.999},
-            "day": {"top_k": 720, "max_new_per_cycle": 200, "max_open_positions": 260, "sector_cap": 120, "pair_corr_cap": 0.999},
-            "crypto": {"top_k": 320, "max_new_per_cycle": 180, "max_open_positions": 220, "sector_cap": 260, "pair_corr_cap": 0.9995},
+            "normal": {"top_k": 520, "max_new_per_cycle": 140, "max_open_positions": 220, "sector_cap": 60, "pair_corr_cap": 0.995},
+            "day": {"top_k": 520, "max_new_per_cycle": 160, "max_open_positions": 220, "sector_cap": 70, "pair_corr_cap": 0.997},
+            "crypto": {"top_k": 240, "max_new_per_cycle": 120, "max_open_positions": 180, "sector_cap": 220, "pair_corr_cap": 0.999},
         }
         for lane_name, defaults in throughput_lane_defaults.items():
             lane_cfg = self._lane_engine_config.get(lane_name, {})
@@ -1484,17 +1398,9 @@ class MacroIntelligenceSystem:
             "earnings": "EARNINGS_PIPELINE_BOOTSTRAP_SYMBOL_CAP",
             "altdata": "ALTDATA_PIPELINE_BOOTSTRAP_SYMBOL_CAP",
         }
-        bootstrap_env_name = env_names.get(source_key, f"{source_key.upper()}_PIPELINE_BOOTSTRAP_SYMBOL_CAP")
-        source_bootstrap_env = os.getenv(bootstrap_env_name)
-        global_bootstrap_env = os.getenv("PIPELINE_BOOTSTRAP_SYMBOL_CAP")
-        if max(0, int(configured_cap or 0)) > 0 and source_bootstrap_env is None and global_bootstrap_env is None:
-            return 0
-        raw_cap = (
-            source_bootstrap_env
-            if source_bootstrap_env is not None
-            else global_bootstrap_env
-            if global_bootstrap_env is not None
-            else str(default_caps.get(source_key, 0))
+        raw_cap = os.getenv(
+            env_names.get(source_key, f"{source_key.upper()}_PIPELINE_BOOTSTRAP_SYMBOL_CAP"),
+            os.getenv("PIPELINE_BOOTSTRAP_SYMBOL_CAP", str(default_caps.get(source_key, 0))),
         )
         try:
             cap = max(0, int(float(raw_cap or 0)))
@@ -1664,14 +1570,6 @@ class MacroIntelligenceSystem:
             f"earnings {self._earnings_refresh_seconds}s | "
             f"altdata {self._altdata_refresh_seconds}s | "
             f"inference {self._inference_refresh_seconds}s"
-        )
-        logger.info(
-            "Pipeline symbol caps: prices=%s | sentiment=%s | earnings=%s | altdata=%s | priority=%s",
-            self._source_symbol_caps.get("prices", 0),
-            self._source_symbol_caps.get("sentiment", 0),
-            self._source_symbol_caps.get("earnings", 0),
-            self._source_symbol_caps.get("altdata", 0),
-            self._pipeline_priority_symbol_cap,
         )
         logger.info(
             "Entry readiness guard: %s | stale multiplier x%.1f | market-open check %s",
@@ -4971,13 +4869,6 @@ class MacroIntelligenceSystem:
                 step = 1.0
             quantity = math.floor(max(quantity, 0.0) / step) * step
             return round(max(quantity, 0.0), 6)
-        if self._allow_fractional_equities and lane in {"normal", "day"}:
-            quantity = max(quantity, 0.0)
-            if quantity < self._fractional_equity_min_quantity:
-                return 0.0
-            step = 10 ** (-self._fractional_equity_precision)
-            quantity = math.floor(quantity / step) * step
-            return round(max(quantity, 0.0), self._fractional_equity_precision)
         return float(max(int(quantity), 0))
 
     def _can_enter_position(self, symbol: str, lane: Optional[str] = None) -> bool:
@@ -4985,37 +4876,6 @@ class MacroIntelligenceSystem:
         lane_config = self._lane_config(str(lane or "normal").lower())
         last_trade_ts = self._last_trade_timestamps.get(lane_key, 0.0)
         return (time.time() - last_trade_ts) >= lane_config.get("cooldown_seconds", self._auto_trade_cooldown_seconds)
-
-    def _lane_inventory_pressure(self, lane: str, broker=None) -> Dict[str, float]:
-        lane_key = str(lane or "normal").lower()
-        broker = broker or self._components.get("broker")
-        open_positions = 0
-        if broker is not None:
-            for _, _, _, position_lane, _ in self._iter_open_positions(broker):
-                if position_lane == lane_key:
-                    open_positions += 1
-        lane_config = self._lane_config(lane_key)
-        target_open_positions = int(lane_config.get("target_open_positions", 0) or 0)
-        if target_open_positions <= 0:
-            target_open_positions = int(lane_config.get("max_open_positions", 0) or 0)
-        deficit = max(0, target_open_positions - open_positions)
-        deficit_ratio = (deficit / max(target_open_positions, 1)) if target_open_positions > 0 else 0.0
-        pressure = 0.0
-        if self._inventory_pressure_enabled and target_open_positions > 0 and deficit_ratio > self._inventory_pressure_start_ratio:
-            pressure = self._clamp(
-                (deficit_ratio - self._inventory_pressure_start_ratio)
-                / max(self._inventory_pressure_full_ratio - self._inventory_pressure_start_ratio, 1e-6),
-                0.0,
-                1.0,
-            )
-        return {
-            "lane": lane_key,
-            "open_positions": float(open_positions),
-            "target_open_positions": float(target_open_positions),
-            "deficit": float(deficit),
-            "deficit_ratio": round(deficit_ratio, 4),
-            "pressure": round(pressure, 4),
-        }
 
     def _record_trade_timestamp(self, symbol: str, lane: Optional[str] = None):
         self._last_trade_timestamps[self._cooldown_key(symbol, lane)] = time.time()
@@ -5275,19 +5135,12 @@ class MacroIntelligenceSystem:
         from pipeline.universe import is_leader_symbol
 
         candidates_by_lane: Dict[str, List[Tuple[float, str, Dict, float]]] = defaultdict(list)
-        broker = self._components.get("broker")
-        lane_inventory_pressure = {
-            lane_name: self._lane_inventory_pressure(lane_name, broker=broker)
-            for lane_name in self._lane_engine_order
-        }
         for lane, symbol, signal in self._iter_lane_signal_items():
             if not isinstance(signal, dict):
                 continue
 
             lane = str(lane or signal.get("lane") or "normal").lower()
             lane_config = self._lane_config(lane)
-            inventory_state = lane_inventory_pressure.get(lane, {})
-            pressure = float(inventory_state.get("pressure", 0.0) or 0.0)
             leader_symbol = lane in {"normal", "day"} and is_leader_symbol(symbol)
             meta = signal.get("meta_decision", {}) if isinstance(signal.get("meta_decision"), dict) else {}
             construction = signal.get("portfolio_construction", {}) if isinstance(signal.get("portfolio_construction"), dict) else {}
@@ -5311,44 +5164,13 @@ class MacroIntelligenceSystem:
                     conviction_bias += self._crypto_liquidity_hole_conviction_bias
                 lane_min_conviction = max(0.0, lane_min_conviction + conviction_bias)
                 signal["crypto_conviction_bias"] = round(conviction_bias, 4)
-            relaxed_lane_min_conviction = max(
-                0.0,
-                lane_min_conviction
-                * (1.0 - (pressure * (1.0 - self._inventory_pressure_min_conviction_mult))),
-            )
-            relaxed_min_take_probability = max(
-                0.0,
-                lane_config.get("min_take_probability", 0.0)
-                * (1.0 - (pressure * (1.0 - self._inventory_pressure_min_take_probability_mult))),
-            )
-            relaxed_leader_take_probability = max(
-                0.0,
-                self._auto_trade_leader_min_take_probability
-                * (1.0 - (pressure * (1.0 - self._inventory_pressure_min_take_probability_mult))),
-            )
-            relaxed_leader_rank_score = max(
-                0.0,
-                self._auto_trade_leader_min_rank_score
-                * (1.0 - (pressure * (1.0 - self._inventory_pressure_min_rank_score_mult))),
-            )
-            relaxed_zero_weight_take_probability = max(
-                0.02,
-                self._auto_trade_zero_weight_min_take_probability
-                * (1.0 - (pressure * (1.0 - self._inventory_pressure_min_take_probability_mult))),
-            )
-            relaxed_zero_weight_rank_score = max(
-                0.01,
-                self._auto_trade_zero_weight_min_rank_score
-                * (1.0 - (pressure * (1.0 - self._inventory_pressure_min_rank_score_mult))),
-            )
-            min_conviction = min(relaxed_lane_min_conviction, self._auto_trade_leader_min_conviction) if leader_symbol else relaxed_lane_min_conviction
+            min_conviction = min(lane_min_conviction, self._auto_trade_leader_min_conviction) if leader_symbol else lane_min_conviction
             leader_override = (
                 leader_symbol
-                and take_probability >= relaxed_leader_take_probability
-                and rank_score >= relaxed_leader_rank_score
+                and take_probability >= self._auto_trade_leader_min_take_probability
+                and rank_score >= self._auto_trade_leader_min_rank_score
             )
             position_key = str(signal.get("signal_key") or self._position_key(symbol, lane))
-            signal["inventory_pressure"] = inventory_state
 
             governor_decision = self._governor_decision(signal)
             signal["governor_decision"] = governor_decision
@@ -5384,27 +5206,8 @@ class MacroIntelligenceSystem:
                     continue
             signal["execution_size_multiplier"] = self._safe_number(execution_filter.get("size_multiplier"), 1.0)
 
-            resolved_signal_side = str(signal.get("signal") or "").lower()
-            if resolved_signal_side != "buy":
-                signal_score_hint = max(
-                    self._safe_number(signal.get("final_score"), 0.0),
-                    self._safe_number(signal.get("score"), 0.0),
-                    rank_score,
-                )
-                inventory_neutral_buy_override = (
-                    self._inventory_pressure_neutral_buy_enabled
-                    and resolved_signal_side != "sell"
-                    and pressure >= 0.35
-                    and signal_score_hint >= max(0.01, self._inventory_pressure_neutral_buy_score_floor * (1.0 - pressure * 0.35))
-                    and take_probability >= max(0.02, self._inventory_pressure_neutral_buy_take_probability_floor * (1.0 - pressure * 0.40))
-                    and rank_score >= max(0.01, self._inventory_pressure_neutral_buy_rank_score_floor * (1.0 - pressure * 0.40))
-                    and conviction >= max(0.2, min_conviction * 0.55)
-                )
-                if inventory_neutral_buy_override:
-                    signal["signal"] = "buy"
-                    signal["signal_override"] = "inventory_neutral_buy"
-                else:
-                    continue
+            if signal.get("signal") != "buy":
+                continue
             if conviction < min_conviction and not leader_override:
                 self._record_execution_event(
                     symbol,
@@ -5417,7 +5220,7 @@ class MacroIntelligenceSystem:
                     conviction=conviction,
                 )
                 continue
-            if meta and take_probability < relaxed_min_take_probability and not leader_override:
+            if meta and take_probability < lane_config.get("min_take_probability", 0.0) and not leader_override:
                 self._record_execution_event(
                     symbol,
                     "buy",
@@ -5435,8 +5238,8 @@ class MacroIntelligenceSystem:
                 and portfolio_target_pct <= 0
                 and self._auto_trade_zero_weight_fallback_enabled
                 and (bool(meta.get("take_trade", False)) or leader_override)
-                and take_probability >= relaxed_zero_weight_take_probability
-                and rank_score >= relaxed_zero_weight_rank_score
+                and take_probability >= self._auto_trade_zero_weight_min_take_probability
+                and rank_score >= self._auto_trade_zero_weight_min_rank_score
                 and conviction >= (min_conviction * (0.8 if leader_symbol else 0.9))
             )
             qualified_edge_fallback = (
@@ -5450,29 +5253,20 @@ class MacroIntelligenceSystem:
                     "trained_qualified_edge_rescue",
                     "weak_conviction_rescue",
                 }
-                and take_probability >= max(0.05, relaxed_min_take_probability * 0.80)
-                and rank_score >= max(0.02, relaxed_zero_weight_rank_score * 0.70)
+                and take_probability >= max(0.10, lane_config.get("min_take_probability", 0.0) * 0.85)
+                and rank_score >= max(0.04, self._auto_trade_zero_weight_min_rank_score * 0.75)
                 and conviction >= max(0.5, min_conviction * 0.65)
             )
             intraday_daytrade_override = (
                 lane == "day"
                 and portfolio_target_pct <= 0
-                and take_probability >= ((0.24 if self._event_window_mode else 0.30) * (1.0 - pressure * 0.35))
+                and take_probability >= (0.28 if self._event_window_mode else 0.35)
                 and conviction >= (min_conviction * 0.9)
-                and float(intraday.get("confidence", 0.0) or 0.0) >= max(0.24, 0.42 - (pressure * 0.18))
+                and float(intraday.get("confidence", 0.0) or 0.0) >= 0.42
                 and intraday.get("direction") == "buy"
             )
-            inventory_pressure_override = (
-                construction
-                and portfolio_target_pct <= 0
-                and self._inventory_pressure_allow_optimizer_override
-                and pressure >= 0.20
-                and take_probability >= max(0.05, relaxed_min_take_probability * 0.85)
-                and rank_score >= max(0.01, relaxed_zero_weight_rank_score * 0.60)
-                and conviction >= max(0.2, min_conviction * 0.55)
-            )
             if construction and portfolio_target_pct <= 0 and not (
-                zero_weight_fallback or qualified_edge_fallback or intraday_daytrade_override or inventory_pressure_override
+                zero_weight_fallback or qualified_edge_fallback or intraday_daytrade_override
             ):
                 self._record_execution_event(
                     symbol,
@@ -5493,14 +5287,6 @@ class MacroIntelligenceSystem:
                     and conviction >= (min_conviction * 0.90)
                 ):
                     signal["meta_override"] = "event_window_crypto"
-                elif (
-                    self._inventory_pressure_allow_meta_override
-                    and pressure >= 0.25
-                    and take_probability >= max(0.05, relaxed_min_take_probability * 0.85)
-                    and rank_score >= max(0.01, relaxed_zero_weight_rank_score * 0.60)
-                    and conviction >= max(0.2, min_conviction * 0.60)
-                ):
-                    signal["meta_override"] = "inventory_deficit"
                 else:
                     self._record_execution_event(
                         symbol,
@@ -5520,13 +5306,7 @@ class MacroIntelligenceSystem:
                     or take_probability >= 0.68
                     or float(intraday.get("news_boost", 0.0) or 0.0) >= self._day_trade_news_boost_threshold
                 )
-                midday_pressure_override = (
-                    self._inventory_pressure_allow_day_window_override
-                    and pressure >= 0.30
-                    and float(intraday.get("confidence", 0.0) or 0.0) >= max(0.25, 0.46 - (pressure * 0.18))
-                    and take_probability >= max(0.05, relaxed_min_take_probability * 0.80)
-                )
-                if not trade_window_active and not exceptional_signal and not midday_pressure_override:
+                if not trade_window_active and not exceptional_signal:
                     self._record_execution_event(
                         symbol,
                         "buy",
@@ -5538,8 +5318,6 @@ class MacroIntelligenceSystem:
                         conviction=conviction,
                     )
                     continue
-                if midday_pressure_override:
-                    signal["trade_window_override"] = "inventory_deficit"
 
             entry_readiness = self._entry_readiness_gate(symbol, lane, signal)
             signal["entry_readiness"] = entry_readiness
@@ -5580,23 +5358,7 @@ class MacroIntelligenceSystem:
 
         for lane in self._lane_engine_order:
             lane_config = self._lane_config(lane)
-            inventory_state = self._lane_inventory_pressure(lane, broker=broker)
-            pressure = float(inventory_state.get("pressure", 0.0) or 0.0)
             replacement_margin = self._auto_trade_replace_margin * (0.5 if lane in {"day", "crypto"} else 1.0)
-            replacement_margin = max(0.0, replacement_margin * (1.0 - (pressure * 0.85)))
-            sector_cap = lane_config.get("sector_cap", self._auto_trade_max_sector_positions)
-            dynamic_sector_cap = min(
-                lane_config.get("max_open_positions", self._auto_trade_max_open_positions),
-                max(
-                    1,
-                    int(math.ceil(sector_cap * (1.0 + (pressure * self._inventory_pressure_sector_cap_mult)))),
-                ),
-            )
-            dynamic_pair_corr_cap = min(
-                0.9999,
-                lane_config.get("pair_corr_cap", self._auto_trade_max_pair_correlation)
-                + (pressure * self._inventory_pressure_pair_corr_bonus),
-            )
             ranked_candidates = sorted(candidates_by_lane.get(lane, []), key=lambda item: item[0], reverse=True)
             ranked_candidates = ranked_candidates[: lane_config.get("top_k", self._auto_trade_top_k)]
             new_positions = 0
@@ -5618,7 +5380,7 @@ class MacroIntelligenceSystem:
                 open_positions = lane_open_counts.get(lane, 0)
                 corr_snapshot = self._get_portfolio_correlation_snapshot(symbol, broker)
                 signal["portfolio_fit"] = corr_snapshot
-                if sector_counts.get(sector, 0) >= dynamic_sector_cap:
+                if sector_counts.get(sector, 0) >= lane_config.get("sector_cap", self._auto_trade_max_sector_positions):
                     self._record_execution_event(
                         symbol,
                         "buy",
@@ -5632,7 +5394,7 @@ class MacroIntelligenceSystem:
                     continue
                 if (
                     corr_snapshot.get("sample_size", 0) > 0
-                    and corr_snapshot.get("max_abs_corr", 0.0) >= dynamic_pair_corr_cap
+                    and corr_snapshot.get("max_abs_corr", 0.0) >= lane_config.get("pair_corr_cap", self._auto_trade_max_pair_correlation)
                 ):
                     self._record_execution_event(
                         symbol,
@@ -5704,9 +5466,7 @@ class MacroIntelligenceSystem:
                         )
 
                 position_size = self._compute_position_size(signal, current_price, broker, corr_snapshot=corr_snapshot)
-                min_position_size = 0.0001 if lane == "crypto" else (
-                    self._fractional_equity_min_quantity if self._allow_fractional_equities else 1.0
-                )
+                min_position_size = 0.0001 if lane == "crypto" else 1.0
                 if position_size < min_position_size:
                     self._record_execution_event(
                         symbol,

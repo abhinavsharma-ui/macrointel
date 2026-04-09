@@ -1,4 +1,4 @@
-﻿"""
+"""
 Flask-SocketIO Dashboard - Fully Wired
 ========================================
 This is the production version. Zero demo mode.
@@ -41,7 +41,7 @@ import requests
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).parent.parent
-load_dotenv(ROOT / ".env", override=True)
+load_dotenv(ROOT / ".env")
 load_dotenv(ROOT / ".env.example", override=False)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -61,43 +61,8 @@ _dashboard_target_open_positions = max(
     1,
     int(os.getenv("DAY_TRADE_MAX_OPEN_POSITIONS", os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "12"))),
 )
-
-
-def _candidate_data_paths(path_value: str) -> List[Path]:
-    raw = str(path_value or "").strip()
-    if not raw:
-        return []
-    path = Path(raw)
-    if path.is_absolute():
-        return [path]
-    candidates: List[Path] = []
-    for base in (ROOT, ROOT.parent, Path.cwd().resolve()):
-        candidate = (base / path).resolve()
-        if candidate not in candidates:
-            candidates.append(candidate)
-    return candidates
-
-
-def _preferred_data_path(path_value: str, *, default_relative: str) -> Path:
-    candidates = _candidate_data_paths(path_value) or _candidate_data_paths(default_relative)
-    if not candidates:
-        return (ROOT / default_relative).resolve()
-    if candidates[0].exists():
-        return candidates[0]
-    existing = [path for path in candidates[1:] if path.exists()]
-    if existing:
-        return max(existing, key=lambda path: (path.stat().st_mtime, str(path)))
-    return candidates[0]
-
-
-_live_portfolio_path = _preferred_data_path(
-    os.getenv("LIVE_PORTFOLIO_PATH", ""),
-    default_relative=str(Path("data") / "live_portfolio.json"),
-)
-_live_portfolio_csv_path = _preferred_data_path(
-    os.getenv("LIVE_PORTFOLIO_CSV_PATH", ""),
-    default_relative=str(Path("data") / "live_portfolio.csv"),
-)
+_live_portfolio_path = Path(os.getenv("LIVE_PORTFOLIO_PATH", str(ROOT / "data" / "live_portfolio.json")))
+_live_portfolio_csv_path = Path(os.getenv("LIVE_PORTFOLIO_CSV_PATH", str(ROOT / "data" / "live_portfolio.csv")))
 
 
 class ManualPortfolioClient:
@@ -526,204 +491,6 @@ def create_app(
         except Exception:
             return None
 
-    def _paper_summary_has_activity(summary: Dict[str, Any]) -> bool:
-        payload = dict(summary or {})
-        positions = payload.get("positions") or {}
-        if isinstance(positions, dict) and positions:
-            return True
-        initial = _safe_float(payload.get("initial_capital"), 0.0)
-        cash = _safe_float(payload.get("cash"), initial)
-        return any(
-            (
-                _safe_float(payload.get("open_positions"), 0.0) > 0,
-                _safe_float(payload.get("total_trades"), 0.0) > 0,
-                _safe_float(payload.get("closed_trades"), 0.0) > 0,
-                abs(cash - initial) > 1e-9,
-            )
-        )
-
-    _paper_state_cache = {"path": None, "mtime": None, "summary": None, "trade_log": None}
-    _paper_state_fallback_enabled = os.getenv("DASHBOARD_PERSISTED_BROKER_FALLBACK", "1").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    _paper_state_candidates = _candidate_data_paths(os.getenv("PAPER_BROKER_STATE_PATH", "data/paper_broker_state.json"))
-
-    def _closed_trade_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [row for row in rows if row.get("filled_at") and row.get("realized_pnl") is not None]
-
-    def _session_closed_trade_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        today = datetime.now(timezone.utc).date()
-        session_rows: List[Dict[str, Any]] = []
-        for row in rows:
-            filled_at = _to_datetime(row.get("filled_at"))
-            if filled_at and filled_at.astimezone(timezone.utc).date() == today:
-                session_rows.append(row)
-        return session_rows
-
-    def _win_rate_snapshot(rows: List[Dict[str, Any]], basis: str, sample_size_override: Optional[int] = None) -> Dict[str, Any]:
-        closed_trades = int(sample_size_override if sample_size_override is not None else len(rows))
-        wins = sum(1 for row in rows if _safe_float(row.get("realized_pnl"), 0.0) > 0)
-        losses = sum(1 for row in rows if _safe_float(row.get("realized_pnl"), 0.0) < 0)
-        breakeven = max(0, closed_trades - wins - losses)
-        labels = {
-            "recent": f"last {closed_trades} closed paper trades",
-            "session": f"today • {closed_trades} closed paper trades",
-            "lifetime": f"lifetime • {closed_trades} closed paper trades",
-        }
-        win_rate_pct = round((wins / max(closed_trades, 1)) * 100.0, 1) if closed_trades else 0.0
-        return {
-            "basis": basis,
-            "label": labels.get(basis, f"{closed_trades} closed paper trades"),
-            "closed_trades": closed_trades,
-            "wins": wins,
-            "losses": losses,
-            "breakeven": breakeven,
-            "win_rate_pct": win_rate_pct,
-        }
-
-    def _load_persisted_paper_summary() -> Dict[str, Any]:
-        if not _paper_state_fallback_enabled:
-            return {}
-        source_path = _paper_state_candidates[0] if _paper_state_candidates and _paper_state_candidates[0].exists() else None
-        if source_path is None:
-            existing = [path for path in _paper_state_candidates[1:] if path.exists()]
-            if existing:
-                source_path = max(existing, key=lambda path: (path.stat().st_mtime, str(path)))
-        if source_path is None:
-            return {}
-        try:
-            source_mtime = source_path.stat().st_mtime
-        except OSError:
-            return {}
-        if (
-            _paper_state_cache["path"] == str(source_path)
-            and _paper_state_cache["mtime"] == source_mtime
-            and isinstance(_paper_state_cache["summary"], dict)
-        ):
-            return dict(_paper_state_cache["summary"])
-        try:
-            payload = json.loads(source_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning(f"Dashboard broker-state fallback load failed: {exc}")
-            return {}
-        if not isinstance(payload, dict):
-            return {}
-
-        positions: Dict[str, Dict[str, Any]] = {}
-        holdings_value = 0.0
-        for position_key, raw in dict(payload.get("positions") or {}).items():
-            row = dict(raw or {})
-            quantity = _safe_float(row.get("quantity"), 0.0)
-            avg_cost = _safe_float(row.get("avg_cost"), 0.0)
-            unrealized_pnl = _safe_float(row.get("unrealized_pnl"), 0.0)
-            current_price = avg_cost + (unrealized_pnl / quantity) if quantity else avg_cost
-            normalized = {
-                "symbol": str(row.get("symbol") or position_key),
-                "position_key": str(row.get("position_key") or position_key),
-                "quantity": quantity,
-                "avg_cost": round(avg_cost, 4),
-                "unrealized_pnl": round(unrealized_pnl, 2),
-                "market": row.get("market", "US"),
-                "current_price": round(current_price, 4),
-                "value": round(current_price * quantity, 2),
-            }
-            positions[str(position_key)] = normalized
-            holdings_value += normalized["value"]
-
-        orders = [dict(row) for row in (payload.get("orders") or []) if isinstance(row, dict)]
-        trade_log = [dict(row) for row in (payload.get("trade_log") or []) if isinstance(row, dict)]
-        closed_trade_log = _closed_trade_rows(trade_log)
-        recent_window = max(5, int(os.getenv("PAPER_WIN_RATE_WINDOW_TRADES", "50")))
-        min_trades = max(1, int(os.getenv("PAPER_WIN_RATE_MIN_TRADES", "5")))
-        lifetime_win_rate = _win_rate_snapshot(closed_trade_log, "lifetime")
-        recent_win_rate = _win_rate_snapshot(
-            closed_trade_log[-recent_window:],
-            "recent",
-            sample_size_override=min(len(closed_trade_log), recent_window),
-        )
-        session_win_rate = _win_rate_snapshot(_session_closed_trade_rows(closed_trade_log), "session")
-        headline_win_rate = lifetime_win_rate
-        if recent_win_rate["closed_trades"] >= min_trades:
-            headline_win_rate = recent_win_rate
-        elif session_win_rate["closed_trades"] >= min_trades:
-            headline_win_rate = session_win_rate
-
-        initial_capital = _safe_float(payload.get("initial_capital"), 100000.0)
-        cash = _safe_float(payload.get("cash"), initial_capital)
-        realized_pnl = round(sum(_safe_float(row.get("realized_pnl"), 0.0) for row in trade_log), 2)
-        current_portfolio_value = round(cash + holdings_value, 2)
-        summary = {
-            "initial_capital": initial_capital,
-            "current_portfolio_value": current_portfolio_value,
-            "portfolio_value": current_portfolio_value,
-            "cash": round(cash, 2),
-            "holdings_value": round(holdings_value, 2),
-            "positions_value": round(holdings_value, 2),
-            "total_return_pct": round(((current_portfolio_value / max(initial_capital, 1e-9)) - 1.0) * 100.0, 2),
-            "realized_pnl": realized_pnl,
-            "daily_realized_pnl": round(
-                sum(_safe_float(row.get("realized_pnl"), 0.0) for row in _session_closed_trade_rows(closed_trade_log)),
-                2,
-            ),
-            "open_positions": sum(1 for row in positions.values() if _safe_float(row.get("quantity"), 0.0) != 0),
-            "total_trades": len(orders) or len(trade_log),
-            "closed_trades": lifetime_win_rate["closed_trades"],
-            "winning_closed_trades": lifetime_win_rate["wins"],
-            "losing_closed_trades": lifetime_win_rate["losses"],
-            "breakeven_closed_trades": lifetime_win_rate["breakeven"],
-            "lifetime_win_rate_pct": lifetime_win_rate["win_rate_pct"],
-            "recent_win_rate_pct": recent_win_rate["win_rate_pct"],
-            "recent_closed_trades": recent_win_rate["closed_trades"],
-            "session_win_rate_pct": session_win_rate["win_rate_pct"],
-            "session_closed_trades": session_win_rate["closed_trades"],
-            "win_rate_pct": headline_win_rate["win_rate_pct"],
-            "win_rate_basis": headline_win_rate["basis"],
-            "win_rate_label": headline_win_rate["label"],
-            "win_rate_sample_size": headline_win_rate["closed_trades"],
-            "kill_switch_active": bool(payload.get("kill_switch_active", False)),
-            "kill_switch_reason": str(payload.get("kill_switch_reason") or ""),
-            "session_guardrails_enabled": bool(payload.get("session_guardrails_enabled", False)),
-            "execution_mode": "paper",
-            "positions": positions,
-            "state_source_path": str(source_path),
-            "state_source": "persisted",
-        }
-        _paper_state_cache["path"] = str(source_path)
-        _paper_state_cache["mtime"] = source_mtime
-        _paper_state_cache["summary"] = dict(summary)
-        _paper_state_cache["trade_log"] = list(trade_log)
-        return dict(summary)
-
-    def _paper_broker_summary_snapshot() -> Dict[str, Any]:
-        live_summary: Dict[str, Any] = {}
-        if paper_broker is not None:
-            try:
-                live_summary = _json_safe(paper_broker.get_summary() or {})
-            except Exception as exc:
-                logger.warning(f"Dashboard broker summary fetch failed: {exc}")
-                live_summary = {}
-        if _paper_summary_has_activity(live_summary):
-            return live_summary
-        fallback = _load_persisted_paper_summary()
-        if fallback:
-            return fallback
-        return live_summary
-
-    def _paper_trade_rows_snapshot() -> List[Dict[str, Any]]:
-        if paper_broker is not None:
-            live_rows = [dict(row) for row in list(getattr(paper_broker, "trade_log", []) or []) if isinstance(row, dict)]
-            if live_rows:
-                return live_rows
-        if not isinstance(_paper_state_cache.get("trade_log"), list):
-            _load_persisted_paper_summary()
-        cached_rows = _paper_state_cache.get("trade_log")
-        if isinstance(cached_rows, list):
-            return [dict(row) for row in cached_rows if isinstance(row, dict)]
-        return []
-
     def _infer_lane(symbol: str, payload: Optional[Dict] = None, metadata: Optional[Dict] = None) -> str:
         payload = payload or {}
         metadata = metadata or {}
@@ -964,12 +731,13 @@ def create_app(
         )
         initial_capital = _safe_float(payload.get("initial_capital"), current_value)
         rows: List[Dict[str, Any]] = []
-        for trade in _paper_trade_rows_snapshot():
-            filled_at = _to_datetime(trade.get("filled_at"))
-            portfolio_value = _safe_float(trade.get("portfolio_value"), None)
-            if filled_at is None or portfolio_value is None:
-                continue
-            rows.append({"timestamp": filled_at, "portfolio_value": portfolio_value})
+        if paper_broker is not None:
+            for trade in list(getattr(paper_broker, "trade_log", []) or []):
+                filled_at = _to_datetime(trade.get("filled_at"))
+                portfolio_value = _safe_float(trade.get("portfolio_value"), None)
+                if filled_at is None or portfolio_value is None:
+                    continue
+                rows.append({"timestamp": filled_at, "portfolio_value": portfolio_value})
         rows.sort(key=lambda item: item["timestamp"])
 
         def _baseline_for_cutoff(cutoff: datetime) -> tuple[float, Optional[datetime], str]:
@@ -1065,9 +833,11 @@ def create_app(
         return rows
 
     def _today_trade_rows() -> List[Dict]:
+        if paper_broker is None:
+            return []
         today = datetime.now(timezone.utc).date()
         rows = []
-        for trade in _paper_trade_rows_snapshot():
+        for trade in list(getattr(paper_broker, "trade_log", []) or []):
             filled_at = _to_datetime(trade.get("filled_at"))
             if not filled_at or filled_at.astimezone(timezone.utc).date() != today:
                 continue
@@ -1078,18 +848,12 @@ def create_app(
         signal_snapshot = _signal_store_snapshot()
         signal_rows = _flatten_signal_store(signal_snapshot)
         trades_today = _today_trade_rows()
-        current_positions = _snapshot_mapping((_paper_broker_summary_snapshot().get("positions") or {}))
+        current_positions = _snapshot_mapping(getattr(paper_broker, "positions", {})) if paper_broker is not None else {}
         lane_positions = defaultdict(int)
         for position_key, position in current_positions.items():
-            quantity = getattr(position, "quantity", None)
-            if quantity is None and isinstance(position, dict):
-                quantity = position.get("quantity", 0)
-            if _safe_float(quantity, 0.0) <= 0:
+            if getattr(position, "quantity", 0) <= 0:
                 continue
-            symbol = str(
-                (getattr(position, "symbol", None) if not isinstance(position, dict) else position.get("symbol"))
-                or position_key
-            )
+            symbol = str(getattr(position, "symbol", position_key) or position_key)
             signal = signal_snapshot.get(symbol, {})
             lane_positions[_infer_lane(symbol, payload=signal, metadata={"position_key": position_key})] += 1
 
@@ -1281,22 +1045,20 @@ def create_app(
 
     @app.route("/api/portfolio")
     def get_portfolio():
-        summary = _paper_broker_summary_snapshot()
-        if not summary:
+        if paper_broker is None:
             return jsonify({"initial_capital": 100000, "current_portfolio_value": 100000,
                             "total_return_pct": 0, "cash": 100000, "open_positions": 0,
                             "total_trades": 0, "win_rate_pct": 0, "kill_switch_active": False,
                             "positions": {}, "note": "paper_broker not connected"})
-        summary = _reprice_paper_broker_summary(summary)
+        summary = _reprice_paper_broker_summary(paper_broker.get_summary())
         summary["return_periods"] = _build_return_periods(summary)
         return jsonify(summary)
 
     @app.route("/api/positions")
     def get_positions():
-        summary = _paper_broker_summary_snapshot()
-        if not summary:
+        if paper_broker is None:
             return jsonify({"positions": []})
-        summary = _reprice_paper_broker_summary(summary)
+        summary = _reprice_paper_broker_summary(paper_broker.get_summary())
         positions = []
         for position_key, pos in (summary.get("positions") or {}).items():
             entry = dict(pos)
@@ -1432,10 +1194,11 @@ def create_app(
         latency_sum = 0.0
         latency_count = 0
         shadow_router = {}
-        try:
-            shadow_router = dict((_paper_broker_summary_snapshot() or {}).get("shadow_router") or {})
-        except Exception:
-            shadow_router = {}
+        if paper_broker is not None:
+            try:
+                shadow_router = dict((paper_broker.get_summary() or {}).get("shadow_router") or {})
+            except Exception:
+                shadow_router = {}
         for row in rows:
             broker_status = str(row.get("broker_status") or "")
             shadow_status = str(row.get("shadow_status") or "")
@@ -1525,14 +1288,14 @@ def create_app(
     @app.route("/api/health")
     def health():
         buf = price_buffer.stats if price_buffer else {}
-        broker_summary = _paper_broker_summary_snapshot()
+        broker_summary = paper_broker.get_summary() if paper_broker is not None else {}
         signal_snapshot = _signal_store_snapshot()
         return jsonify({
             "status":           "ok",
             "tick_count":       buf.get("total_ticks", 0),
             "active_symbols":   len(price_buffer.active_symbols()) if price_buffer else 0,
             "signal_count":     len(signal_snapshot),
-            "broker_connected": bool(paper_broker is not None or broker_summary),
+            "broker_connected": paper_broker is not None,
             "execution_mode":   broker_summary.get("execution_mode", "paper"),
             "shadow_router":    broker_summary.get("shadow_router", {}),
             "stress_computed":  bool(_stress_results),
@@ -1558,9 +1321,8 @@ def create_app(
         signal_snapshot = _signal_store_snapshot()
         if signal_snapshot:
             emit("signals_update", {"signals": _limit_values(_flatten_signal_store(signal_snapshot), _dashboard_signal_limit)})
-        broker_summary = _paper_broker_summary_snapshot()
-        if broker_summary:
-            emit("portfolio_update", _reprice_paper_broker_summary(broker_summary))
+        if paper_broker:
+            emit("portfolio_update", _reprice_paper_broker_summary(paper_broker.get_summary()))
         if _stress_results:
             emit("stress_update", _stress_results)
 
@@ -1585,6 +1347,7 @@ def create_app(
 
     _last_ids = set()
     _last_lat_push = [0.0]
+    _last_report_push = [0.0]
     _last_prices_snapshot: Dict[str, tuple] = {}
     _last_signal_snapshot = {"fingerprint": ""}
 
@@ -1635,12 +1398,19 @@ def create_app(
                         _last_signal_snapshot["fingerprint"] = fingerprint
 
                 # Portfolio
-                broker_summary = _paper_broker_summary_snapshot()
-                if broker_summary:
-                    socketio.emit("portfolio_update", _reprice_paper_broker_summary(broker_summary))
+                if paper_broker:
+                    socketio.emit("portfolio_update", _reprice_paper_broker_summary(paper_broker.get_summary()))
+
+                # Daily report — emit every 15 s so trade counts stay live
+                now = time.time()
+                if now - _last_report_push[0] > 15:
+                    try:
+                        socketio.emit("daily_report_update", _build_daily_report())
+                    except Exception:
+                        pass
+                    _last_report_push[0] = now
 
                 # Latency
-                now = time.time()
                 if latency_monitor and now - _last_lat_push[0] > 10:
                     socketio.emit("latency_update", latency_monitor.stats)
                     _last_lat_push[0] = now
@@ -1689,7 +1459,7 @@ body.theme-light{background:
 .menuLink.active{background:linear-gradient(135deg, rgba(56,189,248,.16), rgba(167,139,250,.12));color:var(--text);border:1px solid rgba(56,189,248,.18);}
 .logo{font-family:var(--sans);font-size:17px;font-weight:800;letter-spacing:-.5px;}
 .logo em{color:var(--blue);font-style:normal;}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--red);animation:blink 2s infinite;}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--amber);animation:blink 2s infinite;}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 .tr{display:flex;gap:20px;font-size:11px;}.tr span{color:var(--muted);}.tr strong{color:var(--text);}
 .sbar{display:flex;gap:16px;padding:7px 20px;background:var(--glass);border-bottom:1px solid var(--border);font-size:10px;color:var(--muted);}
@@ -1841,7 +1611,7 @@ body.theme-light{background:
 <div class="sbar">
   <span>WS avg: <strong id="sl" style="color:var(--muted)">-</strong> ms</span>
   <span>p95: <strong id="sp">-</strong> ms</span>
-  <span id="scl" style="color:var(--red)">Disconnected</span>
+  <span id="scl" style="color:var(--amber)">Connecting...</span>
   <span style="margin-left:auto">
     <button onclick="fetch('/api/diagnostics').then(r=>r.json()).then(d=>alert(JSON.stringify(d.issues||d,null,2)))"
       style="background:none;border:1px solid var(--border2);color:var(--muted);padding:1px 7px;border-radius:3px;cursor:pointer;font-family:var(--mono);font-size:9px">
@@ -2953,7 +2723,14 @@ function renderSection(title, rows, emptyMessage=''){
 }
 
 if(SOCKET_AVAILABLE){
-  io_sock.on('connect', () => setConnectionState('Connected', 'var(--green)'));
+  // Fallback: if socket hasn't connected within 8s, show Polling mode
+  const _connTimeout = setTimeout(() => {
+    const txt = document.getElementById('scl');
+    if(txt && txt.textContent === 'Connecting...'){
+      setConnectionState('Polling', 'var(--amber)');
+    }
+  }, 8000);
+  io_sock.on('connect', () => { clearTimeout(_connTimeout); setConnectionState('Connected', 'var(--green)'); });
   io_sock.on('disconnect', () => setConnectionState('Disconnected', 'var(--red)'));
   io_sock.on('signals_update', d => applySignals(d.signals || [], true));
   io_sock.on('new_signal', s => applySignals([s]));
@@ -2998,6 +2775,7 @@ if(SOCKET_AVAILABLE){
       b.textContent = `KILL SWITCH ACTIVE - ${reason}. No new orders.`;
     }
   });
+  io_sock.on('daily_report_update', renderDailyReport);
   io_sock.on('stress_update', renderStress);
   io_sock.on('latency_update', d => {
     const l = document.getElementById('sl');

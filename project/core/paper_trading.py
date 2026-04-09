@@ -27,23 +27,6 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
-MODULE_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = MODULE_ROOT.parent
-
-
-def _candidate_state_paths(path_value: str) -> List[Path]:
-    raw = str(path_value or "").strip()
-    if not raw:
-        raw = "data/paper_broker_state.json"
-    path = Path(raw)
-    if path.is_absolute():
-        return [path]
-    candidates: List[Path] = []
-    for base in (MODULE_ROOT, REPO_ROOT, Path.cwd().resolve()):
-        candidate = (base / path).resolve()
-        if candidate not in candidates:
-            candidates.append(candidate)
-    return candidates
 
 
 class OrderSide(str, Enum):
@@ -137,10 +120,7 @@ class VirtualBroker:
         self._kill_switch_reason = ""
         self._kill_switch_day = ""
         self._peak_portfolio_value = initial_capital
-        self._state_path_candidates = _candidate_state_paths(
-            os.getenv("PAPER_BROKER_STATE_PATH", "data/paper_broker_state.json")
-        )
-        self._state_path = self._state_path_candidates[0]
+        self._state_path = Path(os.getenv("PAPER_BROKER_STATE_PATH", "data/paper_broker_state.json"))
         self._realism_enabled = os.getenv("PAPER_EXECUTION_REALISM_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
         self._partial_fill_enabled = os.getenv("PAPER_PARTIAL_FILL_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
         self._partial_fill_entry_only = os.getenv("PAPER_PARTIAL_FILL_ENTRY_ONLY", "1").strip().lower() not in {"0", "false", "off"}
@@ -983,15 +963,10 @@ class VirtualBroker:
             logger.warning(f"Paper broker state save failed: {exc}")
 
     def _load_state(self):
-        source_path = self._state_path if self._state_path.exists() else None
-        if source_path is None:
-            fallback_paths = [path for path in self._state_path_candidates[1:] if path.exists()]
-            if fallback_paths:
-                source_path = max(fallback_paths, key=lambda path: (path.stat().st_mtime, str(path)))
-        if source_path is None:
+        if not self._state_path.exists():
             return
         try:
-            payload = json.loads(source_path.read_text(encoding="utf-8"))
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
             self.initial_capital = float(payload.get("initial_capital", self.initial_capital))
             self.cash = float(payload.get("cash", self.cash))
             self.max_position_pct = float(payload.get("max_position_pct", self.max_position_pct))
@@ -1050,9 +1025,6 @@ class VirtualBroker:
                 logger.info(
                     f"Paper broker state restored: {len(self.positions)} positions | {len(self.trade_log)} trade records"
                 )
-            if source_path != self._state_path and not self._state_path.exists():
-                self._persist_state()
-                logger.info(f"Paper broker state migrated to {self._state_path}")
         except Exception as exc:
             logger.warning(f"Paper broker state load failed: {exc}")
 

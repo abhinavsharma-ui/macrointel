@@ -1,4 +1,4 @@
-﻿"""
+"""
 Real-Time WebSocket Data Engine
 =================================
 "Professional systems don't use polled APIs for real-time work. They use WebSockets."
