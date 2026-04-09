@@ -1319,12 +1319,18 @@ def create_app(
         _client_count[0] += 1
         logger.debug(f"Client connected [{_client_count[0]}]")
         signal_snapshot = _signal_store_snapshot()
-        if signal_snapshot:
-            emit("signals_update", {"signals": _limit_values(_flatten_signal_store(signal_snapshot), _dashboard_signal_limit)})
+        emit(
+            "signals_update",
+            {"signals": _limit_values(_flatten_signal_store(signal_snapshot), _dashboard_signal_limit)},
+        )
         if paper_broker:
             emit("portfolio_update", _reprice_paper_broker_summary(paper_broker.get_summary()))
         if _stress_results:
             emit("stress_update", _stress_results)
+        try:
+            emit("daily_report_update", _build_daily_report())
+        except Exception as exc:
+            logger.debug("daily_report on connect: %s", exc)
 
     @socketio.on("disconnect")
     def handle_disconnect():
@@ -1432,7 +1438,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MacroIntel Live</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.0/socket.io.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet">
 <style>
@@ -1921,7 +1927,15 @@ body.theme-light{background:
 <script>
 const SOCKET_AVAILABLE = typeof window.io === 'function';
 const CHART_AVAILABLE = typeof window.Chart !== 'undefined';
-const io_sock = SOCKET_AVAILABLE ? io({transports:['websocket','polling']}) : { on(){}, emit(){} };
+const io_sock = SOCKET_AVAILABLE ? io({
+  transports: ['polling', 'websocket'],
+  upgrade: true,
+  reconnection: true,
+  reconnectionAttempts: 100,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 8000,
+  timeout: 20000,
+}) : { on(){}, emit(){} };
 const MARKET_BOARD_LIMIT = 36;
 const LEADER_SYMBOLS = ['AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','AMD','NFLX','QCOM','AVGO','JPM','WMT','XOM','SPY','QQQ','DIA','IWM','RELIANCE.NS','TCS.NS','INFY.NS'];
 const TV_AMEX_SYMBOLS = new Set(['SPY','DIA','IWM','GLD','SLV','TLT','HYG','VTI','XLF','XLE','XLK','XLY','XLI','XLV','XLP','XLB','XLU']);
@@ -2723,15 +2737,18 @@ function renderSection(title, rows, emptyMessage=''){
 }
 
 if(SOCKET_AVAILABLE){
-  // Fallback: if socket hasn't connected within 8s, show Polling mode
+  // Fallback: if socket hasn't connected within 8s, show Polling mode (REST still updates)
   const _connTimeout = setTimeout(() => {
     const txt = document.getElementById('scl');
-    if(txt && txt.textContent === 'Connecting...'){
+    if(txt && (txt.textContent === 'Connecting...' || txt.textContent === 'Reconnecting...')){
       setConnectionState('Polling', 'var(--amber)');
     }
   }, 8000);
   io_sock.on('connect', () => { clearTimeout(_connTimeout); setConnectionState('Connected', 'var(--green)'); });
-  io_sock.on('disconnect', () => setConnectionState('Disconnected', 'var(--red)'));
+  io_sock.on('connect_error', () => setConnectionState('Reconnecting...', 'var(--amber)'));
+  io_sock.on('disconnect', () => setConnectionState('Reconnecting...', 'var(--amber)'));
+  io_sock.on('reconnect', () => { clearTimeout(_connTimeout); setConnectionState('Connected', 'var(--green)'); });
+  io_sock.on('reconnect_failed', () => setConnectionState('Disconnected', 'var(--red)'));
   io_sock.on('signals_update', d => applySignals(d.signals || [], true));
   io_sock.on('new_signal', s => applySignals([s]));
   io_sock.on('prices_update', d => {
