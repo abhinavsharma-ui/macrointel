@@ -1130,7 +1130,6 @@ class MacroIntelligenceSystem:
         return get_universe("full")
 
     def _apply_throughput_mode(self) -> None:
-        self._allow_dual_lane_variants = True
         self._auto_trade_top_k = max(self._auto_trade_top_k, int(os.getenv("THROUGHPUT_TOP_K", "480")))
         self._auto_trade_max_new_per_cycle = max(
             self._auto_trade_max_new_per_cycle,
