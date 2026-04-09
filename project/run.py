@@ -518,6 +518,16 @@ class MacroIntelligenceSystem:
             0.99,
             max(0.0, float(os.getenv("CRYPTO_SCALPER_MIN_TAKE_PROBABILITY", "0.32"))),
         )
+        self._crypto_quote_fallback_enabled = os.getenv("CRYPTO_QUOTE_FALLBACK_ENABLED", "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._crypto_quote_fallback_spread_pct = min(
+            max(self._crypto_scalper_max_spread_pct * 0.25, 0.005),
+            max(0.005, float(os.getenv("CRYPTO_QUOTE_FALLBACK_SPREAD_PCT", "0.02"))),
+        )
         self._crypto_obi_min_lifetime_ms = max(50.0, float(os.getenv("CRYPTO_OBI_MIN_LIFETIME_MS", "200")))
         self._crypto_obi_max_updates_per_second = max(
             0.5,
@@ -2572,6 +2582,8 @@ class MacroIntelligenceSystem:
         spread_velocity = self._safe_number(intraday.get("spread_velocity"), 0.0)
         flicker_filter_retention = self._safe_number(intraday.get("flicker_filter_retention"), 1.0)
         trade_window_active = bool(intraday.get("trade_window_active", True))
+        if bool(intraday.get("quote_only_fallback", False)):
+            return {"allow": False, "reason": "crypto_quote_only_fallback", "size_multiplier": 0.0}
         if spread_pct > self._crypto_scalper_max_spread_pct:
             return {"allow": False, "reason": "crypto_wide_spread", "size_multiplier": 0.0}
         if depth_age_seconds > self._crypto_scalper_max_depth_age_seconds:
@@ -3292,6 +3304,107 @@ class MacroIntelligenceSystem:
         except Exception:
             return None
 
+        def _build_quote_only_fallback(depth_snapshot: Optional[Dict], note: str) -> Optional[Dict]:
+            if not self._crypto_quote_fallback_enabled or latest_tick is None:
+                return None
+            last_price = float(getattr(latest_tick, "price", 0.0) or 0.0)
+            if last_price <= 0:
+                return None
+            best_bid = float(getattr(latest_tick, "bid", 0.0) or 0.0)
+            best_ask = float(getattr(latest_tick, "ask", 0.0) or 0.0)
+            if best_bid <= 0 or best_ask <= 0 or best_ask < best_bid:
+                half_spread = last_price * (self._crypto_quote_fallback_spread_pct / 100.0) / 2.0
+                best_bid = max(last_price - half_spread, last_price * 0.999)
+                best_ask = max(last_price + half_spread, best_bid)
+            spread_pct = ((best_ask - best_bid) / max((best_bid + best_ask) / 2.0, 1e-9)) * 100.0
+            tick_age = max(0.0, (datetime.now(timezone.utc) - latest_tick.timestamp).total_seconds())
+            fallback_overlay = {
+                "direction": "neutral",
+                "confidence": 0.18,
+                "setup": "quote_only_watch",
+                "book_pressure": 0.0,
+                "book_imbalance": 0.0,
+                "top_book_imbalance": 0.0,
+                "trend_score": 0.0,
+                "volume_spike": 1.0,
+                "score": 0.0,
+                "news_boost": 0.0,
+                "order_flow_imbalance": 0.0,
+                "spread_velocity": round(self._safe_number((depth_snapshot or {}).get("spread_velocity"), 0.0), 8),
+                "microprice_bias": 0.0,
+                "best_bid_qty": round(float((depth_snapshot or {}).get("best_bid_qty", 0.0) or 0.0), 6),
+                "best_ask_qty": round(float((depth_snapshot or {}).get("best_ask_qty", 0.0) or 0.0), 6),
+                "bid_depth_qty": round(float((depth_snapshot or {}).get("best_bid_qty", 0.0) or 0.0), 6),
+                "ask_depth_qty": round(float((depth_snapshot or {}).get("best_ask_qty", 0.0) or 0.0), 6),
+                "flicker_filter_retention": round(self._safe_number((depth_snapshot or {}).get("flicker_filter_retention"), 1.0), 4),
+                "vwap_bias": 0.0,
+                "ret_5m": 0.0,
+                "trade_window_active": True,
+                "quote_only_fallback": True,
+                "risk_adjustments": {
+                    "stop_loss_pct": 0.9,
+                    "take_profit_pct": 1.6,
+                    "trailing_stop_pct": round(self._day_trade_trail_stop_pct * 100.0, 2),
+                },
+                "note": note,
+            }
+            return self._decorate_signal(
+                symbol,
+                {
+                    "symbol": symbol,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "signal": "neutral",
+                    "confidence": 0.18,
+                    "conviction_score": 0.0,
+                    "ensemble_score": 0.0,
+                    "regime": "calm",
+                    "regime_multiplier": 1.0,
+                    "factor_scores": {
+                        "trend": 0.0,
+                        "momentum": 0.0,
+                        "mean_revert": 0.0,
+                        "volume": 0.0,
+                        "sentiment": 0.0,
+                        "earnings_propagation": 0.0,
+                        "close_reversal": 0.0,
+                    },
+                    "factor_weights": {
+                        "trend": 0.28,
+                        "momentum": 0.24,
+                        "mean_revert": 0.16,
+                        "volume": 0.14,
+                        "sentiment": 0.08,
+                        "earnings_propagation": 0.0,
+                        "close_reversal": 0.10,
+                    },
+                    "model_agreement": 0.0,
+                    "model_breakdown": {},
+                    "top_drivers": [{"feature": "Live Quote", "impact": round(spread_pct, 5), "direction": "mixed"}],
+                    "waterfall_data": [],
+                    "macro_warnings": ["depth feed unstable"],
+                    "risk_parameters": {
+                        "stop_loss_pct": 0.9,
+                        "take_profit_pct": 1.6,
+                        "trailing_stop_pct": round(self._day_trade_trail_stop_pct * 100.0, 2),
+                        "risk_reward_ratio": round(1.6 / 0.9, 3),
+                        "entry_note": note,
+                    },
+                    "intraday_overlay": {
+                        **fallback_overlay,
+                        "market": "CRYPTO",
+                        "best_bid": round(best_bid, 8),
+                        "best_ask": round(best_ask, 8),
+                        "spread_pct": round(spread_pct, 5),
+                        "tick_age_seconds": round(tick_age, 2),
+                        "depth_age_seconds": None,
+                        "signal_age_seconds": round(tick_age, 2),
+                    },
+                    "signal_style": "crypto_depth_intraday",
+                    "xgb_alignment": None,
+                },
+                lane_override="crypto",
+            )
+
         latest_tick = PRICE_BUFFER.latest(symbol)
         if latest_tick is None or float(getattr(latest_tick, "price", 0.0) or 0.0) <= 0:
             return None
@@ -3313,7 +3426,7 @@ class MacroIntelligenceSystem:
             bid_qty = float(depth_snapshot.get("best_bid_qty", 0.0) or 0.0)
             ask_qty = float(depth_snapshot.get("best_ask_qty", 0.0) or 0.0)
             if best_bid <= 0 or best_ask <= 0:
-                return None
+                return _build_quote_only_fallback(depth_snapshot, "Quote-only fallback")
             book_imbalance = (bid_qty - ask_qty) / max(bid_qty + ask_qty, 1e-6)
             spread_pct = ((best_ask - best_bid) / ((best_bid + best_ask) / 2.0)) * 100.0
             confidence = self._clamp(
@@ -3354,6 +3467,10 @@ class MacroIntelligenceSystem:
 
         best_bid = float(depth_snapshot.get("best_bid", 0.0) or overlay.get("best_bid", 0.0) or 0.0)
         best_ask = float(depth_snapshot.get("best_ask", 0.0) or overlay.get("best_ask", 0.0) or 0.0)
+        if (best_bid <= 0 or best_ask <= 0 or best_ask < best_bid) and self._crypto_quote_fallback_enabled:
+            fallback_signal = _build_quote_only_fallback(depth_snapshot, "Quote-only fallback")
+            if fallback_signal is not None:
+                return fallback_signal
         depth_updated_at = depth_snapshot.get("updated_at")
         depth_age_seconds = None
         if depth_updated_at:
