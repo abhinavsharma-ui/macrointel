@@ -149,6 +149,21 @@ class MacroIntelligenceSystem:
                 + _load_symbol_file(os.getenv("CRYPTO_DEPTH_SYMBOLS_FILE", ""))
             )
         )
+        self._crypto_feed_order = [
+            name.strip().lower()
+            for name in os.getenv("CRYPTO_FEED_ORDER", "bybit,binance").replace(";", ",").split(",")
+            if name.strip()
+        ] or ["bybit"]
+        self._crypto_use_all_feeds = os.getenv("CRYPTO_FEED_FALLBACK_ENABLED", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._crypto_primary_feed_only_symbols = os.getenv(
+            "CRYPTO_PRIMARY_FEED_ONLY_SYMBOLS",
+            "1",
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._binance_crypto_symbols = list(
             dict.fromkeys(
                 _parse_symbol_blob(os.getenv("BINANCE_CRYPTO_SYMBOLS", ""))
@@ -171,6 +186,12 @@ class MacroIntelligenceSystem:
             self._binance_crypto_symbols = list(dict.fromkeys(self._binance_crypto_symbols + self._crypto_symbols))
         if self._throughput_mode and len(self._bybit_crypto_symbols) < 24:
             self._bybit_crypto_symbols = list(dict.fromkeys(self._bybit_crypto_symbols + self._crypto_symbols))
+        if self._crypto_primary_feed_only_symbols and not self._crypto_use_all_feeds:
+            primary_feed = self._crypto_feed_order[0] if self._crypto_feed_order else "bybit"
+            if primary_feed == "bybit" and self._bybit_crypto_symbols:
+                self._crypto_symbols = list(self._bybit_crypto_symbols)
+            elif primary_feed == "binance" and self._binance_crypto_symbols:
+                self._crypto_symbols = list(self._binance_crypto_symbols)
         self._crypto_signal_stale_seconds = max(15, int(os.getenv("CRYPTO_SIGNAL_STALE_SECONDS", "45")))
         self._crypto_signal_hold_grace_seconds = max(
             30,
@@ -1851,14 +1872,8 @@ class MacroIntelligenceSystem:
             self._components["mt5_feed"] = mt5_feed
 
         if self._crypto_depth_enabled and self._crypto_symbols:
-            crypto_feed_order = [
-                name.strip().lower()
-                for name in os.getenv("CRYPTO_FEED_ORDER", "binance,bybit").replace(";", ",").split(",")
-                if name.strip()
-            ]
-            use_all_crypto_feeds = os.getenv("CRYPTO_FEED_FALLBACK_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
             started_crypto_feeds = []
-            for feed_name in crypto_feed_order:
+            for feed_name in self._crypto_feed_order:
                 if feed_name == "binance":
                     connection_count = self._start_chunked_component(
                         "binance_public_depth_ws",
@@ -1881,10 +1896,13 @@ class MacroIntelligenceSystem:
                     )
                     if connection_count:
                         started_crypto_feeds.append(f"bybit x{connection_count}")
-                if started_crypto_feeds and not use_all_crypto_feeds:
+                if started_crypto_feeds and not self._crypto_use_all_feeds:
                     break
             if started_crypto_feeds:
-                logger.info(f"Crypto realtime feeds started: {', '.join(started_crypto_feeds)}")
+                logger.info(
+                    f"Crypto realtime feeds started: {', '.join(started_crypto_feeds)} | "
+                    f"signal universe={len(self._crypto_symbols)} | primary_only={self._crypto_primary_feed_only_symbols}"
+                )
 
         if not polling_enabled:
             logger.info("Polling fallback disabled (POLLING_FALLBACK_ENABLED=0)")
