@@ -371,6 +371,7 @@ class MacroIntelligenceSystem:
         self._feature_store_enabled = os.getenv("FEATURE_STORE_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
         self._feature_store_save_seconds = max(300, int(os.getenv("FEATURE_STORE_SAVE_SECONDS", "1800")))
         self._feature_store_dir = _resolve_root_path(os.getenv("FEATURE_STORE_DIR", "data/features"))
+        self._inference_feature_chunk_size = max(25, int(os.getenv("INFERENCE_FEATURE_CHUNK_SIZE", "250") or 250))
         self._event_intel_enabled = os.getenv("EVENT_INTEL_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
         self._event_intel_dir = _resolve_root_path(os.getenv("EVENT_INTEL_DIR", "data/event_intel"))
         self._auto_retrain_on_start = os.getenv("AUTO_RETRAIN_ON_START", "1").strip().lower() not in {"0", "false", "off"}
@@ -6036,138 +6037,20 @@ class MacroIntelligenceSystem:
                     time.sleep(60)
                     continue
 
-                current_versions = dict(self._data_versions)
-                sources_changed = any(
-                    current_versions.get(k, 0) != self._last_inference_versions.get(k, 0) for k in current_versions
-                )
-                prices_changed = current_versions.get("prices", 0) != self._last_inference_versions.get("prices", 0)
-                earnings_changed = current_versions.get("earnings", 0) != self._last_inference_versions.get("earnings", 0)
-
-                feature_cache = self._components.get("feature_matrices")
-                if not isinstance(feature_cache, dict):
-                    feature_cache = {}
-                    self._components["feature_matrices"] = feature_cache
-
-                event_feature_map = self._components.get("event_feature_map")
-                if not isinstance(event_feature_map, dict):
-                    event_feature_map = {}
-                    self._components["event_feature_map"] = event_feature_map
-
-                if prices_changed or earnings_changed or not event_feature_map:
-                    try:
-                        from pipeline.event_alpha import build_event_feature_matrices
-
-                        event_feature_map.clear()
-                        event_feature_map.update(
-                            build_event_feature_matrices(
-                                price_data=daily_prices,
-                                earnings_events=self._components.get("earnings_data", {}).get("earnings_events"),
-                            )
-                        )
-                    except Exception as exc:
-                        logger.warning(f"Event alpha refresh failed: {exc}")
-
-                symbols_to_rebuild: List[str] = []
-                if sources_changed:
-                    symbols_to_rebuild = list(daily_prices.keys())
-                else:
-                    for symbol in daily_prices.keys():
-                        if symbol not in feature_cache:
-                            symbols_to_rebuild.append(symbol)
-                            continue
-                        tick = self._latest_live_tick(symbol)
-                        tick_ts = tick.timestamp.astimezone(timezone.utc).isoformat() if tick is not None else ""
-                        prev_ts = self._last_seen_tick_ts.get(symbol, "")
-                        if tick_ts != prev_ts:
-                            symbols_to_rebuild.append(symbol)
-                        self._last_seen_tick_ts[symbol] = tick_ts
-
-                if symbols_to_rebuild:
-                    tail_rows = max(0, int(float(os.getenv("FEATURE_ENGINEERING_TAIL_ROWS", "0") or 0)))
-                    reversal_tail_rows = max(30, int(float(os.getenv("EVENT_REVERSAL_TAIL_ROWS", "80") or 80)))
-                    price_subset: Dict[str, pd.DataFrame] = {}
-
-                    for symbol in symbols_to_rebuild:
-                        frame = daily_prices.get(symbol)
-                        if frame is None or getattr(frame, "empty", True):
-                            continue
-                        tick = self._latest_live_tick(symbol)
-                        self._last_seen_tick_ts[symbol] = (
-                            tick.timestamp.astimezone(timezone.utc).isoformat() if tick is not None else ""
-                        )
-                        working = self._mark_price_frame_live(symbol, frame)
-                        if tail_rows > 0 and len(working) > tail_rows:
-                            working = working.tail(tail_rows)
-                        price_subset[symbol] = working
-
-                        # Update only the latest close-reversal columns when a live overlay is active.
-                        try:
-                            if self._live_feature_overlay_enabled:
-                                from pipeline.event_alpha import compute_close_reversal_features
-
-                                rev = compute_close_reversal_features(working.tail(reversal_tail_rows))
-                                if rev is not None and not getattr(rev, "empty", True):
-                                    last_idx = pd.Timestamp(working.index[-1])
-                                    last_rev = rev.iloc[-1]
-                                    existing = event_feature_map.get(symbol)
-                                    if existing is None or getattr(existing, "empty", True):
-                                        existing = pd.DataFrame(index=pd.DatetimeIndex(pd.to_datetime(working.index)))
-                                    if last_idx not in existing.index:
-                                        existing.loc[last_idx] = {col: 0.0 for col in existing.columns}
-                                    for col in (
-                                        "close_reversal_signal",
-                                        "close_reversal_strength",
-                                        "event_move_strength",
-                                        "event_day_extreme",
-                                    ):
-                                        if col not in existing.columns:
-                                            existing[col] = 0.0
-                                        existing.at[last_idx, col] = float(last_rev.get(col, 0.0) or 0.0)
-                                    event_feature_map[symbol] = existing
-                        except Exception:
-                            pass
-
-                    if price_subset:
-                        refreshed = FeaturePipeline().build_feature_matrix(
-                            price_data=price_subset,
-                            sentiment_data=self._components.get("sentiment_data", {}).get("symbol_sentiment_daily"),
-                            earnings_data=self._components.get("earnings_data", {}).get("earnings_events"),
-                            altdata_data=self._components.get("altdata_data", {}).get("symbol_altdata_daily"),
-                            event_feature_map=event_feature_map,
-                        )
-                        for symbol, features in refreshed.items():
-                            if features is None or getattr(features, "empty", True):
-                                continue
-                            feature_cache[symbol] = features
-
-                feature_matrices = feature_cache
-                self._persist_feature_store(feature_matrices, updated_symbols=symbols_to_rebuild)
-                self._maybe_periodic_retrain(feature_matrices)
-
-                updated_symbols = 0
-                earnings_events = self._components.get("earnings_data", {}).get("earnings_events")
                 latest_feature_rows = self._components.get("latest_feature_rows")
                 if not isinstance(latest_feature_rows, dict):
                     latest_feature_rows = {}
                     self._components["latest_feature_rows"] = latest_feature_rows
 
-                for symbol in symbols_to_rebuild:
-                    features = feature_matrices.get(symbol)
+                def _refresh_signal_for_symbol(symbol: str, features: Optional[pd.DataFrame], earnings_events) -> int:
                     if features is None or getattr(features, "empty", True):
                         latest_feature_rows.pop(symbol, None)
-                        continue
+                        return 0
+
                     latest_feature_rows[symbol] = features.iloc[-1]
-
-                self._last_inference_versions = current_versions
-
-                for symbol in symbols_to_rebuild:
-                    features = feature_matrices.get(symbol)
-                    if features is None or features.empty:
-                        continue
-
                     signature = self._build_feature_signature(symbol, features, earnings_events)
                     if self._last_feature_signature.get(symbol) == signature:
-                        continue
+                        return 0
 
                     latest_row = features.iloc[-1]
                     scored = scorer.score(latest_row, symbol=symbol)
@@ -6263,7 +6146,138 @@ class MacroIntelligenceSystem:
                         )
                     self._signal_store[symbol] = signal
                     self._last_feature_signature[symbol] = signature
-                    updated_symbols += 1
+                    return 1
+
+                current_versions = dict(self._data_versions)
+                sources_changed = any(
+                    current_versions.get(k, 0) != self._last_inference_versions.get(k, 0) for k in current_versions
+                )
+                prices_changed = current_versions.get("prices", 0) != self._last_inference_versions.get("prices", 0)
+                earnings_changed = current_versions.get("earnings", 0) != self._last_inference_versions.get("earnings", 0)
+
+                feature_cache = self._components.get("feature_matrices")
+                if not isinstance(feature_cache, dict):
+                    feature_cache = {}
+                    self._components["feature_matrices"] = feature_cache
+
+                event_feature_map = self._components.get("event_feature_map")
+                if not isinstance(event_feature_map, dict):
+                    event_feature_map = {}
+                    self._components["event_feature_map"] = event_feature_map
+
+                if prices_changed or earnings_changed or not event_feature_map:
+                    try:
+                        from pipeline.event_alpha import build_event_feature_matrices
+
+                        event_feature_map.clear()
+                        event_feature_map.update(
+                            build_event_feature_matrices(
+                                price_data=daily_prices,
+                                earnings_events=self._components.get("earnings_data", {}).get("earnings_events"),
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning(f"Event alpha refresh failed: {exc}")
+
+                symbols_to_rebuild: List[str] = []
+                if sources_changed:
+                    symbols_to_rebuild = list(daily_prices.keys())
+                else:
+                    for symbol in daily_prices.keys():
+                        if symbol not in feature_cache:
+                            symbols_to_rebuild.append(symbol)
+                            continue
+                        tick = self._latest_live_tick(symbol)
+                        tick_ts = tick.timestamp.astimezone(timezone.utc).isoformat() if tick is not None else ""
+                        prev_ts = self._last_seen_tick_ts.get(symbol, "")
+                        if tick_ts != prev_ts:
+                            symbols_to_rebuild.append(symbol)
+                        self._last_seen_tick_ts[symbol] = tick_ts
+
+                if symbols_to_rebuild:
+                    tail_rows = max(0, int(float(os.getenv("FEATURE_ENGINEERING_TAIL_ROWS", "0") or 0)))
+                    reversal_tail_rows = max(30, int(float(os.getenv("EVENT_REVERSAL_TAIL_ROWS", "80") or 80)))
+                    price_subset: Dict[str, pd.DataFrame] = {}
+
+                    for symbol in symbols_to_rebuild:
+                        frame = daily_prices.get(symbol)
+                        if frame is None or getattr(frame, "empty", True):
+                            continue
+                        tick = self._latest_live_tick(symbol)
+                        self._last_seen_tick_ts[symbol] = (
+                            tick.timestamp.astimezone(timezone.utc).isoformat() if tick is not None else ""
+                        )
+                        working = self._mark_price_frame_live(symbol, frame)
+                        if tail_rows > 0 and len(working) > tail_rows:
+                            working = working.tail(tail_rows)
+                        price_subset[symbol] = working
+
+                        # Update only the latest close-reversal columns when a live overlay is active.
+                        try:
+                            if self._live_feature_overlay_enabled:
+                                from pipeline.event_alpha import compute_close_reversal_features
+
+                                rev = compute_close_reversal_features(working.tail(reversal_tail_rows))
+                                if rev is not None and not getattr(rev, "empty", True):
+                                    last_idx = pd.Timestamp(working.index[-1])
+                                    last_rev = rev.iloc[-1]
+                                    existing = event_feature_map.get(symbol)
+                                    if existing is None or getattr(existing, "empty", True):
+                                        existing = pd.DataFrame(index=pd.DatetimeIndex(pd.to_datetime(working.index)))
+                                    if last_idx not in existing.index:
+                                        existing.loc[last_idx] = {col: 0.0 for col in existing.columns}
+                                    for col in (
+                                        "close_reversal_signal",
+                                        "close_reversal_strength",
+                                        "event_move_strength",
+                                        "event_day_extreme",
+                                    ):
+                                        if col not in existing.columns:
+                                            existing[col] = 0.0
+                                        existing.at[last_idx, col] = float(last_rev.get(col, 0.0) or 0.0)
+                                    event_feature_map[symbol] = existing
+                        except Exception:
+                            pass
+
+                    if price_subset:
+                        rebuild_symbols = list(price_subset.keys())
+                        batches = self._chunk_symbols(rebuild_symbols, self._inference_feature_chunk_size)
+                        total_batches = max(len(batches), 1)
+                        updated_symbols = 0
+                        earnings_events = self._components.get("earnings_data", {}).get("earnings_events")
+                        for batch_idx, batch_symbols in enumerate(batches, start=1):
+                            batch_prices = {symbol: price_subset[symbol] for symbol in batch_symbols}
+                            refreshed = FeaturePipeline().build_feature_matrix(
+                                price_data=batch_prices,
+                                sentiment_data=self._components.get("sentiment_data", {}).get("symbol_sentiment_daily"),
+                                earnings_data=earnings_events,
+                                altdata_data=self._components.get("altdata_data", {}).get("symbol_altdata_daily"),
+                                event_feature_map=event_feature_map,
+                            )
+                            for symbol in batch_symbols:
+                                features = refreshed.get(symbol)
+                                if features is None or getattr(features, "empty", True):
+                                    feature_cache.pop(symbol, None)
+                                else:
+                                    feature_cache[symbol] = features
+                                updated_symbols += _refresh_signal_for_symbol(symbol, features, earnings_events)
+                            if total_batches > 1:
+                                logger.info(
+                                    "Inference refresh progress: batch %s/%s | %s/%s symbols rebuilt",
+                                    batch_idx,
+                                    total_batches,
+                                    min(batch_idx * self._inference_feature_chunk_size, len(rebuild_symbols)),
+                                    len(rebuild_symbols),
+                                )
+                    else:
+                        updated_symbols = 0
+                        earnings_events = self._components.get("earnings_data", {}).get("earnings_events")
+                else:
+                    updated_symbols = 0
+                    earnings_events = self._components.get("earnings_data", {}).get("earnings_events")
+
+                feature_matrices = feature_cache
+                self._last_inference_versions = current_versions
 
                 updated_symbols += self._refresh_crypto_signals(latest_feature_rows)
 
@@ -6301,6 +6315,8 @@ class MacroIntelligenceSystem:
 
                 self._auto_trade()
                 self._maybe_refresh_execution_backtest(feature_matrices)
+                self._persist_feature_store(feature_matrices, updated_symbols=symbols_to_rebuild)
+                self._maybe_periodic_retrain(feature_matrices)
 
                 buys = sum(1 for s in self._signal_store.values() if s.get("signal") == "buy")
                 sells = sum(1 for s in self._signal_store.values() if s.get("signal") == "sell")

@@ -42,6 +42,7 @@ META_EDGE_PATH = CHECKPOINTS_DIR / "meta_edge_model.joblib"
 META_DRAWDOWN_PATH = CHECKPOINTS_DIR / "meta_drawdown_model.joblib"
 META_FEATURES_PATH = CHECKPOINTS_DIR / "meta_feature_cols.pkl"
 META_REPORT_PATH = CHECKPOINTS_DIR / "meta_walkforward_report.json"
+META_REPORT_PREVIOUS_PATH = CHECKPOINTS_DIR / "meta_walkforward_report.previous.json"
 META_DIRECTIONAL_PATH = CHECKPOINTS_DIR / "meta_directional_models.joblib"
 META_DIRECTIONAL_PREVIOUS_PATH = CHECKPOINTS_DIR / "meta_directional_models.previous.joblib"
 XGB_SHAP_REPORT_PATH = CHECKPOINTS_DIR / "xgboost_shap_monitor.json"
@@ -449,6 +450,7 @@ class TrainedMetaModel:
     @classmethod
     def is_available(cls) -> bool:
         directional_ready = META_DIRECTIONAL_PATH.exists() and META_REPORT_PATH.exists()
+        previous_directional_ready = META_DIRECTIONAL_PREVIOUS_PATH.exists() and META_REPORT_PREVIOUS_PATH.exists()
         legacy_ready = (
             META_CLASSIFIER_PATH.exists()
             and META_EDGE_PATH.exists()
@@ -456,7 +458,7 @@ class TrainedMetaModel:
             and META_FEATURES_PATH.exists()
             and META_REPORT_PATH.exists()
         )
-        return directional_ready or legacy_ready
+        return directional_ready or previous_directional_ready or legacy_ready
 
     @classmethod
     def _report_is_acceptable(cls, report: Dict) -> bool:
@@ -478,54 +480,81 @@ class TrainedMetaModel:
     def load(cls) -> Optional["TrainedMetaModel"]:
         if not cls.is_available():
             return None
-        try:
-            with open(META_REPORT_PATH, "r", encoding="utf-8") as f:
-                report = json.load(f)
-            if not cls._report_is_acceptable(report):
-                summary = report.get("walk_forward", {}).get("summary", {})
-                logger.warning(
-                    "Meta model checkpoint rejected by validation gate: "
-                    f"precision={summary.get('mean_precision')} "
-                    f"coverage={summary.get('mean_coverage_pct')} "
-                    f"edge={summary.get('mean_taken_edge_pct')} "
-                    f"hit_rate={summary.get('mean_taken_hit_rate_pct')}"
-                )
+        def _load_report(report_path: Path) -> Optional[Dict]:
+            if not report_path.exists():
                 return None
-            if META_DIRECTIONAL_PATH.exists():
-                payload = joblib.load(META_DIRECTIONAL_PATH)
-                bundles = payload.get("bundles", {}) if isinstance(payload, dict) else {}
-                feature_columns = list(payload.get("feature_columns", MetaFeatureBuilder.FEATURE_COLUMNS))
-                resolved_bundles: Dict[str, DirectionalMetaArtifacts] = {}
-                deployment_rules = report.get("deployment_rules", {}) if isinstance(report, dict) else {}
-                for direction, bundle_payload in bundles.items():
-                    rules = deployment_rules.get(direction, {}) if isinstance(deployment_rules, dict) else {}
-                    resolved_bundles[direction] = DirectionalMetaArtifacts(
-                        classifier=bundle_payload["classifier"],
-                        calibrator=bundle_payload.get("calibrator") or BinaryPlattCalibrator(),
-                        edge_model=bundle_payload["edge_model"],
-                        drawdown_model=bundle_payload["drawdown_model"],
-                        decision_threshold=float(
-                            os.getenv(
-                                "META_MODEL_RUNTIME_THRESHOLD",
-                                str(rules.get("decision_threshold", 0.58) or 0.58),
-                            )
-                        ),
-                        min_expected_edge_pct=float(
-                            os.getenv(
-                                "META_MODEL_RUNTIME_MIN_EDGE_PCT",
-                                str(rules.get("min_expected_edge_pct", 0.10) or 0.10),
-                            )
-                        ),
-                        min_edge_ratio=float(
-                            os.getenv(
-                                "META_MODEL_RUNTIME_MIN_EDGE_RATIO",
-                                str(rules.get("min_edge_ratio", 0.12) or 0.12),
-                            )
-                        ),
-                        direction=direction,
-                    )
-                if resolved_bundles:
-                    return cls(resolved_bundles, feature_columns)
+            with open(report_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        def _log_rejected_report(report: Dict, label: str) -> None:
+            summary = report.get("walk_forward", {}).get("summary", {}) if isinstance(report, dict) else {}
+            logger.warning(
+                f"Meta model checkpoint '{label}' rejected by validation gate: "
+                f"precision={summary.get('mean_precision')} "
+                f"coverage={summary.get('mean_coverage_pct')} "
+                f"edge={summary.get('mean_taken_edge_pct')} "
+                f"hit_rate={summary.get('mean_taken_hit_rate_pct')}"
+            )
+
+        def _directional_model_from(report: Dict, directional_path: Path) -> Optional["TrainedMetaModel"]:
+            if not directional_path.exists():
+                return None
+            payload = joblib.load(directional_path)
+            bundles = payload.get("bundles", {}) if isinstance(payload, dict) else {}
+            feature_columns = list(payload.get("feature_columns", MetaFeatureBuilder.FEATURE_COLUMNS))
+            resolved_bundles: Dict[str, DirectionalMetaArtifacts] = {}
+            deployment_rules = report.get("deployment_rules", {}) if isinstance(report, dict) else {}
+            for direction, bundle_payload in bundles.items():
+                rules = deployment_rules.get(direction, {}) if isinstance(deployment_rules, dict) else {}
+                resolved_bundles[direction] = DirectionalMetaArtifacts(
+                    classifier=bundle_payload["classifier"],
+                    calibrator=bundle_payload.get("calibrator") or BinaryPlattCalibrator(),
+                    edge_model=bundle_payload["edge_model"],
+                    drawdown_model=bundle_payload["drawdown_model"],
+                    decision_threshold=float(
+                        os.getenv(
+                            "META_MODEL_RUNTIME_THRESHOLD",
+                            str(rules.get("decision_threshold", 0.58) or 0.58),
+                        )
+                    ),
+                    min_expected_edge_pct=float(
+                        os.getenv(
+                            "META_MODEL_RUNTIME_MIN_EDGE_PCT",
+                            str(rules.get("min_expected_edge_pct", 0.10) or 0.10),
+                        )
+                    ),
+                    min_edge_ratio=float(
+                        os.getenv(
+                            "META_MODEL_RUNTIME_MIN_EDGE_RATIO",
+                            str(rules.get("min_edge_ratio", 0.12) or 0.12),
+                        )
+                    ),
+                    direction=direction,
+                )
+            if not resolved_bundles:
+                return None
+            return cls(resolved_bundles, feature_columns)
+
+        try:
+            report = _load_report(META_REPORT_PATH)
+            if report and cls._report_is_acceptable(report):
+                directional_model = _directional_model_from(report, META_DIRECTIONAL_PATH)
+                if directional_model is not None:
+                    return directional_model
+            elif report:
+                _log_rejected_report(report, "current")
+
+            previous_report = _load_report(META_REPORT_PREVIOUS_PATH)
+            if previous_report and cls._report_is_acceptable(previous_report):
+                previous_model = _directional_model_from(previous_report, META_DIRECTIONAL_PREVIOUS_PATH)
+                if previous_model is not None:
+                    logger.info("Meta model load: using previous validated directional checkpoint")
+                    return previous_model
+            elif previous_report:
+                _log_rejected_report(previous_report, "previous")
+
+            if report is None:
+                return None
 
             classifier = joblib.load(META_CLASSIFIER_PATH)
             edge_model = joblib.load(META_EDGE_PATH)
@@ -1111,6 +1140,11 @@ class MetaModelTrainer:
         if META_DIRECTIONAL_PATH.exists():
             try:
                 META_DIRECTIONAL_PREVIOUS_PATH.write_bytes(META_DIRECTIONAL_PATH.read_bytes())
+            except Exception:
+                pass
+        if META_REPORT_PATH.exists():
+            try:
+                META_REPORT_PREVIOUS_PATH.write_bytes(META_REPORT_PATH.read_bytes())
             except Exception:
                 pass
 
