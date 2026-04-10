@@ -473,13 +473,21 @@ def create_app(
                 return dict(value or {})
             except Exception:
                 return {}
-        try:
-            return value.copy()
-        except Exception:
+        # _signal_store can mutate while dashboard threads read it; retry with stable item snapshots.
+        for _ in range(3):
             try:
-                return dict(value)
+                return value.copy()
+            except RuntimeError:
+                try:
+                    return {k: v for k, v in list(value.items())}
+                except RuntimeError:
+                    continue
             except Exception:
-                return {}
+                try:
+                    return dict(value)
+                except Exception:
+                    return {}
+        return {}
 
     def _signal_store_snapshot() -> Dict[str, Dict[str, Any]]:
         snapshot = _snapshot_mapping(_signal_store)

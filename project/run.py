@@ -5430,13 +5430,14 @@ class MacroIntelligenceSystem:
 
             conviction = float(signal.get("conviction_score", 0.0) or 0.0)
             direction = signal.get("signal")
-            exit_floor = 4.6 if lane == "day" else 4.2 if lane == "crypto" else 5.8
+            # Keep exit floors aligned with observed conviction ranges to avoid forced churn exits.
+            exit_floor = 3.0 if lane == "day" else 2.5 if lane == "crypto" else 3.5
             should_exit = direction == "sell" or conviction < exit_floor
             if lane == "day" and intraday.get("direction") == "sell":
                 should_exit = True
             if isinstance(meta, dict) and meta:
                 should_exit = should_exit or (
-                    meta.get("take_trade") is False and float(meta.get("take_probability", 0.0) or 0.0) < 0.45
+                    meta.get("take_trade") is False and float(meta.get("take_probability", 0.0) or 0.0) < 0.28
                 )
             if age_seconds >= lane_config.get("min_hold_seconds", self._auto_trade_min_hold_seconds) and should_exit:
                 self._close_position(symbol, "signal decay", position_key=position_key)
@@ -6275,7 +6276,7 @@ class MacroIntelligenceSystem:
         trainer = InstitutionalTrainingPipeline(
             xgb_horizon=max(1, int(os.getenv("XGB_RETRAIN_HORIZON_DAYS", "5"))),
             meta_horizon=max(1, int(os.getenv("META_MODEL_HORIZON_DAYS", "8"))),
-            meta_take_threshold=float(os.getenv("META_MODEL_TAKE_THRESHOLD", "0.58")),
+            meta_take_threshold=float(os.getenv("META_MODEL_TAKE_THRESHOLD", "0.52")),
             meta_walk_forward_folds=max(3, int(os.getenv("META_MODEL_WALKFORWARD_FOLDS", "6"))),
             meta_min_train_days=max(90, int(os.getenv("META_MODEL_MIN_TRAIN_DAYS", "200"))),
         )
