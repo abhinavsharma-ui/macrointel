@@ -343,6 +343,7 @@ class MultiHorizonDataset:
         sequence_length: int = 60,
         horizons: List[int] = None,
         threshold_multiplier: float = 0.5,
+        normalization_params: Optional[Dict[str, Dict[str, float]]] = None,
     ):
         import torch
         from torch.utils.data import Dataset
@@ -368,9 +369,15 @@ class MultiHorizonDataset:
                 labels = pd.cut(fwd, bins=[-np.inf, -thr, thr, np.inf], labels=[0, 1, 2])
                 all_labels[h] = labels.astype(float).fillna(1).values.astype(np.int64)
 
-        # Normalize
-        means = df.mean()
-        stds  = df.std().replace(0, 1)
+        # Normalize; reuse train-fitted params for val/test to prevent leakage.
+        if normalization_params:
+            mean_map = normalization_params.get("means", {}) or {}
+            std_map = normalization_params.get("stds", {}) or {}
+            means = pd.Series({c: float(mean_map.get(c, 0.0)) for c in df.columns})
+            stds = pd.Series({c: float(std_map.get(c, 1.0)) for c in df.columns}).replace(0, 1)
+        else:
+            means = df.mean()
+            stds  = df.std().replace(0, 1)
         X_norm = ((df - means) / stds).clip(-5, 5).fillna(0)
 
         # Regime features per timestep

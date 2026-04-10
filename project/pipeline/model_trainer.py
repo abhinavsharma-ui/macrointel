@@ -143,8 +143,8 @@ class XGBoostTrainer:
         feat_pipeline = FeaturePipeline()
         feature_matrices = feat_pipeline.build_feature_matrix(price_data=price_data)
 
-        us_X, us_y   = [], []
-        nse_X, nse_y = [], []
+        us_rows: list[pd.DataFrame] = []
+        nse_rows: list[pd.DataFrame] = []
 
         for symbol, features in feature_matrices.items():
             if features.empty or len(features) < 100:
@@ -163,46 +163,71 @@ class XGBoostTrainer:
             if len(combined) < 50:
                 continue
 
-            X = combined.drop(columns=["_label"]).values
-            y = (combined["_label"] == 1).astype(int).values  # 1=BUY, 0=SELL
-
+            feature_df = combined.drop(columns=["_label"]).copy()
             if not self.feature_names:
-                self.feature_names = list(combined.drop(columns=["_label"]).columns)
+                self.feature_names = list(feature_df.columns)
+            else:
+                # Keep train/serve schema stable across all symbols.
+                feature_df = feature_df.reindex(columns=self.feature_names, fill_value=0.0)
+
+            market_df = feature_df.copy()
+            market_df["_y"] = (combined["_label"] == 1).astype(int).values  # 1=BUY, 0=SELL
+            market_df["_timestamp"] = pd.to_datetime(combined.index)
 
             is_nse = symbol.endswith(".NS")
             if is_nse:
-                nse_X.append(X); nse_y.append(y)
+                nse_rows.append(market_df)
             else:
-                us_X.append(X);  us_y.append(y)
+                us_rows.append(market_df)
 
         report = {}
 
         # Train US model
-        if us_X:
-            X_all = np.vstack(us_X)
-            y_all = np.concatenate(us_y)
+        if us_rows:
+            us_all = pd.concat(us_rows, ignore_index=True).sort_values("_timestamp").reset_index(drop=True)
+            X_all = us_all[self.feature_names].to_numpy(dtype=float)
+            y_all = us_all["_y"].to_numpy(dtype=int)
+            t_all = us_all["_timestamp"].to_numpy()
             logger.info(f"Training US model: {len(X_all)} samples, {X_all.shape[1]} features")
-            self.us_model, self.us_calibrator, metrics = self._fit(X_all, y_all, xgb, "US")
+            self.us_model, self.us_calibrator, metrics = self._fit(X_all, y_all, t_all, xgb, "US")
             report["us"] = metrics
 
         # Train NSE model
-        if nse_X:
-            X_all = np.vstack(nse_X)
-            y_all = np.concatenate(nse_y)
+        if nse_rows:
+            nse_all = pd.concat(nse_rows, ignore_index=True).sort_values("_timestamp").reset_index(drop=True)
+            X_all = nse_all[self.feature_names].to_numpy(dtype=float)
+            y_all = nse_all["_y"].to_numpy(dtype=int)
+            t_all = nse_all["_timestamp"].to_numpy()
             logger.info(f"Training NSE model: {len(X_all)} samples, {X_all.shape[1]} features")
-            self.nse_model, self.nse_calibrator, metrics = self._fit(X_all, y_all, xgb, "NSE")
+            self.nse_model, self.nse_calibrator, metrics = self._fit(X_all, y_all, t_all, xgb, "NSE")
             report["nse"] = metrics
 
         return report
 
-    def _fit(self, X: np.ndarray, y: np.ndarray, xgb, market: str):
+    def _fit(self, X: np.ndarray, y: np.ndarray, timestamps: np.ndarray, xgb, market: str):
         """Fit XGBoost with walk-forward time-series CV."""
         from sklearn.metrics import accuracy_score, precision_score, recall_score
 
-        # Time-based split (last 20% = test)
-        split  = int(len(X) * 0.8)
-        X_train, X_test = X[:split], X[split:]
-        y_train, y_test = y[:split], y[split:]
+        # Strict chronological split by unique calendar timestamps (prevents cross-symbol leakage).
+        ts = pd.to_datetime(timestamps)
+        unique_ts = np.array(sorted(pd.Series(ts).dropna().unique()))
+        if len(unique_ts) < 8:
+            split = int(len(X) * 0.8)
+            X_train, X_test = X[:split], X[split:]
+            y_train, y_test = y[:split], y[split:]
+        else:
+            split_idx = max(1, int(len(unique_ts) * 0.8))
+            split_ts = unique_ts[split_idx - 1]
+            train_mask = ts <= split_ts
+            test_mask = ts > split_ts
+            if test_mask.sum() < 200:
+                # Fallback to row split if sparse tail after timestamp split.
+                split = int(len(X) * 0.8)
+                X_train, X_test = X[:split], X[split:]
+                y_train, y_test = y[:split], y[split:]
+            else:
+                X_train, X_test = X[train_mask], X[test_mask]
+                y_train, y_test = y[train_mask], y[test_mask]
 
         # Class weight balancing
         pos_ratio = y_train.sum() / max(len(y_train) - y_train.sum(), 1)

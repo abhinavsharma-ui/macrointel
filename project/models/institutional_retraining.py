@@ -537,6 +537,16 @@ class TrainedMetaModel:
     def load(cls) -> Optional["TrainedMetaModel"]:
         if not cls.is_available():
             return None
+        def _is_live_mode() -> bool:
+            if os.getenv("LIVE_TRADING_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}:
+                return True
+            if os.getenv("EXECUTION_MODE", "").strip().lower() in {"live", "production", "prod"}:
+                return True
+            if os.getenv("BYBIT_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"} and os.getenv(
+                "BYBIT_ORDER_DRY_RUN", "1"
+            ).strip().lower() not in {"1", "true", "yes", "on"}:
+                return True
+            return False
         def _load_report(report_path: Path) -> Optional[Dict]:
             if not report_path.exists():
                 return None
@@ -599,6 +609,12 @@ class TrainedMetaModel:
                 "yes",
                 "on",
             }
+            if force_directional and _is_live_mode():
+                logger.warning(
+                    "META_MODEL_FORCE_LOAD_DIRECTIONAL ignored in live mode. "
+                    "Enable only in paper/sim where gate bypass is intentional."
+                )
+                force_directional = False
             report = _load_report(META_REPORT_PATH)
             if report and cls._report_is_acceptable(report):
                 directional_model = _directional_model_from(report, META_DIRECTIONAL_PATH)

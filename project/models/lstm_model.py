@@ -67,6 +67,7 @@ class SequenceDataset(Dataset):
         horizon: int = 5,
         target_col: str = "close",
         threshold_multiplier: float = 0.5,  # threshold = 0.5 × daily_std
+        normalization_params: Optional[Dict[str, Dict[str, float]]] = None,
     ):
         self.seq_len = sequence_length
         self.horizon = horizon
@@ -95,9 +96,15 @@ class SequenceDataset(Dataset):
             labels=[0, 1, 2],  # sell=0, hold=1, buy=2
         ).astype(float).fillna(1)
 
-        # Normalize features (Z-score per column, robust to outliers)
-        self.means = df.mean()
-        self.stds  = df.std().replace(0, 1)
+        # Normalize features. If params are provided from train split, reuse them for val/test.
+        if normalization_params:
+            mean_map = normalization_params.get("means", {}) or {}
+            std_map = normalization_params.get("stds", {}) or {}
+            self.means = pd.Series({c: float(mean_map.get(c, 0.0)) for c in df.columns})
+            self.stds = pd.Series({c: float(std_map.get(c, 1.0)) for c in df.columns}).replace(0, 1)
+        else:
+            self.means = df.mean()
+            self.stds  = df.std().replace(0, 1)
         df_norm = (df - self.means) / self.stds
         df_norm = df_norm.clip(-5, 5).fillna(0)
 

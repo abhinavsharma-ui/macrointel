@@ -493,8 +493,9 @@ class MetaDecisionEngine:
 
     def _effective_take_threshold(self, signal: Dict, default_threshold: float) -> float:
         lane = self._signal_lane(signal)
-        lane_cap = self._lane_take_threshold_caps.get(lane, self._take_threshold)
-        return min(default_threshold, lane_cap)
+        lane_floor = self._lane_take_threshold_caps.get(lane, self._take_threshold)
+        # Do not relax trained/runtime threshold with lane tuning; lane value is treated as a floor.
+        return max(default_threshold, lane_floor)
 
     def evaluate_universe(self, signals: Dict[str, Dict], feature_rows: Optional[Dict[str, pd.Series]] = None) -> Dict[str, Dict]:
         decisions: Dict[str, Dict] = {}
