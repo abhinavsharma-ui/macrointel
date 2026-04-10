@@ -625,6 +625,12 @@ class BybitPublicDepthWebSocket:
         self._books: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(lambda: {"bids": {}, "asks": {}})
         self._ping_thread: Optional[threading.Thread] = None
         self._topics_per_subscribe = max(1, min(10, int(os.getenv("BYBIT_WS_TOPICS_PER_SUBSCRIBE", "10") or 10)))
+        # Library RFC ping/pong uses a short default timeout and drops under CPU load (e.g. retrain + run.py).
+        # Bybit v5 answers app-level {"op":"ping"} in _ping_loop — prefer that unless explicitly enabled.
+        self._bybit_lib_ping = os.getenv("BYBIT_WS_LIBRARY_PING", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self._bybit_ping_interval = max(0.0, float(os.getenv("BYBIT_WS_PING_INTERVAL_SECONDS", "45") or 45))
+        self._bybit_ping_timeout = max(0.0, float(os.getenv("BYBIT_WS_PING_TIMEOUT_SECONDS", "90") or 90))
+        self._bybit_app_ping_seconds = max(10.0, float(os.getenv("BYBIT_WS_APP_PING_SECONDS", "20") or 20))
 
     def _ws_url(self) -> str:
         return self.TESTNET_WS_BASE if self.testnet else self.WS_BASE
@@ -657,7 +663,13 @@ class BybitPublicDepthWebSocket:
                     on_error=self._on_error,
                     on_close=self._on_close,
                 )
-                self.ws.run_forever(ping_interval=20, ping_timeout=10)
+                if self._bybit_lib_ping and self._bybit_ping_interval > 0:
+                    self.ws.run_forever(
+                        ping_interval=self._bybit_ping_interval,
+                        ping_timeout=self._bybit_ping_timeout if self._bybit_ping_timeout > 0 else None,
+                    )
+                else:
+                    self.ws.run_forever(ping_interval=0, ping_timeout=None)
             except Exception as exc:
                 logger.warning(f"Bybit public depth WebSocket error: {exc}")
             if self._running:
@@ -669,7 +681,7 @@ class BybitPublicDepthWebSocket:
                 self.ws.send(json.dumps({"op": "ping"}))
             except Exception:
                 return
-            time.sleep(20)
+            time.sleep(self._bybit_app_ping_seconds)
 
     def _on_open(self, ws):
         topics = self._subscribe_topics()

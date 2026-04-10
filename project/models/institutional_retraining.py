@@ -472,6 +472,26 @@ class TrainedMetaModel:
     MIN_MEAN_TAKEN_EDGE_PCT = 0.10
     MIN_MEAN_HIT_RATE_PCT = 45.0
 
+    @classmethod
+    def _gate_min_precision(cls) -> float:
+        v = os.getenv("META_MODEL_GATE_MIN_PRECISION", "")
+        return float(v) if v.strip() else cls.MIN_MEAN_PRECISION
+
+    @classmethod
+    def _gate_min_coverage_pct(cls) -> float:
+        v = os.getenv("META_MODEL_GATE_MIN_COVERAGE_PCT", "")
+        return float(v) if v.strip() else cls.MIN_MEAN_COVERAGE_PCT
+
+    @classmethod
+    def _gate_min_taken_edge_pct(cls) -> float:
+        v = os.getenv("META_MODEL_GATE_MIN_TAKEN_EDGE_PCT", "")
+        return float(v) if v.strip() else cls.MIN_MEAN_TAKEN_EDGE_PCT
+
+    @classmethod
+    def _gate_min_hit_rate_pct(cls) -> float:
+        v = os.getenv("META_MODEL_GATE_MIN_HIT_RATE_PCT", "")
+        return float(v) if v.strip() else cls.MIN_MEAN_HIT_RATE_PCT
+
     def __init__(
         self,
         bundles: Dict[str, DirectionalMetaArtifacts],
@@ -503,13 +523,13 @@ class TrainedMetaModel:
         summary = walk_forward.get("summary", {}) if isinstance(walk_forward, dict) else {}
         if not summary:
             return False
-        if float(summary.get("mean_precision", 0.0) or 0.0) < cls.MIN_MEAN_PRECISION:
+        if float(summary.get("mean_precision", 0.0) or 0.0) < cls._gate_min_precision():
             return False
-        if float(summary.get("mean_coverage_pct", 0.0) or 0.0) < cls.MIN_MEAN_COVERAGE_PCT:
+        if float(summary.get("mean_coverage_pct", 0.0) or 0.0) < cls._gate_min_coverage_pct():
             return False
-        if float(summary.get("mean_taken_edge_pct", 0.0) or 0.0) < cls.MIN_MEAN_TAKEN_EDGE_PCT:
+        if float(summary.get("mean_taken_edge_pct", 0.0) or 0.0) < cls._gate_min_taken_edge_pct():
             return False
-        if float(summary.get("mean_taken_hit_rate_pct", 0.0) or 0.0) < cls.MIN_MEAN_HIT_RATE_PCT:
+        if float(summary.get("mean_taken_hit_rate_pct", 0.0) or 0.0) < cls._gate_min_hit_rate_pct():
             return False
         return True
 
@@ -573,10 +593,24 @@ class TrainedMetaModel:
             return cls(resolved_bundles, feature_columns)
 
         try:
+            force_directional = os.getenv("META_MODEL_FORCE_LOAD_DIRECTIONAL", "0").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
             report = _load_report(META_REPORT_PATH)
             if report and cls._report_is_acceptable(report):
                 directional_model = _directional_model_from(report, META_DIRECTIONAL_PATH)
                 if directional_model is not None:
+                    return directional_model
+            elif report and force_directional and META_DIRECTIONAL_PATH.exists():
+                directional_model = _directional_model_from(report, META_DIRECTIONAL_PATH)
+                if directional_model is not None:
+                    logger.warning(
+                        "Meta model: loading directional checkpoint despite failed walk-forward gate "
+                        "(META_MODEL_FORCE_LOAD_DIRECTIONAL=1). Paper/live outcomes may be weak."
+                    )
                     return directional_model
             elif report:
                 _log_rejected_report(report, "current")
@@ -586,6 +620,14 @@ class TrainedMetaModel:
                 previous_model = _directional_model_from(previous_report, META_DIRECTIONAL_PREVIOUS_PATH)
                 if previous_model is not None:
                     logger.info("Meta model load: using previous validated directional checkpoint")
+                    return previous_model
+            elif previous_report and force_directional and META_DIRECTIONAL_PREVIOUS_PATH.exists():
+                previous_model = _directional_model_from(previous_report, META_DIRECTIONAL_PREVIOUS_PATH)
+                if previous_model is not None:
+                    logger.warning(
+                        "Meta model: loading previous directional checkpoint despite failed gate "
+                        "(META_MODEL_FORCE_LOAD_DIRECTIONAL=1)."
+                    )
                     return previous_model
             elif previous_report:
                 _log_rejected_report(previous_report, "previous")
@@ -656,7 +698,9 @@ class EventAwareXGBoostRetrainer:
     def _build_dataset(self, feature_matrices: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         rows = []
         min_xgb_rows = max(80, int(os.getenv("XGB_MIN_FRAME_ROWS", "100") or 100))
-        for symbol, frame in feature_matrices.items():
+        items = list(feature_matrices.items())
+        log_every = max(100, int(os.getenv("RETRAIN_XGB_LOG_EVERY", "400") or 400))
+        for i, (symbol, frame) in enumerate(items):
             if frame is None or frame.empty or len(frame) < min_xgb_rows:
                 continue
             numeric = frame.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan)
@@ -675,17 +719,22 @@ class EventAwareXGBoostRetrainer:
             numeric["symbol"] = symbol
             numeric["timestamp"] = pd.to_datetime(numeric.index)
             rows.append(numeric.reset_index(drop=True))
+            if (i + 1) % log_every == 0:
+                logger.info("XGB dataset build: processed %s / %s symbols (%s rows so far)", i + 1, len(items), sum(len(r) for r in rows))
 
         if not rows:
             return pd.DataFrame()
 
+        logger.info("XGB dataset build: concatenating %s symbol blocks...", len(rows))
         dataset = pd.concat(rows, ignore_index=True)
         dataset = dataset.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+        logger.info("XGB dataset ready: %s rows x %s cols", len(dataset), len(dataset.columns))
         return dataset
 
     def retrain(self, feature_matrices: Dict[str, pd.DataFrame], run_optuna: bool = False, optuna_trials: int = 40) -> Dict:
         from models.xgboost_model import XGBoostOptimizer, XGBoostSignalModel, add_regime_interactions
 
+        logger.info("XGBoost retrain: building labeled dataset (silent stretches are normal on large stores)...")
         dataset = self._build_dataset(feature_matrices)
         if dataset.empty:
             raise ValueError("No feature history available for XGBoost retraining")
@@ -716,7 +765,9 @@ class EventAwareXGBoostRetrainer:
             params = XGBoostOptimizer().optimize(X_train, y_train, n_trials=optuna_trials)
 
         model = XGBoostSignalModel(params=params)
+        logger.info("XGBoost retrain: fitting model (%s train / %s val rows)...", len(X_train), len(X_val))
         fit_metrics = model.fit(X_train, y_train, eval_set=(X_val, y_val))
+        logger.info("XGBoost retrain: time-series CV (can take several minutes)...")
         cv_metrics = model.time_series_cv_score(X, y)
         model_path = model.save(CHECKPOINTS_DIR / "xgboost_model.json")
 
@@ -986,8 +1037,10 @@ class MetaModelTrainer:
             self.horizon_days + 22,
         )
         warmup_rows = max(28, int(os.getenv("META_MODEL_WARMUP_ROWS", "42") or 42))
+        fm_items = list(feature_matrices.items())
+        meta_log_every = max(80, int(os.getenv("RETRAIN_META_LOG_EVERY", "250") or 250))
 
-        for symbol, frame in feature_matrices.items():
+        for fi, (symbol, frame) in enumerate(fm_items):
             if frame is None or frame.empty or len(frame) < min_frame:
                 continue
 
@@ -1070,12 +1123,16 @@ class MetaModelTrainer:
                     }
                 )
                 records.append(feature_values)
+            if (fi + 1) % meta_log_every == 0:
+                logger.info("Meta dataset build: %s / %s symbols (%s training rows so far)", fi + 1, len(fm_items), len(records))
 
         if not records:
             return pd.DataFrame()
 
+        logger.info("Meta dataset build: assembling %s rows...", len(records))
         dataset = pd.DataFrame(records)
         dataset = dataset.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+        logger.info("Meta dataset ready: %s rows", len(dataset))
         return dataset
 
     def walk_forward_validate(self, dataset: pd.DataFrame) -> Dict:
@@ -1177,6 +1234,7 @@ class MetaModelTrainer:
         }
 
     def train(self, feature_matrices: Dict[str, pd.DataFrame]) -> Dict:
+        logger.info("Meta model: building training set (scoring each bar — slow on 1000s of symbols)...")
         dataset = self.build_training_dataset(feature_matrices)
         if dataset.empty:
             raise ValueError("No training rows available for meta model")
@@ -1277,7 +1335,10 @@ class InstitutionalTrainingPipeline:
         )
 
     def train_all(self, feature_matrices: Dict[str, pd.DataFrame], run_optuna: bool = False) -> Dict:
+        n_sym = len(feature_matrices)
+        logger.info("Institutional pipeline: phase 1/2 XGBoost (%s feature matrices)...", n_sym)
         xgb_report = self.xgb_retrainer.retrain(feature_matrices, run_optuna=run_optuna)
+        logger.info("Institutional pipeline: phase 2/2 meta model...")
         meta_report = self.meta_trainer.train(feature_matrices)
         return {
             "xgboost": xgb_report,
