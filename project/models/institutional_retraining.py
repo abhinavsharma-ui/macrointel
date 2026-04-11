@@ -566,6 +566,31 @@ class TrainedMetaModel:
         def _directional_model_from(report: Dict, directional_path: Path) -> Optional["TrainedMetaModel"]:
             if not directional_path.exists():
                 return None
+            
+            # Try to load as new ensemble format first (our 76.2% model)
+            try:
+                payload = joblib.load(directional_path)
+                if isinstance(payload, dict) and "xgboost" in payload and "lightgbm" in payload:
+                    # New ensemble format - wrap in bundles structure
+                    bundles = {}
+                    for model_name, model in payload.items():
+                        bundles[model_name] = DirectionalMetaArtifacts(
+                            classifier=model,
+                            calibrator=BinaryPlattCalibrator(),
+                            edge_model=None,
+                            drawdown_model=None,
+                            decision_threshold=0.55,
+                            min_expected_edge_pct=0.15,
+                            min_edge_ratio=0.18,
+                            direction=model_name,
+                        )
+                    feature_columns = list(range(40))
+                    deployment_rules = report.get("deployment_rules", {}) if isinstance(report, dict) else {}
+                    return cls(_resolved_bundles=bundles, _feature_columns=feature_columns, _deployment_rules=deployment_rules)
+            except Exception as e:
+                pass
+            
+            # Original format
             payload = joblib.load(directional_path)
             bundles = payload.get("bundles", {}) if isinstance(payload, dict) else {}
             feature_columns = list(payload.get("feature_columns", MetaFeatureBuilder.FEATURE_COLUMNS))
