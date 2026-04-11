@@ -4152,6 +4152,8 @@ class MacroIntelligenceSystem:
         if active_model is not None:
             status["active"] = True
             status["source"] = "trained_meta"
+        else:
+            logger.warning("TrainedMetaModel.load() returned None - model not loaded!")
             status["decision_threshold"] = active_model.decision_threshold
             status["min_expected_edge_pct"] = active_model.min_expected_edge_pct
             status["min_edge_ratio"] = active_model.min_edge_ratio
