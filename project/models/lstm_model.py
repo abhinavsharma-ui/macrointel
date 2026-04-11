@@ -315,6 +315,40 @@ class LabelSmoothingCELoss(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────
+# Focal Loss (for class imbalance and hard examples)
+# ─────────────────────────────────────────────────────────────
+class FocalLoss(nn.Module):
+    """
+    Focal loss for addressing class imbalance and focusing on hard examples.
+    Better than cross-entropy when some classes are rare.
+    
+    gamma=2.0 is standard, reduces loss for well-classified examples.
+    """
+
+    def __init__(self, n_classes: int = 3, gamma: float = 2.0, alpha: float = 0.25):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.n_classes = n_classes
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce_loss = F.cross_entropy(logits, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        return focal_loss.mean()
+
+
+# ─────────────────────────────────────────────────────────────
+# Mixed Precision Support  
+# ─────────────────────────────────────────────────────────────
+try:
+    from torch.cuda.amp import autocast, GradScaler
+    AMP_AVAILABLE = True
+except ImportError:
+    AMP_AVAILABLE = False
+
+
+# ─────────────────────────────────────────────────────────────
 # Trainer
 # ─────────────────────────────────────────────────────────────
 class LSTMTrainer:
@@ -324,6 +358,8 @@ class LSTMTrainer:
     - Early stopping on validation loss
     - Model checkpointing
     - Training metrics logging
+    - Mixed precision training (faster on GPU)
+    - Focal loss option for class imbalance
     """
 
     def __init__(
@@ -332,6 +368,7 @@ class LSTMTrainer:
         device: str = "auto",
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-4,
+        use_focal_loss: bool = True,
     ):
         if not TORCH_OK:
             raise RuntimeError("PyTorch not installed")
@@ -344,8 +381,18 @@ class LSTMTrainer:
         self.optimizer = torch.optim.AdamW(
             model.parameters(), lr=learning_rate, weight_decay=weight_decay
         )
-        self.criterion = LabelSmoothingCELoss()
-        logger.info(f"LSTM trainer initialized on {self.device}")
+        
+        # Use focal loss for better precision on imbalanced data
+        if use_focal_loss:
+            self.criterion = FocalLoss(gamma=2.0, alpha=0.25)
+        else:
+            self.criterion = LabelSmoothingCELoss(smoothing=0.1)
+        
+        # Mixed precision scaler for faster GPU training
+        self.use_amp = AMP_AVAILABLE and self.device.type == "cuda"
+        self.scaler = GradScaler() if self.use_amp else None
+        
+        logger.info(f"LSTM trainer initialized on {self.device}, AMP={self.use_amp}")
 
     def train(
         self,
@@ -355,7 +402,7 @@ class LSTMTrainer:
         patience: int = 12,
         checkpoint_path: Optional[Path] = None,
     ) -> Dict:
-        """Full training loop."""
+        """Full training loop with mixed precision support."""
         checkpoint_path = checkpoint_path or MODELS_DIR / "lstm_best.pt"
 
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -379,14 +426,24 @@ class LSTMTrainer:
                 y_batch = y_batch.to(self.device)
 
                 self.optimizer.zero_grad()
-                logits, _ = self.model(X_batch)
-                loss = self.criterion(logits, y_batch)
-                loss.backward()
-
-                # Gradient clipping — essential for LSTMs
-                nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
-                self.optimizer.step()
+                
+                # Use mixed precision for faster training
+                if self.use_amp:
+                    with autocast():
+                        logits, _ = self.model(X_batch)
+                        loss = self.criterion(logits, y_batch)
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    logits, _ = self.model(X_batch)
+                    loss = self.criterion(logits, y_batch)
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.optimizer.step()
+                
                 scheduler.step()
                 train_losses.append(loss.item())
 

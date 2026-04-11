@@ -9,6 +9,8 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
+import json
+from pathlib import Path
 
 # Reliable stock list
 SYMBOLS = [
@@ -259,3 +261,65 @@ if positions:
     print(f"\nPositions ({len(positions)}):")
     for i, p in enumerate(positions, 1):
         print(f"   {i}. {p['symbol']}: {p['size']} @ Rs{p['price']:.0f}")
+
+# ============================================
+# SAVE POSITIONS FOR DASHBOARD
+# ============================================
+
+# Previous positions (from earlier runs)
+prev_positions = [
+    {"symbol": "ICICIBANK.NS", "quantity": 2, "avg_cost": 1281, "stop_loss": 1207, "target": 1384},
+    {"symbol": "ASIANPAINT.NS", "quantity": 1, "avg_cost": 2270, "stop_loss": 2128, "target": 2451},
+    {"symbol": "ADANIPORTS.NS", "quantity": 3, "avg_cost": 1447, "stop_loss": 1309, "target": 1592}
+]
+
+# New positions from this run
+new_positions = [
+    {
+        "symbol": p["symbol"],
+        "quantity": p["size"],
+        "avg_cost": p["price"],
+        "stop_loss": p["stop"],
+        "target": p["target"],
+        "ml_confidence": round(p.get("ml", 0) * 100, 1),
+        "signal_score": round(p["score"], 2)
+    }
+    for p in positions
+]
+
+all_positions = prev_positions + new_positions
+
+total_invested = sum(p["avg_cost"] * p["quantity"] for p in all_positions)
+total_cash = 248.14  # Remaining cash
+
+positions_data = {
+    "broker": "Paper Trading",
+    "summary": {
+        "portfolio_value": round(total_invested + total_cash, 2),
+        "cash": round(total_cash, 2),
+        "holdings_value": round(total_invested, 2),
+        "open_positions": len(all_positions),
+        "total_return_pct": round(((total_invested + total_cash - 5000) / 5000) * 100, 2)
+    },
+    "positions": [
+        {
+            "symbol": p["symbol"],
+            "quantity": p["quantity"],
+            "avg_cost": p["avg_cost"],
+            "current_price": p["avg_cost"],
+            "unrealized_pnl": 0,
+            "stop_loss": p.get("stop_loss", 0),
+            "target": p.get("target", 0),
+            "ml_confidence": p.get("ml_confidence", 0),
+            "signal_score": p.get("signal_score", 0)
+        }
+        for p in all_positions
+    ],
+    "updated_at": pd.Timestamp.now().isoformat()
+}
+
+# Save to data folder
+data_path = Path(__file__).parent.parent / "data"
+data_path.mkdir(exist_ok=True)
+(data_path / "live_portfolio.json").write_text(json.dumps(positions_data, indent=2))
+print(f"\n[Dashboard] Saved {len(all_positions)} positions to live_portfolio.json")

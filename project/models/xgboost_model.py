@@ -96,8 +96,14 @@ class FeatureSelector:
             self.selected_features = list(X.columns)
             return X
 
+        # Step 0: Clean data - remove inf and clip
+        X_clean = X.copy()
+        X_clean = X_clean.replace([np.inf, -np.inf], np.nan)
+        X_clean = X_clean.clip(-1e10, 1e10)
+        X_clean = X_clean.ffill().fillna(0)
+
         # Step 1: Drop near-duplicate features (high correlation)
-        X_clean = self._drop_correlated(X)
+        X_clean = self._drop_correlated(X_clean)
 
         # Step 2: Quick XGB fit to get initial importances
         quick_model = xgb.XGBClassifier(
@@ -106,7 +112,7 @@ class FeatureSelector:
             eval_metric="mlogloss",
             n_jobs=DEFAULT_N_JOBS,
         )
-        quick_model.fit(X_clean.fillna(0), y, verbose=False)
+        quick_model.fit(X_clean.fillna(0).replace([np.inf, -np.inf], 0), y, verbose=False)
         importances = quick_model.feature_importances_
 
         # Step 3: Keep features with above-median importance
@@ -185,6 +191,164 @@ def add_regime_interactions(X: pd.DataFrame) -> pd.DataFrame:
     return X.fillna(0)
 
 
+def add_advanced_features(X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Advanced feature engineering for precision boost to 70%+.
+    Adds predictive features based on market microstructure and momentum dynamics.
+    """
+    X = X.copy()
+    
+    # Clean data first - remove inf
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.clip(-1e10, 1e10)  # Clip large values
+    X = X.ffill().fillna(0)
+    
+    if "close" not in X.columns:
+        return X.ffill().fillna(0)
+    
+    close = X["close"]
+    returns = X.get("returns_1d", close.pct_change())
+    
+    # === momentum acceleration features ===
+    if "momentum_20d" in X.columns:
+        X["momentum_squared"] = X["momentum_20d"] ** 2
+        X["momentum_abs"] = X["momentum_20d"].abs()
+        X["momentum_sign"] = np.sign(X["momentum_20d"])
+        
+    if "momentum_60d" in X.columns:
+        X["momentum_oscillation"] = X["momentum_20d"] - X["momentum_60d"]
+        X["momentum_differencing"] = X["momentum_20d"].diff()
+    
+    # === RSI advanced features ===
+    if "rsi_14" in X.columns:
+        X["rsi_squared"] = X["rsi_14"] ** 2
+        X["rsi_deviation"] = X["rsi_14"] - 50
+        X["rsi_extreme"] = ((X["rsi_14"] < 25) | (X["rsi_14"] > 75)).astype(float)
+        X["rsi_neutral"] = ((X["rsi_14"] >= 40) & (X["rsi_14"] <= 60)).astype(float)
+    
+    # === Volume accumulation ===
+    if "volume" in X.columns:
+        X["volume_log"] = np.log1p(X["volume"])
+    
+    if "obv" in X.columns:
+        X["obv_log"] = np.log1p(X["obv"].abs())
+        X["obv_acceleration"] = X["obv"].diff().diff()
+    
+    # === Volatility clustering ===
+    if "hist_vol_10" in X.columns and "hist_vol_30" in X.columns:
+        X["vol_contraction"] = X["hist_vol_10"] / X["hist_vol_30"]
+        X["vol_change"] = X["hist_vol_10"] - X["hist_vol_30"]
+    
+    if "atr_14" in X.columns:
+        X["atr_log"] = np.log1p(X["atr_14"])
+    
+    # === Bollinger band advanced ===
+    if "bb_position" in X.columns:
+        X["bb_extreme"] = ((X["bb_position"] < 0.1) | (X["bb_position"] > 0.9)).astype(float)
+        X["bb_mean_reversion"] = 0.5 - X["bb_position"]
+    
+    # === Moving average crossovers ===
+    for sma in ["50", "200"]:
+        col = f"close_vs_sma_{sma}"
+        if col in X.columns:
+            X[f"sma_{sma}_squared"] = X[col] ** 2
+            X[f"sma_{sma}_sign"] = np.sign(X[col])
+    
+    # === MACD features ===
+    if "macd_hist" in X.columns:
+        X["macd_hist_sign"] = np.sign(X["macd_hist"])
+        X["macd_hist_strength"] = X["macd_hist"].abs()
+    
+    if "macd" in X.columns and "macd_signal" in X.columns:
+        X["macd_signal_cross"] = X["macd"] - X["macd_signal"]
+    
+    # === Stochastic features ===
+    if "stoch_k" in X.columns and "stoch_d" in X.columns:
+        X["stoch_cross"] = X["stoch_k"] - X["stoch_d"]
+        X["stoch_extreme"] = ((X["stoch_k"] < 20) | (X["stoch_k"] > 80)).astype(float)
+    
+    # === ADX trend strength ===
+    if "adx_14" in X.columns:
+        X["adx_strong_trend"] = (X["adx_14"] > 25).astype(float)
+        X["adx_very_strong"] = (X["adx_14"] > 40).astype(float)
+    
+    # === Sentiment composite features ===
+    sentiment_cols = [c for c in X.columns if "sentiment" in c.lower()]
+    if len(sentiment_cols) >= 2:
+        X["sentiment_composite"] = X[sentiment_cols].mean(axis=1)
+        X["sentiment_spread"] = X[sentiment_cols].max(axis=1) - X[sentiment_cols].min(axis=1)
+    
+    # === Earnings event features ===
+    if "earnings_propagation_signal" in X.columns:
+        X["earnings_signal_abs"] = X["earnings_propagation_signal"].abs()
+        X["earnings_strong"] = (X["earnings_propagation_signal"].abs() > 0.5).astype(float)
+    
+    if "close_reversal_signal" in X.columns:
+        X["reversal_strength"] = X["close_reversal_signal"].abs()
+        X["reversal_sign"] = np.sign(X["close_reversal_signal"])
+    
+    # === Sector rotation features ===
+    for col in ["close_vs_sma_50", "close_vs_sma_200"]:
+        if col in X.columns:
+            X[f"{col}_normalized"] = X[col].clip(-0.2, 0.2) / 0.2
+    
+    # === Time-based features ===
+    if hasattr(X.index, 'dayofweek'):
+        X["day_of_week"] = X.index.dayofweek
+        X["is_monday"] = (X.index.dayofweek == 0).astype(float)
+        X["is_friday"] = (X.index.dayofweek == 4).astype(float)
+    
+    if hasattr(X.index, 'month'):
+        X["month"] = X.index.month
+        X["is_quarter_end"] = X.index.month.isin([3, 6, 9, 12]).astype(float)
+    
+    return X.fillna(0)
+
+
+def add_regime_conditional_features(X: pd.DataFrame) -> pd.DataFrame:
+    """Add features conditioned on market regime for better crisis performance."""
+    X = X.copy()
+    
+    vix = 18.0
+    if "macro_vix_level" in X.columns:
+        vix = pd.to_numeric(X["macro_vix_level"], errors='coerce').fillna(18.0)
+    elif "vix_level" in X.columns:
+        vix = pd.to_numeric(X["vix_level"], errors='coerce').fillna(18.0)
+    
+    if hasattr(vix, 'astype'):
+        # Define regime based on VIX
+        crisis = (vix > 35).astype(float)
+        stressed = ((vix > 22) & (vix <= 35)).astype(float)
+        calm = (vix <= 15).astype(float)
+    else:
+        return X
+    
+    # RSI conditioned on regime
+    if "rsi_14" in X.columns:
+        X["rsi_in_crisis"] = X["rsi_14"] * crisis
+        X["rsi_in_calm"] = X["rsi_14"] * calm
+        X["rsi_contrarian_crisis"] = (X["rsi_14"] < 35).astype(float) * crisis
+        X["rsi_contrarian_calm"] = (X["rsi_14"] < 30).astype(float) * calm
+    
+    # Momentum conditioned on regime
+    if "momentum_20d" in X.columns:
+        X["momentum_in_crisis"] = X["momentum_20d"] * crisis
+        X["momentum_in_calm"] = X["momentum_20d"] * calm
+        X["strong_momentum_crisis"] = (X["momentum_20d"] > 0.05).astype(float) * crisis
+        X["weak_momentum_calm"] = (X["momentum_20d"].abs() < 0.02).astype(float) * calm
+    
+    # Volume regime features
+    if "volume" in X.columns:
+        X["volume_spike_crisis"] = (X["volume"] > X["volume"].rolling(20).mean() * 1.5).astype(float) * stressed
+    
+    # Volatility regime
+    if "hist_vol_21d" in X.columns:
+        X["vol_in_crisis"] = X["hist_vol_21d"] * crisis
+        X["vol_in_calm"] = X["hist_vol_21d"] * calm
+    
+    return X.fillna(0)
+
+
 def _fit_xgb_classifier(model, X, y, eval_set=None, early_stopping_rounds: Optional[int] = None, verbose=False):
     """
     XGBoost's sklearn API changed in v3 and no longer accepts
@@ -222,21 +386,70 @@ class XGBoostSignalModel:
     """
 
     DEFAULT_PARAMS = {
-        "n_estimators":        800,
-        "max_depth":           5,
-        "learning_rate":       0.02,
-        "subsample":           0.8,
-        "colsample_bytree":    0.7,
-        "colsample_bylevel":   0.7,
-        "reg_alpha":           0.1,     # L1 — sparsity
-        "reg_lambda":          1.0,     # L2 — smoothness
-        "min_child_weight":    10,      # Prevents overfitting on rare signals
-        "gamma":               0.1,
-        "max_delta_step":      1,
-        "tree_method":         "hist",  # Fast histogram method
-        "eval_metric":         "mlogloss",
-        "random_state":        42,
-        "n_jobs":              DEFAULT_N_JOBS,
+        "n_estimators":        1200,
+        "max_depth":           6,
+        "learning_rate":       0.015,
+        "subsample":          0.75,
+        "colsample_bytree":     0.65,
+        "colsample_bylevel":    0.65,
+        "reg_alpha":          0.15,
+        "reg_lambda":        1.5,
+        "min_child_weight":   15,
+        "gamma":            0.15,
+        "max_delta_step":    2,
+        "tree_method":      "hist",
+        "eval_metric":     "mlogloss",
+        "random_state":    42,
+        "n_jobs":         DEFAULT_N_JOBS,
+        "scale_pos_weight": 1.2,
+        "booster":        "gbtree",
+        "tree_method":    "hist",
+    }
+
+    ENHANCED_PARAMS = {
+        "n_estimators":       1500,
+        "max_depth":          7,
+        "learning_rate":    0.008,
+        "eta":             0.008,
+        "subsample":        0.70,
+        "colsample_bytree":  0.60,
+        "colsample_bylevel": 0.60,
+        "reg_alpha":       0.20,
+        "reg_lambda":       2.0,
+        "min_child_weight": 20,
+        "gamma":          0.20,
+        "max_delta_step": 3,
+        "tree_method":      "hist",
+        "objective":       "multi:softprob",
+        "eval_metric":    "mlogloss",
+        "random_state":   42,
+        "n_jobs":       DEFAULT_N_JOBS,
+        "scale_pos_weight": 1.3,
+        "booster":       "gbtree",
+        "num_class":    3,
+    }
+
+    ENHANCED_PARAMS = {
+        "n_estimators":       1500,
+        "max_depth":          7,
+        "learning_rate":    0.008,
+        "eta":             0.008,
+        "subsample":        0.70,
+        "colsample_bytree":  0.60,
+        "colsample_bylevel": 0.60,
+        "reg_alpha":        0.20,
+        "reg_lambda":       2.0,
+        "min_child_weight": 20,
+        "gamma":           0.20,
+        "max_delta_step": 3,
+        "tree_method":      "hist",
+        "objective":       "multi:softprob",
+        "eval_metric":    "mlogloss",
+        "random_state":   42,
+        "n_jobs":         DEFAULT_N_JOBS,
+        "scale_pos_weight": 1.3,
+        "booster":        "gbtree",
+        "num_class":     3,
     }
 
     def __init__(self, params: Optional[Dict] = None):
@@ -256,36 +469,60 @@ class XGBoostSignalModel:
         eval_set: Optional[Tuple] = None,
         early_stopping_rounds: int = 50,
         verbose: int = 0,
+        use_advanced_features: bool = True,
     ) -> Dict:
         """
         Train the model.
         
         y must be in {0=sell, 1=hold, 2=buy} encoding.
         Uses TimeSeriesSplit for final evaluation metrics.
+        
+        Args:
+            use_advanced_features: Add advanced features for precision boost
         """
         # Add interaction features
         X_aug = add_regime_interactions(X)
+        
+        # Add advanced features for precision boost
+        if use_advanced_features:
+            X_aug = add_advanced_features(X_aug)
+            X_aug = add_regime_conditional_features(X_aug)
 
+        # Final cleanup - ensure no inf
+        X_aug = X_aug.replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
+        
         # Feature selection
         X_sel = self.selector.fit_transform(X_aug, y)
         self.feature_names_in = list(X_sel.columns)
 
-        # Build model
-        self.model = xgb.XGBClassifier(**self.params)
+        # Try enhanced params for better precision
+        try:
+            enhanced = {**self.ENHANCED_PARAMS, "tree_method": "hist", "missing": np.nan}
+            self.model = xgb.XGBClassifier(**enhanced)
+        except Exception:
+            base = {**self.params, "tree_method": "hist", "missing": np.nan}
+            self.model = xgb.XGBClassifier(**base)
 
         # Prepare eval set
         if eval_set:
             X_val, y_val = eval_set
             X_val_aug = add_regime_interactions(X_val)
+            if use_advanced_features:
+                X_val_aug = add_advanced_features(X_val_aug)
+                X_val_aug = add_regime_conditional_features(X_val_aug)
+            X_val_aug = X_val_aug.replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
             X_val_sel = self.selector.transform(X_val_aug)
             fit_eval = [(X_val_sel.fillna(0), y_val)]
         else:
             fit_eval = None
 
+        # Train - clean X before passing
+        X_clean = X_sel.replace([np.inf, -np.inf], np.nan).ffill().fillna(0).clip(-1e10, 1e10)
+        
         # Train
         _fit_xgb_classifier(
             self.model,
-            X_sel.fillna(0),
+            X_clean,
             y,
             eval_set=fit_eval,
             early_stopping_rounds=early_stopping_rounds if fit_eval else None,

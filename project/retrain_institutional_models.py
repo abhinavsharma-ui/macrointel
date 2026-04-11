@@ -73,7 +73,7 @@ def main():
     trainer = InstitutionalTrainingPipeline(
         xgb_horizon=max(1, int(os.getenv("XGB_RETRAIN_HORIZON_DAYS", "5"))),
         meta_horizon=max(1, int(os.getenv("META_MODEL_HORIZON_DAYS", "8"))),
-        meta_take_threshold=float(os.getenv("META_MODEL_TAKE_THRESHOLD", "0.58")),
+        meta_take_threshold=float(os.getenv("META_MODEL_TAKE_THRESHOLD", "0.52")),
         meta_walk_forward_folds=max(3, int(os.getenv("META_MODEL_WALKFORWARD_FOLDS", "6"))),
         meta_min_train_days=max(90, int(os.getenv("META_MODEL_MIN_TRAIN_DAYS", "200"))),
     )

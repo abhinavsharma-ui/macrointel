@@ -4,6 +4,9 @@ Portfolio Monitor - All positions
 
 import yfinance as yf
 import requests
+import json
+from pathlib import Path
+from datetime import datetime
 
 API_KEY = "d78vt3hr01qp0fl6mfjgd78vt3hr01qp0fl6mfk0"
 
@@ -79,3 +82,37 @@ print(f"Return: {(total_value - 5000) / 5000 * 100:.1f}%")
 print(f"\nPositions: {len(POSITIONS)}")
 wins = sum(1 for p in POSITIONS if (get_price(p["symbol"]) or p["entry"]) > p["entry"])
 print(f"Winners: {wins}, Losers: {len(POSITIONS) - wins}")
+
+# ============================================
+# SAVE FOR DASHBOARD
+# ============================================
+portfolio_data = {
+    "broker": "Paper Trading",
+    "summary": {
+        "portfolio_value": round(total_value, 2),
+        "cash": round(248.14, 2),
+        "holdings_value": round(invested, 2),
+        "open_positions": len(POSITIONS),
+        "total_return_pct": round(((total_value - 5000) / 5000) * 100, 2),
+        "day_pnl": round(total_pnl, 2)
+    },
+    "positions": [
+        {
+            "symbol": p["symbol"],
+            "quantity": p["shares"],
+            "avg_cost": p["entry"],
+            "current_price": p["entry"],
+            "unrealized_pnl": round(((get_price(p["symbol"]) or p["entry"]) - p["entry"]) * p["shares"], 2),
+            "stop_loss": p["stop"],
+            "target": p["target"],
+            "price_change_pct": round(((get_price(p["symbol"]) or p["entry"]) - p["entry"]) / p["entry"] * 100, 2)
+        }
+        for p in POSITIONS
+    ],
+    "updated_at": datetime.now().isoformat()
+}
+
+# Save to data folder
+data_path = Path(__file__).parent.parent / "data"
+(data_path / "live_portfolio.json").write_text(json.dumps(portfolio_data, indent=2))
+print(f"\n[Dashboard] Saved portfolio to live_portfolio.json")

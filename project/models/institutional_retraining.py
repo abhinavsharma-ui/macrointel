@@ -581,19 +581,19 @@ class TrainedMetaModel:
                     decision_threshold=float(
                         os.getenv(
                             "META_MODEL_RUNTIME_THRESHOLD",
-                            str(rules.get("decision_threshold", 0.58) or 0.58),
+                            str(rules.get("decision_threshold", 0.52) or 0.52),
                         )
                     ),
                     min_expected_edge_pct=float(
                         os.getenv(
                             "META_MODEL_RUNTIME_MIN_EDGE_PCT",
-                            str(rules.get("min_expected_edge_pct", 0.10) or 0.10),
+                            str(rules.get("min_expected_edge_pct", 0.18) or 0.18),
                         )
                     ),
                     min_edge_ratio=float(
                         os.getenv(
                             "META_MODEL_RUNTIME_MIN_EDGE_RATIO",
-                            str(rules.get("min_edge_ratio", 0.12) or 0.12),
+                            str(rules.get("min_edge_ratio", 0.08) or 0.08),
                         )
                     ),
                     direction=direction,
@@ -665,19 +665,19 @@ class TrainedMetaModel:
                 decision_threshold=float(
                     os.getenv(
                         "META_MODEL_RUNTIME_THRESHOLD",
-                        str(deployment_rules.get("decision_threshold", 0.58) or 0.58),
+                        str(deployment_rules.get("decision_threshold", 0.52) or 0.52),
                     )
                 ),
                 min_expected_edge_pct=float(
                     os.getenv(
                         "META_MODEL_RUNTIME_MIN_EDGE_PCT",
-                        str(deployment_rules.get("min_expected_edge_pct", 0.10) or 0.10),
+                        str(deployment_rules.get("min_expected_edge_pct", 0.18) or 0.18),
                     )
                 ),
                 min_edge_ratio=float(
                     os.getenv(
                         "META_MODEL_RUNTIME_MIN_EDGE_RATIO",
-                        str(deployment_rules.get("min_edge_ratio", 0.12) or 0.12),
+                        str(deployment_rules.get("min_edge_ratio", 0.08) or 0.08),
                     )
                 ),
                 direction="legacy",
@@ -861,7 +861,7 @@ class MetaModelTrainer:
     def __init__(
         self,
         horizon_days: int = 5,
-        take_threshold: float = 0.58,
+        take_threshold: float = 0.52,
         walk_forward_folds: int = 4,
         min_train_days: int = 180,
     ):
@@ -908,14 +908,14 @@ class MetaModelTrainer:
         if raw_thresholds:
             threshold_grid = [float(x.strip()) for x in raw_thresholds.split(",") if x.strip()]
         else:
-            threshold_grid = [0.48, 0.52, 0.56, 0.58, 0.62, 0.66, 0.70, 0.74, 0.78]
+            threshold_grid = [0.38, 0.42, 0.46, 0.50, 0.54, 0.58, 0.62, 0.66, 0.70]
         min_edge_grid = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40]
         min_ratio_grid = [0.05, 0.08, 0.12, 0.16, 0.20, 0.28, 0.36]
         edge_ratio_pred = edge_pred / np.maximum(drawdown_pred, 0.35)
 
         min_count = max(25, int(os.getenv("META_MODEL_MIN_RULE_SAMPLES", "32")))
-        cov_min = float(os.getenv("META_MODEL_MIN_COVERAGE_PCT", "0.7"))
-        cov_max = float(os.getenv("META_MODEL_MAX_COVERAGE_PCT", "34"))
+        cov_min = float(os.getenv("META_MODEL_MIN_COVERAGE_PCT", "0.8"))
+        cov_max = float(os.getenv("META_MODEL_MAX_COVERAGE_PCT", "60"))
         rule_mode = os.getenv("META_MODEL_RULE_OBJECTIVE", "precision").strip().lower()
 
         for threshold in threshold_grid:
@@ -937,12 +937,14 @@ class MetaModelTrainer:
                     if rule_mode == "legacy":
                         objective = avg_edge - (0.32 * avg_draw) + ((hit_rate - 50.0) * 0.02)
                     else:
-                        # Prefer setups where "take" aligns with positive take_label (precision on the rare class).
+                        # Rebalanced objective: still precision-led, but no longer starves coverage.
+                        coverage_bonus = max(0.0, min(coverage, 8.0)) * 0.18
                         objective = (
-                            108.0 * precision_take
-                            + 0.20 * hit_rate
-                            + 0.32 * float(np.clip(avg_edge, -3.0, 6.0))
-                            - 0.10 * float(np.clip(avg_draw, 0.0, 12.0))
+                            48.0 * precision_take
+                            + 0.24 * hit_rate
+                            + 0.10 * float(np.clip(avg_edge, -3.0, 6.0))
+                            - 0.08 * float(np.clip(avg_draw, 0.0, 12.0))
+                            + coverage_bonus
                         )
                     if objective > best["objective"]:
                         best = {
@@ -984,11 +986,11 @@ class MetaModelTrainer:
             y_cal = y_take
 
         classifier = HistGradientBoostingClassifier(
-            learning_rate=0.045,
+            learning_rate=0.06,
             max_depth=5,
-            max_iter=520,
+            max_iter=480,
             min_samples_leaf=18,
-            l2_regularization=0.12,
+            l2_regularization=0.08,
             random_state=42,
             class_weight="balanced",
         )
@@ -1118,9 +1120,11 @@ class MetaModelTrainer:
                 feature_values = MetaFeatureBuilder.build(symbol, feature_signal, row)
 
                 edge_ratio = path_stats["edge_pct"] / max(path_stats["drawdown_pct"], 0.35)
+                label_min_edge = float(os.getenv("META_MODEL_LABEL_MIN_EDGE_PCT", "0.18"))
+                label_min_ratio = float(os.getenv("META_MODEL_LABEL_MIN_EDGE_RATIO", "0.08"))
                 take_label = int(
-                    path_stats["edge_pct"] > 0.30
-                    and edge_ratio > 0.18
+                    path_stats["edge_pct"] > label_min_edge
+                    and edge_ratio > label_min_ratio
                     and path_stats["hit"] == 1
                 )
                 feature_values.update(
@@ -1161,12 +1165,25 @@ class MetaModelTrainer:
 
         test_span = max(20, len(dates) // (self.walk_forward_folds + 2))
         folds = []
+        logger.info(
+            "Meta walk-forward: %s unique dates, %s folds, test_span=%s days (no per-fold logs = CPU-bound fits)...",
+            len(dates),
+            self.walk_forward_folds,
+            test_span,
+        )
         for fold in range(self.walk_forward_folds):
             train_end = len(dates) - (self.walk_forward_folds - fold) * test_span
             test_end = min(len(dates), train_end + test_span)
             if train_end < self.min_train_days or test_end <= train_end:
                 continue
 
+            logger.info(
+                "Meta walk-forward fold %s/%s: train_end_idx=%s test_end_idx=%s (fitting long+short bundles)...",
+                fold + 1,
+                self.walk_forward_folds,
+                train_end,
+                test_end,
+            )
             train_dates = set(dates[:train_end])
             test_dates = set(dates[train_end:test_end])
             train_df = dataset[dataset["timestamp"].isin(train_dates)]
@@ -1258,6 +1275,7 @@ class MetaModelTrainer:
             raise ValueError("Meta labels do not contain both classes")
 
         walk_forward = self.walk_forward_validate(dataset)
+        logger.info("Meta model: walk-forward done; fitting final deployment bundles (long + short)...")
         bundles: Dict[str, DirectionalMetaArtifacts] = {}
         deployment_rules: Dict[str, Dict[str, float]] = {}
         for direction, mask_column in (("long", "is_buy_signal"), ("short", "is_sell_signal")):
@@ -1338,8 +1356,8 @@ class InstitutionalTrainingPipeline:
         self,
         xgb_horizon: int = 5,
         meta_horizon: int = 5,
-        meta_take_threshold: float = 0.58,
-        meta_walk_forward_folds: int = 4,
+        meta_take_threshold: float = 0.52,
+        meta_walk_forward_folds: int = 6,
         meta_min_train_days: int = 180,
     ):
         self.xgb_retrainer = EventAwareXGBoostRetrainer(horizon=xgb_horizon)

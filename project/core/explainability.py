@@ -536,13 +536,33 @@ class GlobalFeatureImportance:
         try:
             shap_vals = explainer.shap_values(sample)
             if isinstance(shap_vals, list):
-                shap_vals = shap_vals[1]
+                # Binary: [neg_class, pos_class] — use positive class
+                shap_vals = shap_vals[-1] if len(shap_vals) > 1 else shap_vals[0]
 
-            mean_abs_shap = np.abs(shap_vals).mean(axis=0)
+            arr = np.asarray(shap_vals)
+            # TreeExplainer can return (n, f), (n, f, c), or (n, f, 1)
+            abs_val = np.abs(arr)
+            if abs_val.ndim == 3:
+                if abs_val.shape[2] > 1:
+                    mean_abs_shap = abs_val[:, :, -1].mean(axis=0)
+                else:
+                    mean_abs_shap = abs_val[:, :, 0].mean(axis=0)
+            else:
+                mean_abs_shap = abs_val.mean(axis=0)
+
+            mean_abs_shap = np.asarray(mean_abs_shap, dtype=float).reshape(-1)
+            names = list(feature_names)
+            n = min(len(names), len(mean_abs_shap))
+            if n < len(names):
+                names = names[:n]
+                mean_abs_shap = mean_abs_shap[:n]
+            elif len(mean_abs_shap) > len(names):
+                mean_abs_shap = mean_abs_shap[: len(names)]
+
             importance_df = pd.DataFrame({
-                "feature": feature_names,
+                "feature": names,
                 "mean_abs_shap": mean_abs_shap,
-                "label": [SignalExplainer.FEATURE_LABELS.get(f, f) for f in feature_names],
+                "label": [SignalExplainer.FEATURE_LABELS.get(f, f) for f in names],
             }).sort_values("mean_abs_shap", ascending=False)
 
             return importance_df

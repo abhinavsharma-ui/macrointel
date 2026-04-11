@@ -560,7 +560,24 @@ def create_app(
             "volume": getattr(tick, "volume", None),
         }
 
-    def _enrich_signal_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_meta_decision(payload: Dict[str, Any], evaluated: Dict[str, Any]) -> None:
+        if not evaluated:
+            return
+        payload["meta_decision"] = evaluated
+        payload["trade_eligible"] = evaluated.get("take_trade", False)
+        payload["take_probability"] = evaluated.get("take_probability", 0.0)
+        payload["skip_probability"] = evaluated.get("skip_probability", 1.0)
+        payload["expected_edge_pct"] = evaluated.get("expected_edge_pct", 0.0)
+        payload["expected_drawdown_pct"] = evaluated.get("expected_drawdown_pct", 0.0)
+        payload["rank_score"] = evaluated.get("rank_score", 0.0)
+        payload["rank_percentile"] = evaluated.get("rank_percentile", 0.0)
+        payload["size_multiplier"] = evaluated.get("size_multiplier", 1.0)
+        payload["meta_source"] = evaluated.get("source", "heuristic")
+
+    def _enrich_signal_row(
+        row: Dict[str, Any],
+        batch_meta: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         payload = dict(row or {})
         symbol = str(payload.get("symbol") or "")
         if not symbol:
@@ -573,23 +590,18 @@ def create_app(
         payload.setdefault("scenario", payload.get("lane_label"))
 
         meta = payload.get("meta_decision")
-        if not (isinstance(meta, dict) and "take_trade" in meta):
+        if isinstance(meta, dict) and "take_trade" in meta:
+            pass
+        elif batch_meta is not None and symbol in batch_meta:
+            _apply_meta_decision(payload, batch_meta[symbol])
+        elif not (isinstance(meta, dict) and "take_trade" in meta):
             try:
                 evaluated = _get_dashboard_meta_engine().evaluate_universe({symbol: payload}).get(symbol, {})
             except Exception as exc:
                 logger.debug(f"Dashboard meta hydration failed for {symbol}: {exc}")
                 evaluated = {}
             if evaluated:
-                payload["meta_decision"] = evaluated
-                payload["trade_eligible"] = evaluated.get("take_trade", False)
-                payload["take_probability"] = evaluated.get("take_probability", 0.0)
-                payload["skip_probability"] = evaluated.get("skip_probability", 1.0)
-                payload["expected_edge_pct"] = evaluated.get("expected_edge_pct", 0.0)
-                payload["expected_drawdown_pct"] = evaluated.get("expected_drawdown_pct", 0.0)
-                payload["rank_score"] = evaluated.get("rank_score", 0.0)
-                payload["rank_percentile"] = evaluated.get("rank_percentile", 0.0)
-                payload["size_multiplier"] = evaluated.get("size_multiplier", 1.0)
-                payload["meta_source"] = evaluated.get("source", "heuristic")
+                _apply_meta_decision(payload, evaluated)
 
         allocations = (_portfolio_overlay.get("allocations", {}) or {}) if isinstance(_portfolio_overlay, dict) else {}
         allocation = allocations.get(symbol, {})
@@ -820,11 +832,18 @@ def create_app(
         rows: List[Dict] = []
         seen_keys: set[str] = set()
         snapshot = signal_snapshot if signal_snapshot is not None else _signal_store_snapshot()
+        batch_meta: Dict[str, Dict[str, Any]] = {}
+        try:
+            if snapshot:
+                batch_meta = _get_dashboard_meta_engine().evaluate_universe(dict(snapshot))
+        except Exception as exc:
+            logger.debug(f"Dashboard batch meta evaluation failed: {exc}")
+
         for raw in snapshot.values():
             symbol = str(raw.get("symbol") or "")
             if not symbol:
                 continue
-            actual = _enrich_signal_row(dict(raw))
+            actual = _enrich_signal_row(dict(raw), batch_meta=batch_meta)
             actual_key = str(actual.get("signal_key") or f"{symbol}::{actual.get('lane', 'normal')}")
             if actual_key not in seen_keys:
                 rows.append(actual)
@@ -3517,6 +3536,12 @@ function refreshHealth(){
     updateMetrics();
     renderSidebar();
     renderMarketBoard();
+    // Server has signals but browser store empty (often /api/signals timed out while CPU-heavy); retry fetch.
+    const sc = Number(d.signal_count || 0);
+    if(sc > 0 && !Object.keys(signals).length){
+      refreshSignals();
+      setTimeout(refreshSignals, 3000);
+    }
   }).catch(() => {});
 }
 

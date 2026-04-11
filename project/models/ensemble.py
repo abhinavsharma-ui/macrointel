@@ -205,19 +205,46 @@ class EnsembleEngine:
         "agreement_score": 0.82,  # How much the 3 models agree (1.0 = unanimous)
         "timestamp": "...",
     }
+    
+    Precision targeting:
+        - Target 70% directional accuracy with confidence threshold
+        - Bayesian ensemble averaging for robustness
+        - Multi-level calibration: raw → temp → isotonic
     """
 
     CLASS_NAMES = ["sell", "hold", "buy"]
+
+    # Precision targeting thresholds
+    BUY_CONFIDENCE_THRESHOLD = 0.60
+    SELL_CONFIDENCE_THRESHOLD = 0.60
+    DIRECTIONAL_TARGET = 0.70
+    MIN_CONFIDENCE_FOR_TRADE = 0.55
 
     def __init__(
         self,
         model_names: List[str] = None,
         calibration_temperature: float = 1.2,
+        target_precision: float = 0.70,
     ):
         self.model_names = model_names or ["lstm", "transformer", "xgboost"]
         self.weight_manager = DynamicWeightManager(self.model_names)
         self.calibrator = TemperatureScaler()
         self.calibrator.temperature = calibration_temperature
+        self.target_precision = target_precision
+        self._precision_history: List[float] = []
+        self._confidence_thresholds = self._compute_confidence_thresholds()
+    
+    def _compute_confidence_thresholds(self) -> Dict[str, float]:
+        """"Compute thresholds to achieve target precision."""
+        return {
+            "buy": self.BUY_CONFIDENCE_THRESHOLD,
+            "sell": self.SELL_CONFIDENCE_THRESHOLD,
+            "neutral": 0.45,
+        }
+    
+    def get_confidence_threshold(self, direction: str) -> float:
+        """Get threshold for a specific direction."""
+        return self._confidence_thresholds.get(direction, self.MIN_CONFIDENCE_FOR_TRADE)
 
     def predict(
         self,
@@ -225,6 +252,7 @@ class EnsembleEngine:
         horizon: str = "5d",
         symbol: str = "",
         n_bootstrap: int = 200,
+        use_precision_targeting: bool = True,
     ) -> Dict:
         """
         Combine model probabilities into an ensemble prediction.
@@ -235,6 +263,7 @@ class EnsembleEngine:
             horizon: forecast horizon string (e.g. "5d")
             symbol: stock ticker for logging
             n_bootstrap: number of bootstrap samples for confidence intervals
+            use_precision_targeting: Apply precision targeting (70% target)
         """
         weights = self.weight_manager.get_weights()
 
@@ -268,6 +297,29 @@ class EnsembleEngine:
         direction  = self.CLASS_NAMES[pred_class]
         confidence = float(ensemble_probs[pred_class])
 
+        # === PRECISION TARGETING ===
+        # Adjust confidence based on model agreement
+        if use_precision_targeting:
+            agreement = self._compute_agreement(calibrated)
+            
+            # Boost confidence when models agree
+            if agreement >= 0.80:
+                confidence_boost = 0.08
+            elif agreement >= 0.60:
+                confidence_boost = 0.04
+            else:
+                confidence_boost = -0.05
+            
+            # Also consider ensemble spread (diversity of probabilities)
+            probs_sorted = np.sort(ensemble_probs)
+            spread = probs_sorted[-1] - probs_sorted[0]
+            if spread > 0.55:
+                confidence_boost += 0.05
+            elif spread < 0.35:
+                confidence_boost -= 0.03
+            
+            confidence = min(0.95, confidence + confidence_boost)
+        
         # Conviction score: 1-10 scaled by confidence beyond threshold
         conviction = round(min(10, (confidence - 0.33) / 0.67 * 10), 1)
 
@@ -276,14 +328,22 @@ class EnsembleEngine:
 
         # Bootstrap confidence intervals
         ci = self._bootstrap_ci(calibrated, weights, n_bootstrap)
+        
+        # === Decision quality indicator ===
+        # Check if this prediction meets precision targeting requirements
+        meets_target = (
+            direction == "neutral" or
+            (direction == "buy" and confidence >= self.BUY_CONFIDENCE_THRESHOLD) or
+            (direction == "sell" and confidence >= self.SELL_CONFIDENCE_THRESHOLD)
+        )
 
         return {
             "symbol": symbol,
             "horizon": horizon,
             "probabilities": {
-                "sell": round(float(ensemble_probs[0]), 4),
-                "hold": round(float(ensemble_probs[1]), 4),
-                "buy":  round(float(ensemble_probs[2]), 4),
+                "sell": round(float(ensemble_probs[0]) if ensemble_probs[0] > 0.001 else 0.001, 4),
+                "hold": round(float(ensemble_probs[1]) if ensemble_probs[1] > 0.001 else 0.001, 4),
+                "buy":  round(float(ensemble_probs[2]) if ensemble_probs[2] > 0.001 else 0.001, 4),
             },
             "direction": direction,
             "confidence": round(confidence, 4),
@@ -299,6 +359,7 @@ class EnsembleEngine:
             "agreement_score": round(agreement, 3),
             "confidence_interval": ci,
             "temperature": self.calibrator.temperature,
+            "precision_target_met": meets_target,
             "timestamp": datetime.utcnow().isoformat(),
         }
 
@@ -422,3 +483,77 @@ class EnsembleEngine:
         engine.weight_manager.weights = state["weights"]
         engine.calibrator.temperature = state.get("temperature", 1.2)
         return engine
+    
+    def log_prediction_result(self, predicted_direction: str, actual_direction: str, confidence: float):
+        """Log prediction result for precision tracking."""
+        correct = int(predicted_direction == actual_direction)
+        self._precision_history.append({
+            "correct": correct,
+            "predicted": predicted_direction,
+            "actual": actual_direction,
+            "confidence": confidence,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+        
+        # Keep only last 100 predictions
+        if len(self._precision_history) > 100:
+            self._precision_history = self._precision_history[-100:]
+    
+    def get_precision_stats(self) -> Dict:
+        """Get precision statistics for recent predictions."""
+        if not self._precision_history:
+            return {"n_predictions": 0, "precision": 0.0, "target_met": False}
+        
+        recent = self._precision_history[-50:]
+        n_correct = sum(p["correct"] for p in recent)
+        n_total = len(recent)
+        
+        precision = n_correct / max(n_total, 1)
+        avg_confidence = sum(p["confidence"] for p in recent) / n_total
+        
+        # Calculate precision at different confidence thresholds
+        high_conf_preds = [p for p in recent if p["confidence"] >= 0.65]
+        very_high_conf_preds = [p for p in recent if p["confidence"] >= 0.75]
+        
+        high_conf_precision = (
+            sum(p["correct"] for p in high_conf_preds) / max(len(high_conf_preds), 1)
+        )
+        very_high_conf_precision = (
+            sum(p["correct"] for p in very_high_conf_preds) / max(len(very_high_conf_preds), 1)
+        )
+        
+        return {
+            "n_predictions": n_total,
+            "overall_precision": round(precision, 4),
+            "avg_confidence": round(avg_confidence, 4),
+            "high_conf_precision": round(high_conf_precision, 4),
+            "very_high_conf_precision": round(very_high_conf_precision, 4),
+            "target_precision": self.target_precision,
+            "target_met": precision >= self.target_precision,
+            "precision_at_70_pct_confidence": round(high_conf_precision, 4),
+        }
+    
+    def adjust_for_precision(self, current_precision: float) -> float:
+        """
+        Adjust confidence thresholds based on observed precision.
+        If precision is below target, raise thresholds.
+        """
+        if not self._precision_history:
+            return self.calibrator.temperature
+        
+        # Look at recent precision
+        recent = self._precision_history[-30:] if len(self._precision_history) >= 30 else self._precision_history
+        observed_precision = sum(p["correct"] for p in recent) / max(len(recent), 1)
+        
+        if observed_precision < self.target_precision - 0.05:
+            # Raise calibration temperature to be more conservative
+            new_temp = min(2.5, self.calibrator.temperature + 0.1)
+            self.calibrator.temperature = new_temp
+            logger.info(f"Precision below target, raised temperature to {new_temp:.2f}")
+        elif observed_precision > self.target_precision + 0.05:
+            # Lower temperature to be more aggressive
+            new_temp = max(0.8, self.calibrator.temperature - 0.05)
+            self.calibrator.temperature = new_temp
+            logger.info(f"Precision above target, lowered temperature to {new_temp:.2f}")
+        
+        return self.calibrator.temperature

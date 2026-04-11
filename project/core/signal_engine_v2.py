@@ -453,11 +453,11 @@ class MetaDecisionEngine:
         )
         self._leader_min_conviction = max(
             0.0,
-            float(os.getenv("META_MODEL_RUNTIME_LEADER_MIN_CONVICTION", "3.4")),
+            float(os.getenv("META_MODEL_RUNTIME_LEADER_MIN_CONVICTION", "2.5")),
         )
         self._min_conviction = max(
             0.0,
-            float(os.getenv("META_MODEL_RUNTIME_MIN_CONVICTION", "4.8")),
+            float(os.getenv("META_MODEL_RUNTIME_MIN_CONVICTION", "3.0")),
         )
         self._lane_take_threshold_caps = {
             "normal": min(0.99, max(0.01, float(os.getenv("META_MODEL_RUNTIME_NORMAL_THRESHOLD", "0.48")))),
