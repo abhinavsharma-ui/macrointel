@@ -1,0 +1,112 @@
+{
+  "broker": "Paper Trading",
+  "summary": {
+    "portfolio_value": 14314.37,
+    "cash": 248.14,
+    "holdings_value": 14066.23,
+    "open_positions": 9,
+    "total_return_pct": 186.29
+  },
+  "positions": [
+    {
+      "symbol": "ICICIBANK.NS",
+      "quantity": 2,
+      "avg_cost": 1281,
+      "current_price": 1281,
+      "unrealized_pnl": 0,
+      "stop_loss": 1207,
+      "target": 1384,
+      "ml_confidence": 0,
+      "signal_score": 0
+    },
+    {
+      "symbol": "ASIANPAINT.NS",
+      "quantity": 1,
+      "avg_cost": 2270,
+      "current_price": 2270,
+      "unrealized_pnl": 0,
+      "stop_loss": 2128,
+      "target": 2451,
+      "ml_confidence": 0,
+      "signal_score": 0
+    },
+    {
+      "symbol": "ADANIPORTS.NS",
+      "quantity": 3,
+      "avg_cost": 1447,
+      "current_price": 1447,
+      "unrealized_pnl": 0,
+      "stop_loss": 1309,
+      "target": 1592,
+      "ml_confidence": 0,
+      "signal_score": 0
+    },
+    {
+      "symbol": "UPL.NS",
+      "quantity": 1,
+      "avg_cost": 642.0,
+      "current_price": 642.0,
+      "unrealized_pnl": 0,
+      "stop_loss": 589.68,
+      "target": 693.36,
+      "ml_confidence": 56.7,
+      "signal_score": 0.74
+    },
+    {
+      "symbol": "BPCL.NS",
+      "quantity": 4,
+      "avg_cost": 297.3500061035156,
+      "current_price": 297.3500061035156,
+      "unrealized_pnl": 0,
+      "stop_loss": 282.81,
+      "target": 321.14,
+      "ml_confidence": 54.2,
+      "signal_score": 0.73
+    },
+    {
+      "symbol": "MOTHERSON.NS",
+      "quantity": 6,
+      "avg_cost": 116.9000015258789,
+      "current_price": 116.9000015258789,
+      "unrealized_pnl": 0,
+      "stop_loss": 108.3,
+      "target": 126.25,
+      "ml_confidence": 53.6,
+      "signal_score": 0.72
+    },
+    {
+      "symbol": "TATASTEEL.NS",
+      "quantity": 3,
+      "avg_cost": 205.1999969482422,
+      "current_price": 205.1999969482422,
+      "unrealized_pnl": 0,
+      "stop_loss": 186.42,
+      "target": 221.62,
+      "ml_confidence": 53.5,
+      "signal_score": 0.72
+    },
+    {
+      "symbol": "NTPC.NS",
+      "quantity": 3,
+      "avg_cost": 378.6499938964844,
+      "current_price": 378.6499938964844,
+      "unrealized_pnl": 0,
+      "stop_loss": 360.78,
+      "target": 408.94,
+      "ml_confidence": 60.4,
+      "signal_score": 0.71
+    },
+    {
+      "symbol": "GAIL.NS",
+      "quantity": 4,
+      "avg_cost": 152.22000122070312,
+      "current_price": 152.22000122070312,
+      "unrealized_pnl": 0,
+      "stop_loss": 138.91,
+      "target": 164.4,
+      "ml_confidence": 49.3,
+      "signal_score": 0.65
+    }
+  ],
+  "updated_at": "2026-04-11T05:21:52.075666"
+}
