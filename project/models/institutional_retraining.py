@@ -933,7 +933,8 @@ class MetaModelTrainer:
         if raw_thresholds:
             threshold_grid = [float(x.strip()) for x in raw_thresholds.split(",") if x.strip()]
         else:
-            threshold_grid = [0.38, 0.42, 0.46, 0.50, 0.54, 0.58, 0.62, 0.66, 0.70]
+            # Removed 0.38/0.42 — they historically produce poor precision
+            threshold_grid = [0.48, 0.52, 0.56, 0.60, 0.64, 0.68, 0.72]
         min_edge_grid = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40]
         min_ratio_grid = [0.05, 0.08, 0.12, 0.16, 0.20, 0.28, 0.36]
         edge_ratio_pred = edge_pred / np.maximum(drawdown_pred, 0.35)
@@ -962,13 +963,18 @@ class MetaModelTrainer:
                     if rule_mode == "legacy":
                         objective = avg_edge - (0.32 * avg_draw) + ((hit_rate - 50.0) * 0.02)
                     else:
-                        # Rebalanced objective: still precision-led, but no longer starves coverage.
-                        coverage_bonus = max(0.0, min(coverage, 8.0)) * 0.18
+                        # Hard precision floor: skip any rule with precision < 0.60
+                        min_precision_floor = float(os.getenv(
+                            "META_MODEL_MIN_PRECISION_FLOOR", "0.60"))
+                        if precision_take < min_precision_floor:
+                            continue
+                        # Coverage bonus capped much lower so it can't override precision
+                        coverage_bonus = max(0.0, min(coverage, 6.0)) * 0.06
                         objective = (
-                            48.0 * precision_take
-                            + 0.24 * hit_rate
-                            + 0.10 * float(np.clip(avg_edge, -3.0, 6.0))
-                            - 0.08 * float(np.clip(avg_draw, 0.0, 12.0))
+                            55.0 * precision_take
+                            + 0.18 * hit_rate
+                            + 0.12 * float(np.clip(avg_edge, -3.0, 6.0))
+                            - 0.10 * float(np.clip(avg_draw, 0.0, 12.0))
                             + coverage_bonus
                         )
                     if objective > best["objective"]:
@@ -996,19 +1002,23 @@ class MetaModelTrainer:
         y_drawdown = train_df["drawdown_pct"].astype(float)
         sample_weight = self._sample_weights(y_edge, y_drawdown, y_take)
 
-        calibration_rows = max(40, min(len(train_df) // 4, 180))
-        core_rows = max(len(train_df) - calibration_rows, max(60, len(train_df) // 2))
+        # Calibration split: hold out last 20% for Platt calibration.
+        # Minimum 60 calibration rows to avoid overfitting the sigmoid.
+        min_cal_rows = max(60, int(os.getenv("META_MODEL_MIN_CAL_ROWS", "80")))
+        calibration_rows = max(min_cal_rows, min(len(train_df) // 4, 200))
+        core_rows = max(len(train_df) - calibration_rows, max(80, len(train_df) // 2))
         X_core = X.iloc[:core_rows]
         y_core = y_take.iloc[:core_rows]
         core_weight = sample_weight[: len(X_core)]
         X_cal = X.iloc[core_rows:]
         y_cal = y_take.iloc[core_rows:]
-        if X_cal.empty or y_cal.nunique() < 2 or y_core.nunique() < 2:
+        # If split fails, use 3-fold cross-calibration instead of reusing training data
+        use_cv_calibration = False
+        if X_cal.empty or len(X_cal) < min_cal_rows or y_cal.nunique() < 2 or y_core.nunique() < 2:
             X_core = X
             y_core = y_take
             core_weight = sample_weight
-            X_cal = X
-            y_cal = y_take
+            use_cv_calibration = True  # flag: do NOT reuse train data for calibration
 
         classifier = HistGradientBoostingClassifier(
             learning_rate=0.06,
@@ -1041,8 +1051,38 @@ class MetaModelTrainer:
         edge_model.fit(X, y_edge, sample_weight=sample_weight)
         drawdown_model.fit(X, y_drawdown, sample_weight=sample_weight)
 
-        raw_calibration = classifier.predict_proba(X_cal)[:, 1]
-        calibrator = BinaryPlattCalibrator().fit(raw_calibration, y_cal)
+        # --- Regressor quality check: MAE on training set ---
+        edge_mae = float(np.mean(np.abs(edge_model.predict(X) - y_edge.to_numpy())))
+        draw_mae = float(np.mean(np.abs(drawdown_model.predict(X) - y_drawdown.to_numpy())))
+        edge_mae_limit = float(os.getenv("META_MODEL_EDGE_MAE_LIMIT", "2.5"))
+        draw_mae_limit = float(os.getenv("META_MODEL_DRAW_MAE_LIMIT", "3.0"))
+        regressors_reliable = (edge_mae <= edge_mae_limit and draw_mae <= draw_mae_limit)
+        if not regressors_reliable:
+            logger.warning(
+                "Regressor drift detected (%s): edge_MAE=%.3f (limit %.1f), "
+                "draw_MAE=%.3f (limit %.1f). Falling back to precision-only gate.",
+                direction, edge_mae, edge_mae_limit, draw_mae, draw_mae_limit,
+            )
+
+        if use_cv_calibration:
+            # 3-fold cross-calibration: each fold predicts on held-out portion
+            from sklearn.model_selection import KFold
+            cv_raw = np.zeros(len(X))
+            cv_labels = y_take.to_numpy(dtype=int)
+            kf = KFold(n_splits=3, shuffle=False)
+            for cv_train_idx, cv_val_idx in kf.split(X):
+                cv_clf = HistGradientBoostingClassifier(
+                    learning_rate=0.06, max_depth=5, max_iter=480,
+                    min_samples_leaf=18, l2_regularization=0.08,
+                    random_state=42, class_weight="balanced",
+                )
+                cv_clf.fit(X.iloc[cv_train_idx], y_take.iloc[cv_train_idx],
+                           sample_weight=sample_weight[cv_train_idx])
+                cv_raw[cv_val_idx] = cv_clf.predict_proba(X.iloc[cv_val_idx])[:, 1]
+            calibrator = BinaryPlattCalibrator().fit(cv_raw, cv_labels)
+        else:
+            raw_calibration = classifier.predict_proba(X_cal)[:, 1]
+            calibrator = BinaryPlattCalibrator().fit(raw_calibration, y_cal)
         calibrated_take_prob = self._bundle_take_probability(
             DirectionalMetaArtifacts(
                 classifier=classifier,
@@ -1059,6 +1099,11 @@ class MetaModelTrainer:
         edge_pred = edge_model.predict(X)
         drawdown_pred = np.abs(drawdown_model.predict(X))
         decision_rule = self._select_decision_rule(train_df, calibrated_take_prob, edge_pred, drawdown_pred)
+        # If regressors are unreliable, disable edge/ratio gates (precision-only mode)
+        if not regressors_reliable:
+            decision_rule["min_expected_edge_pct"] = 0.0
+            decision_rule["min_edge_ratio"] = 0.0
+            logger.info("Regressor fallback (%s): edge/ratio gates disabled, precision-only gate active.", direction)
         return DirectionalMetaArtifacts(
             classifier=classifier,
             calibrator=calibrator,
