@@ -447,10 +447,11 @@ class MacroIntelligenceSystem:
         self._alpha_quality_min_bucket_samples = max(5, int(os.getenv("ALPHA_QUALITY_MIN_BUCKET_SAMPLES", "12")))
         self._alpha_quality_report_path = _resolve_root_path(os.getenv("ALPHA_QUALITY_REPORT_PATH", "data/alpha_quality.json"))
         self._broker_execution_mode = str(os.getenv("BROKER_EXECUTION_MODE", "paper") or "paper").strip().lower()
-        if self._broker_execution_mode not in {"paper", "shadow"}:
+        if self._broker_execution_mode not in {"paper", "shadow", "live"}:
             logger.warning(f"Unsupported BROKER_EXECUTION_MODE '{self._broker_execution_mode}', falling back to paper")
             self._broker_execution_mode = "paper"
         self._shadow_router_enabled = self._broker_execution_mode == "shadow"
+        self._live_execution_enabled = self._broker_execution_mode == "live"
         self._shadow_reconciliation_log_path = str(
             os.getenv("SHADOW_RECONCILIATION_LOG_PATH", "data/shadow_execution_log.jsonl")
         ).strip() or "data/shadow_execution_log.jsonl"
@@ -1770,7 +1771,17 @@ class MacroIntelligenceSystem:
         self._components["paper_broker"] = paper_broker
 
         broker = paper_broker
-        if self._shadow_router_enabled:
+        if self._live_execution_enabled:
+            # ── Live execution: per-lane broker routing ──────────
+            broker, crypto_broker, stock_broker = self._init_live_brokers(paper_broker)
+            self._components["crypto_live_broker"] = crypto_broker
+            self._components["stock_live_broker"] = stock_broker
+            logger.info(
+                f"Execution mode: LIVE | "
+                f"crypto={crypto_broker.__class__.__name__} | "
+                f"stocks={stock_broker.__class__.__name__ if stock_broker else 'paper'}"
+            )
+        elif self._shadow_router_enabled:
             tracked_shadow_symbols = list(
                 dict.fromkeys(self._get_target_symbols() + list(self._crypto_symbols))
             )
@@ -5282,6 +5293,19 @@ class MacroIntelligenceSystem:
                 "position_key": resolved_position_key,
             },
         )
+        # Route exit to live broker if available for this lane
+        live_broker = self._get_live_broker_for_lane(lane)
+        if live_broker is not None:
+            try:
+                live_result = live_broker.submit_order(order, current_price)
+                logger.info(
+                    f"LIVE ORDER [{lane}]: {symbol} SELL x{existing.quantity} "
+                    f"@ ${current_price:.2f} → {live_result.get('status', 'unknown')} "
+                    f"reason={reason}"
+                )
+            except Exception as live_exc:
+                logger.error(f"Live broker exit error [{lane}] {symbol}: {live_exc}")
+        # Paper broker always processes (portfolio source of truth)
         result = broker.submit_order(order, current_price)
         if result["status"] == "filled":
             if lane == "day":
@@ -5834,6 +5858,18 @@ class MacroIntelligenceSystem:
                         "inventory_skew": signal.get("inventory_skew", 0.0),
                     },
                 )
+                # Route to live broker if available for this lane
+                live_broker = self._get_live_broker_for_lane(lane)
+                if live_broker is not None:
+                    try:
+                        live_result = live_broker.submit_order(order, current_price)
+                        logger.info(
+                            f"LIVE ORDER [{lane}]: {symbol} BUY x{position_size} "
+                            f"@ ${current_price:.2f} → {live_result.get('status', 'unknown')}"
+                        )
+                    except Exception as live_exc:
+                        logger.error(f"Live broker error [{lane}] {symbol}: {live_exc}")
+                # Paper broker always processes (portfolio source of truth)
                 result = broker.submit_order(order, current_price)
                 if result["status"] != "filled":
                     self._capture_execution_reconciliation(symbol, "buy", signal, result, position_key=position_key)
@@ -5895,6 +5931,94 @@ class MacroIntelligenceSystem:
                     f"AUTO-BUY: {symbol} [{lane}] x{position_size} @ ${current_price:.2f} | "
                     f"score {score:.2f} | sector {sector}"
                 )
+
+    # ── live broker initialization ────────────────────────────
+
+    def _init_live_brokers(self, paper_broker):
+        """
+        Initialize per-lane live brokers.
+
+        Returns (main_broker, crypto_broker, stock_broker).
+        - main_broker is always the paper_broker (portfolio source of truth)
+        - crypto_broker / stock_broker are live execution adapters
+        - If credentials are missing, falls back to None (paper handles it)
+        """
+        crypto_broker = None
+        stock_broker = None
+
+        # ── Crypto lane: KuCoin ──────────────────────────────
+        try:
+            kucoin_key = os.getenv("KUCOIN_API_KEY", "").strip()
+            kucoin_secret = os.getenv("KUCOIN_API_SECRET", "").strip()
+            kucoin_pass = os.getenv("KUCOIN_API_PASSPHRASE", "").strip()
+            if kucoin_key and kucoin_secret and kucoin_pass:
+                from core.crypto_live_broker import KuCoinLiveBroker
+                crypto_broker = KuCoinLiveBroker(initial_balance=0.0)
+                logger.info("Live crypto broker: KuCoinLiveBroker initialized")
+            else:
+                logger.warning(
+                    "BROKER_EXECUTION_MODE=live but KUCOIN credentials missing — "
+                    "crypto lane stays on paper"
+                )
+        except Exception as exc:
+            logger.warning(f"Failed to init KuCoinLiveBroker, crypto stays on paper: {exc}")
+
+        # ── Stock lanes (normal + day): Upstox or Zerodha ────
+        stock_broker_name = os.getenv("STOCK_BROKER", "paper").strip().lower()
+        try:
+            if stock_broker_name == "upstox":
+                from core.brokerages import UpstoxExecutionBroker
+                upstox_token = os.getenv("UPSTOX_ACCESS_TOKEN", "").strip()
+                if upstox_token:
+                    tracked = list(dict.fromkeys(self._get_target_symbols()))
+                    stock_broker = UpstoxExecutionBroker(
+                        access_token=upstox_token,
+                        instrument_map_path=os.getenv("UPSTOX_INSTRUMENT_MAP_PATH", "data/upstox_instruments.json"),
+                        enabled=True,
+                        dry_run=os.getenv("UPSTOX_ORDER_DRY_RUN", "true").strip().lower() in {"1", "true", "yes", "on"},
+                        timeout_seconds=int(os.getenv("UPSTOX_ORDER_TIMEOUT_SECONDS", "8")),
+                        tracked_symbols=tracked,
+                    )
+                    logger.info("Live stock broker: UpstoxExecutionBroker initialized")
+                else:
+                    logger.warning("STOCK_BROKER=upstox but UPSTOX_ACCESS_TOKEN missing — stocks stay on paper")
+            elif stock_broker_name == "zerodha":
+                from core.brokerages import ZerodhaExecutionBroker
+                zerodha_key = os.getenv("ZERODHA_API_KEY", "").strip()
+                zerodha_token = os.getenv("ZERODHA_ACCESS_TOKEN", "").strip()
+                if zerodha_key and zerodha_token:
+                    stock_broker = ZerodhaExecutionBroker(
+                        api_key=zerodha_key,
+                        access_token=zerodha_token,
+                        enabled=True,
+                        dry_run=os.getenv("ZERODHA_DRY_RUN", "true").strip().lower() in {"1", "true", "yes", "on"},
+                        product_type=os.getenv("ZERODHA_PRODUCT_TYPE", "MIS").strip().upper(),
+                        timeout_seconds=int(os.getenv("ZERODHA_ORDER_TIMEOUT_SECONDS", "8")),
+                    )
+                    logger.info("Live stock broker: ZerodhaExecutionBroker initialized")
+                else:
+                    logger.warning("STOCK_BROKER=zerodha but credentials missing — stocks stay on paper")
+            elif stock_broker_name != "paper":
+                logger.warning(f"Unknown STOCK_BROKER='{stock_broker_name}', stocks stay on paper")
+        except Exception as exc:
+            logger.warning(f"Failed to init stock broker '{stock_broker_name}', stocks stay on paper: {exc}")
+
+        # Main broker stays paper (portfolio source of truth).
+        # Live brokers are stored separately and routed per-lane in _execute_lane_entries.
+        return paper_broker, crypto_broker, stock_broker
+
+    def _get_live_broker_for_lane(self, lane: str):
+        """
+        Return the live execution broker for a lane, or None to use paper.
+        Only active when BROKER_EXECUTION_MODE=live.
+        """
+        if not self._live_execution_enabled:
+            return None
+        if lane == "crypto":
+            return self._components.get("crypto_live_broker")
+        if lane in ("normal", "day"):
+            return self._components.get("stock_live_broker")
+        return None
 
     def _auto_trade(self):
         broker = self._components.get("broker")

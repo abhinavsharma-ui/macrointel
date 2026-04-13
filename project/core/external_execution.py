@@ -538,3 +538,42 @@ def build_shadow_router(*, api_keys: Optional[Dict[str, str]] = None, tracked_sy
     if len(active) == 1:
         return active[0]
     return FallbackExecutionBroker(active, name="shadow_router")
+
+
+# ─────────────────────────────────────────────────────────────
+# Crypto broker factory — paper vs live via CRYPTO_EXECUTION_MODE
+# ─────────────────────────────────────────────────────────────
+
+def get_crypto_broker(initial_balance: float = 5000.0):
+    """
+    Return the correct crypto broker based on CRYPTO_EXECUTION_MODE env var.
+
+    - "paper" (default) → CryptoPaperBroker  (unchanged existing behaviour)
+    - "live"            → KuCoinLiveBroker   (real exchange execution)
+
+    Usage in the live loop:
+        from core.external_execution import get_crypto_broker
+        broker = get_crypto_broker()
+    """
+    mode = os.getenv("CRYPTO_EXECUTION_MODE", "paper").strip().lower()
+
+    if mode == "live":
+        from core.crypto_live_broker import KuCoinLiveBroker, SandboxValidator
+
+        # Guard: validate sandbox connectivity before first live use
+        if _env_flag("KUCOIN_SANDBOX", True):
+            ok, msg = SandboxValidator().validate()
+            if not ok:
+                logger.error(f"KuCoin sandbox validation failed: {msg}")
+                logger.error("Falling back to paper broker for safety")
+                from core.paper_trading_crypto import CryptoPaperBroker
+                return CryptoPaperBroker(initial_balance=initial_balance)
+            logger.info(f"KuCoin sandbox validation: {msg}")
+
+        logger.info("Crypto execution mode: LIVE (KuCoin)")
+        return KuCoinLiveBroker(initial_balance=initial_balance)
+
+    # Default: paper mode — existing behaviour unchanged
+    from core.paper_trading_crypto import CryptoPaperBroker
+    logger.info("Crypto execution mode: PAPER")
+    return CryptoPaperBroker(initial_balance=initial_balance)
