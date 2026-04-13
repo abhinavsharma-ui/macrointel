@@ -6891,6 +6891,7 @@ class MacroIntelligenceSystem:
 
 
 if __name__ == "__main__":
+    import argparse
     from pipeline.alerts_scheduler import setup_production_logging
 
     setup_production_logging(log_dir=os.getenv("LOG_DIR", "logs"))
@@ -6902,10 +6903,23 @@ if __name__ == "__main__":
             return default
         return raw.strip().lower() in {"1", "true", "yes", "on"}
 
+    parser = argparse.ArgumentParser(description="Start the Macro Intelligence runtime.")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Dashboard port. Overrides PORT and DASHBOARD_PORT when provided.",
+    )
+    args = parser.parse_args()
+
+    dashboard_port = args.port
+    if dashboard_port is None:
+        dashboard_port = int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", "5050")))
+
     MacroIntelligenceSystem().start(
         run_dashboard=_env_flag("RUN_DASHBOARD", True),
         run_realtime=_env_flag("RUN_REALTIME", True),
         run_backtest=_env_flag("RUN_BACKTEST", False),
         run_security=_env_flag("RUN_SECURITY", False),
-        dashboard_port=int(os.getenv("DASHBOARD_PORT", "5050")),
+        dashboard_port=dashboard_port,
     )

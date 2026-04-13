@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR/project"
 VENV_DIR="$SCRIPT_DIR/venv"
 PORT="${PORT:-8888}"
+export DASHBOARD_PORT="$PORT"
 SCREEN_NAME="macro"
 
 echo "================================================"
@@ -38,7 +39,7 @@ echo "[start] Launching on port $PORT inside screen '$SCREEN_NAME'..."
 screen -dmS "$SCREEN_NAME" bash -c "
   cd '$PROJECT_DIR'
   source '$VENV_DIR/bin/activate'
-  python run.py --port $PORT 2>&1 | tee '$SCRIPT_DIR/dashboard.log'
+python run.py --port "$PORT" 2>&1 | tee '$SCRIPT_DIR/dashboard.log'
 "
 
 sleep 2
