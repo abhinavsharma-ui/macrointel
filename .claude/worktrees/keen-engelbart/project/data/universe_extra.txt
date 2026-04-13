@@ -1,0 +1,6 @@
+# Add one symbol per line or comma-separated batches.
+# Examples:
+# ADBE
+# SHOP
+# ASIANPAINT.NS
+# TORNTPOWER.NS

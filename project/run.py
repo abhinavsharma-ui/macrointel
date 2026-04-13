@@ -32,6 +32,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+from core.enhanced_exits import EnhancedExitManager
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,6 +84,7 @@ class MacroIntelligenceSystem:
         self._signal_store: Dict = {}
         self._components: Dict = {}
         self._running = False
+        self._enhanced_exit_manager = EnhancedExitManager()
         self._data_versions = {"prices": 0, "sentiment": 0, "earnings": 0, "altdata": 0}
         self._last_inference_versions = dict(self._data_versions)
         self._last_seen_tick_ts: Dict[str, str] = {}
@@ -5368,6 +5371,46 @@ class MacroIntelligenceSystem:
                 meta.get("take_probability", signal.get("take_probability", 0.0)),
                 0.0,
             )
+
+            # ── Enhanced exit manager (ATR-based, regime-shift, trailing, etc.) ──
+            try:
+                _regime_info = self._detect_allocation_regime()
+                _current_regime = str(_regime_info.get("regime", "normal") if isinstance(_regime_info, dict) else "normal")
+                _signal_strength = float(signal.get("conviction_score", 0.0) or 0.0)
+                _pos_dict = {
+                    "entry_price": position.avg_cost,
+                    "current_price": current_price,
+                    "quantity": position.quantity,
+                    "side": "long" if position.quantity > 0 else "short",
+                    "lane": lane,
+                    "position_key": position_key,
+                    "entry_time": plan.get("entry_time") or plan.get("opened_at"),
+                    "entry_regime": plan.get("entry_regime", "normal"),
+                    "atr_at_entry": plan.get("atr_at_entry") or plan.get("atr"),
+                    "signal_strength_at_entry": plan.get("entry_take_probability") or plan.get("entry_conviction"),
+                    "peak_price": plan.get("peak_price"),
+                    "stop_loss_price": plan.get("stop_loss_price"),
+                    "take_profit_price": plan.get("take_profit_price"),
+                    "portfolio_correlation": plan.get("portfolio_correlation"),
+                    "metadata": plan,
+                }
+                _enhanced_exit = self._enhanced_exit_manager.evaluate_exit(
+                    position=_pos_dict,
+                    current_price=current_price,
+                    current_regime=_current_regime,
+                    current_signal_strength=_signal_strength,
+                )
+                if _enhanced_exit.get("should_exit"):
+                    _reason = f"enhanced:{_enhanced_exit.get('exit_reason', 'unknown')}"
+                    logger.info(f"Enhanced exit: {symbol} ({position_key}) — {_reason}")
+                    self._close_position(symbol, _reason, position_key=position_key)
+                    continue
+            except Exception as _ee:
+                logger.debug(f"Enhanced exit check skipped for {symbol}: {_ee}")
+
+            # Track peak price for all lanes (used by enhanced trailing stop)
+            _prev_peak = float(plan.get("peak_price", position.avg_cost) or position.avg_cost)
+            plan["peak_price"] = max(_prev_peak, current_price)
 
             if (
                 lane != "day"

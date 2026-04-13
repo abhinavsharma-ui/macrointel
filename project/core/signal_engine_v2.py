@@ -6,12 +6,14 @@ Live signal scoring plus regime-aware stress tests.
 
 import logging
 import os
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 
+from core.multiframe_confirmation import MultiframeConfirmer
 from models.institutional_retraining import MetaFeatureBuilder, TrainedMetaModel
+from models.regime_aware_factor_weighter import RegimeAwareFactorWeighter
 from pipeline.universe import is_leader_symbol
 
 logger = logging.getLogger(__name__)
@@ -26,15 +28,7 @@ class MultiFactorScorer:
       - event-day close reversal
     """
 
-    FACTOR_WEIGHTS = {
-        "trend": 0.22,
-        "momentum": 0.18,
-        "mean_revert": 0.14,
-        "volume": 0.10,
-        "sentiment": 0.08,
-        "earnings_propagation": 0.16,
-        "close_reversal": 0.12,
-    }
+    FACTOR_WEIGHTS = RegimeAwareFactorWeighter.BASE_WEIGHTS.copy()
 
     BUY_THRESHOLD = max(0.015, float(os.getenv("SIGNAL_ENGINE_BUY_THRESHOLD", "0.05")))
     SELL_THRESHOLD = -max(0.015, float(os.getenv("SIGNAL_ENGINE_SELL_THRESHOLD", "0.05")))
@@ -49,6 +43,13 @@ class MultiFactorScorer:
         "crisis": 0.10,
     }
 
+    def __init__(self):
+        self._regime_weighter = RegimeAwareFactorWeighter()
+        self._cross_asset_enabled = os.getenv("ENABLE_CROSS_ASSET_REGIME_FACTOR", "1").strip().lower() not in {"0", "false", "no", "off"}
+        self._institutional_flow_enabled = os.getenv("ENABLE_INSTITUTIONAL_FLOW_FACTOR", "1").strip().lower() not in {"0", "false", "no", "off"}
+        self._order_book_imbalance_enabled = os.getenv("ENABLE_ORDER_BOOK_IMBALANCE_FACTOR", "1").strip().lower() not in {"0", "false", "no", "off"}
+        self._supply_chain_enabled = os.getenv("ENABLE_SUPPLY_CHAIN_PROPAGATION_FACTOR", "1").strip().lower() not in {"0", "false", "no", "off"}
+
     def score(self, features: pd.Series, symbol: Optional[str] = None) -> Dict:
         scores = {
             "trend": self._score_trend(features),
@@ -58,12 +59,18 @@ class MultiFactorScorer:
             "sentiment": self._score_sentiment(features),
             "earnings_propagation": self._score_earnings_propagation(features),
             "close_reversal": self._score_close_reversal(features),
+            "cross_asset_regime": self._score_cross_asset_regime(features),
+            "institutional_flow": self._score_institutional_flow(features),
+            "order_book_imbalance": self._score_order_book_imbalance(features),
+            "supply_chain": self._score_supply_chain_propagation(features),
         }
 
         regime = self._detect_regime(features)
+        regime_weights = self._regime_weighter.get_weights(regime)
+        active_weights = self._weights_for_active_scores(regime_weights, scores)
         regime_multiplier = self.REGIME_MULTIPLIERS.get(regime, 0.85)
         leader_symbol = bool(symbol) and is_leader_symbol(symbol)
-        raw_score = sum(scores[name] * weight for name, weight in self.FACTOR_WEIGHTS.items())
+        raw_score = sum(scores[name] * active_weights.get(name, 0.0) for name in scores.keys())
         leader_core_score = self._score_leader_core(scores) if leader_symbol else 0.0
         if leader_symbol and regime != "crisis":
             raw_score = (raw_score * 0.65) + (leader_core_score * 0.35)
@@ -113,8 +120,16 @@ class MultiFactorScorer:
             "buy_threshold": round(float(buy_threshold), 4),
             "sell_threshold": round(float(sell_threshold), 4),
             "factor_scores": {k: round(float(v), 4) for k, v in scores.items()},
-            "factor_weights": self.FACTOR_WEIGHTS,
+            "factor_weights": {k: round(float(v), 6) for k, v in active_weights.items()},
         }
+
+    def _weights_for_active_scores(self, weights: Dict[str, float], scores: Dict[str, float]) -> Dict[str, float]:
+        active = {name: float(weights.get(name, 0.0) or 0.0) for name in scores.keys()}
+        total = sum(active.values())
+        if total <= 0:
+            fallback = {name: 1.0 / max(len(scores), 1) for name in scores.keys()}
+            return fallback
+        return {name: value / total for name, value in active.items()}
 
     def _score_leader_core(self, scores: Dict[str, float]) -> float:
         return (
@@ -308,6 +323,103 @@ class MultiFactorScorer:
 
         return score / max(count, 1.0)
 
+    def _score_cross_asset_regime(self, f: pd.Series) -> float:
+        """
+        Cross-asset macro signal from VIX, DXY, yield curve, BTC.
+        Returns -1 to +1.
+        """
+        if not self._cross_asset_enabled:
+            return 0.0
+
+        vix_pct = float(f.get("vix_percentile", 0.5) or 0.5)
+        dxy_momentum = float(f.get("dxy_momentum", 0.0) or 0.0)
+        yield_2y10y = float(f.get("yield_2y10y_spread", 0.01) or 0.01)
+        btc_24h_return = float(f.get("btc_24h_pct_change", 0.0) or 0.0)
+
+        score = 0.0
+        if vix_pct < 0.3:
+            score += 0.3
+        elif vix_pct > 0.7:
+            score -= 0.3
+
+        if dxy_momentum < -0.1:
+            score += 0.2
+        elif dxy_momentum > 0.1:
+            score -= 0.2
+
+        if yield_2y10y < 0:
+            score -= 0.4
+
+        if btc_24h_return < -0.05:
+            score -= 0.2
+        elif btc_24h_return > 0.05:
+            score += 0.1
+
+        return float(np.clip(score, -1.0, 1.0))
+
+    def _score_institutional_flow(self, f: pd.Series) -> float:
+        """
+        FII/DII flows (NSE), dark pool imbalance (US), or exchange flow (crypto).
+        Returns -1 to +1.
+        """
+        if not self._institutional_flow_enabled:
+            return 0.0
+
+        fii_flow_inr = float(f.get("fii_net_flow_inr", 0.0) or 0.0)
+        dark_pool_imbalance = float(f.get("dark_pool_buy_pct", 0.5) or 0.5)
+        exchange_fund_flows = float(f.get("exchange_inflow_pct", 0.5) or 0.5)
+
+        score = 0.0
+        if fii_flow_inr > 200000000:
+            score += 0.5
+        elif fii_flow_inr < -200000000:
+            score -= 0.5
+
+        if dark_pool_imbalance > 0.6:
+            score += 0.3
+        elif dark_pool_imbalance < 0.4:
+            score -= 0.3
+
+        if exchange_fund_flows > 0.55:
+            score += 0.2
+
+        return float(np.clip(score, -1.0, 1.0))
+
+    def _score_order_book_imbalance(self, f: pd.Series) -> float:
+        """
+        Bid volume vs ask volume at top 5 price levels.
+        For crypto/liquid stocks with L2 data.
+        Returns -1 to +1.
+        """
+        if not self._order_book_imbalance_enabled:
+            return 0.0
+
+        bid_volume_l5 = float(f.get("bid_volume_l5", 0.0) or 0.0)
+        ask_volume_l5 = float(f.get("ask_volume_l5", 0.0) or 0.0)
+        total = bid_volume_l5 + ask_volume_l5
+
+        if total == 0:
+            return 0.0
+
+        imbalance = (bid_volume_l5 - ask_volume_l5) / total
+        return float(np.tanh(imbalance * 3.0))
+
+    def _score_supply_chain_propagation(self, f: pd.Series) -> float:
+        """
+        Supply chain relationships: leader earnings/moves propagating downstream.
+        Returns -1 to +1.
+        """
+        if not self._supply_chain_enabled:
+            return 0.0
+
+        sector_leader_signal = float(f.get("sector_leader_signal_strength", 0.0) or 0.0)
+        sector_leader_direction = float(f.get("sector_leader_direction", 0.0) or 0.0)
+        days_since_signal = float(f.get("days_since_sector_signal", 5.0) or 5.0)
+        decay = float(np.exp(-0.3 * max(days_since_signal, 0.0)))
+
+        score = sector_leader_signal * sector_leader_direction * decay
+        return float(np.clip(score, -1.0, 1.0))
+
     def _detect_regime(self, f: pd.Series) -> str:
         vix = f.get("macro_vix_level", f.get("vix_level", 18))
         if pd.isna(vix):
@@ -474,6 +586,7 @@ class MetaDecisionEngine:
             "day": max(0.0, float(os.getenv("META_MODEL_RUNTIME_DAY_LEADER_MIN_CONVICTION", "0.55"))),
             "crypto": max(0.0, float(os.getenv("META_MODEL_RUNTIME_CRYPTO_LEADER_MIN_CONVICTION", "0.45"))),
         }
+        self._multiframe_confirmer = MultiframeConfirmer()
         self._trained_model = TrainedMetaModel.load()
         if self._trained_model is not None:
             logger.info("MetaDecisionEngine: trained meta checkpoint loaded")
@@ -497,17 +610,32 @@ class MetaDecisionEngine:
         # Do not relax trained/runtime threshold with lane tuning; lane value is treated as a floor.
         return max(default_threshold, lane_floor)
 
-    def evaluate_universe(self, signals: Dict[str, Dict], feature_rows: Optional[Dict[str, pd.Series]] = None) -> Dict[str, Dict]:
+    def evaluate_universe(
+        self,
+        signals: Dict[str, Dict],
+        feature_rows: Optional[Dict[str, pd.Series]] = None,
+        multiframe_data: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None,
+    ) -> Dict[str, Dict]:
         decisions: Dict[str, Dict] = {}
         ranked = []
         feature_rows = feature_rows or {}
+        multiframe_data = multiframe_data or {}
 
         for symbol, signal in signals.items():
             if not isinstance(signal, dict):
                 continue
-            decision = self._evaluate_one(symbol, signal, feature_rows.get(symbol))
+            mf_result = self._resolve_multiframe_confirmation(symbol, signal, multiframe_data.get(symbol))
+            signal["multiframe_confirm"] = mf_result
+            signal["final_action"] = mf_result["action"]
+            signal["mf_confidence"] = mf_result["confidence"]
+            decision = self._evaluate_one(
+                symbol,
+                signal,
+                feature_rows.get(symbol),
+                multiframe_result=mf_result,
+            )
             decisions[symbol] = decision
-            if signal.get("signal") != "neutral":
+            if self._signal_direction(signal) != "neutral":
                 ranked.append((decision["rank_score"], symbol))
 
         ranked.sort(key=lambda item: item[0], reverse=True)
@@ -523,9 +651,96 @@ class MetaDecisionEngine:
 
         return decisions
 
+    def _signal_direction(self, signal: Dict) -> str:
+        return str((signal or {}).get("signal") or (signal or {}).get("direction") or "neutral").strip().lower()
+
+    def _resolve_multiframe_confirmation(
+        self,
+        symbol: str,
+        signal: Dict,
+        payload: Optional[Dict[str, pd.DataFrame]] = None,
+    ) -> Dict[str, Any]:
+        direction = self._signal_direction(signal)
+        if direction == "neutral":
+            return self._default_multiframe_result(reason="neutral_signal")
+
+        daily_df, hourly_df, minute_df = self._extract_multiframe_frames(signal, payload)
+        if daily_df.empty or hourly_df.empty or minute_df.empty:
+            return self._default_multiframe_result(reason="missing_multiframe_data")
+
+        try:
+            result = self._multiframe_confirmer.confirm(symbol, daily_df, hourly_df, minute_df)
+        except Exception as exc:
+            logger.debug(f"Multiframe confirmation failed for {symbol}: {exc}")
+            return self._default_multiframe_result(reason="multiframe_error")
+
+        return dict(result)
+
+    def _extract_multiframe_frames(
+        self,
+        signal: Dict,
+        payload: Optional[Dict[str, pd.DataFrame]] = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        payload = payload or {}
+        nested = signal.get("multiframe_data", {}) if isinstance(signal.get("multiframe_data"), dict) else {}
+
+        def _pick_frame(*keys: str) -> pd.DataFrame:
+            for key in keys:
+                candidate = payload.get(key)
+                if candidate is None:
+                    candidate = nested.get(key)
+                if candidate is None:
+                    candidate = signal.get(key)
+                if isinstance(candidate, pd.DataFrame):
+                    return candidate
+                if isinstance(candidate, (dict, list, tuple)):
+                    try:
+                        return pd.DataFrame(candidate)
+                    except (TypeError, ValueError):
+                        continue
+            return pd.DataFrame()
+
+        daily_df = _pick_frame("daily_data", "daily_df", "d1", "d1_data")
+        hourly_df = _pick_frame("hourly_data", "hourly_df", "h1", "h1_data")
+        minute_df = _pick_frame("minute_data", "minute_df", "m5", "m5_data")
+        return daily_df, hourly_df, minute_df
+
+    def _default_multiframe_result(self, reason: str = "skip") -> Dict[str, Any]:
+        return {
+            "d1_score": 0.0,
+            "h1_score": 0.0,
+            "m5_score": 0.0,
+            "total_score": 0.0,
+            "action": "skip",
+            "confidence": 0.0,
+            "reason": reason,
+            "d1_reason": "sideways",
+            "h1_reason": "neutral",
+            "m5_reason": "low_volume",
+        }
+
+    def _multiframe_allows_trade(self, direction: str, multiframe_result: Optional[Dict[str, Any]]) -> bool:
+        if not multiframe_result:
+            return False
+        action = str(multiframe_result.get("action", "skip") or "skip").strip().lower()
+        if direction == "buy":
+            return action == "buy"
+        if direction == "sell":
+            return action == "sell"
+        return False
+
+    def _multiframe_reason(self, multiframe_result: Optional[Dict[str, Any]]) -> str:
+        if not multiframe_result:
+            return "multiframe_missing"
+        action = str(multiframe_result.get("action", "skip") or "skip").strip().lower()
+        if action == "skip":
+            base = str(multiframe_result.get("reason", "multiframe_skip") or "multiframe_skip")
+            return base.replace(" ", "_")
+        return f"multiframe_{action}"
+
     def _heuristic_components(self, symbol: str, signal: Dict) -> Dict:
         leader_symbol = is_leader_symbol(symbol)
-        direction = str(signal.get("signal", "neutral"))
+        direction = self._signal_direction(signal)
         confidence = float(signal.get("confidence", 0.0) or 0.0)
         conviction = float(signal.get("conviction_score", 0.0) or 0.0)
         regime = str(signal.get("regime", "normal") or "normal").lower()
@@ -663,8 +878,14 @@ class MetaDecisionEngine:
             "reason": reason,
         }
 
-    def _evaluate_one(self, symbol: str, signal: Dict, feature_row: Optional[pd.Series] = None) -> Dict:
-        direction = str(signal.get("signal", "neutral"))
+    def _evaluate_one(
+        self,
+        symbol: str,
+        signal: Dict,
+        feature_row: Optional[pd.Series] = None,
+        multiframe_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict:
+        direction = self._signal_direction(signal)
         conviction = float(signal.get("conviction_score", 0.0) or 0.0)
         leader_symbol = is_leader_symbol(symbol)
         heuristic = self._heuristic_components(symbol, signal)
@@ -744,6 +965,11 @@ class MetaDecisionEngine:
                 take_trade = True
                 reason = f"{reason}_rescue"
 
+        if direction != "neutral" and not self._multiframe_allows_trade(direction, multiframe_result):
+            take_trade = False
+            size_multiplier = float(size_multiplier) * 0.5 if str((multiframe_result or {}).get("action", "")).endswith("_half_size") else float(size_multiplier)
+            reason = self._multiframe_reason(multiframe_result)
+
         return {
             "symbol": symbol,
             "take_trade": bool(take_trade),
@@ -755,6 +981,9 @@ class MetaDecisionEngine:
             "size_multiplier": round(float(size_multiplier), 3),
             "reason": reason,
             "source": decision_source,
+            "multiframe_confirm": dict(multiframe_result or self._default_multiframe_result()),
+            "mf_confidence": round(float((multiframe_result or {}).get("confidence", 0.0) or 0.0), 4),
+            "final_action": str((multiframe_result or {}).get("action", "skip") or "skip"),
         }
 
 

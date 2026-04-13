@@ -1,0 +1,30 @@
+{
+  "status": "ok",
+  "generated_at": "2026-04-08T19:52:42.538829+00:00",
+  "us_symbols": 6000,
+  "nse_symbols": 2125,
+  "crypto_symbols": 800,
+  "binance_crypto_symbols": 721,
+  "bybit_crypto_symbols": 551,
+  "shared_crypto_symbols": 316,
+  "files": {
+    "us": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\universe_us_official.txt",
+    "nse": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\universe_nse_official.txt",
+    "crypto": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\crypto_symbols_official.txt",
+    "binance_crypto": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\crypto_symbols_binance_official.txt",
+    "bybit_crypto": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\crypto_symbols_bybit_official.txt"
+  },
+  "sources": {
+    "us": [
+      "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt",
+      "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
+    ],
+    "nse": [
+      "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+    ],
+    "crypto": [
+      "https://api.binance.com/api/v3/exchangeInfo",
+      "https://api.bybit.com/v5/market/instruments-info"
+    ]
+  }
+}
