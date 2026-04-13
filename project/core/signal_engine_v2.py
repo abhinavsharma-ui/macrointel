@@ -548,7 +548,7 @@ class MetaDecisionEngine:
       - suggest a size multiplier for execution
     """
 
-    TAKE_THRESHOLD = 0.50
+    TAKE_THRESHOLD = 0.58
 
     def __init__(self):
         self._take_threshold = min(
@@ -606,8 +606,12 @@ class MetaDecisionEngine:
 
     def _effective_take_threshold(self, signal: Dict, default_threshold: float) -> float:
         lane = self._signal_lane(signal)
-        lane_floor = self._lane_take_threshold_caps.get(lane, self._take_threshold)
-        # Do not relax trained/runtime threshold with lane tuning; lane value is treated as a floor.
+        lane_value = self._lane_take_threshold_caps.get(lane)
+        if lane_value is not None and lane in ("crypto", "day"):
+            # Crypto/day lanes have intentionally lower thresholds — use lane value directly
+            return lane_value
+        # Normal lane: do not relax below the lane floor
+        lane_floor = lane_value if lane_value is not None else self._take_threshold
         return max(default_threshold, lane_floor)
 
     def evaluate_universe(
@@ -721,7 +725,11 @@ class MetaDecisionEngine:
 
     def _multiframe_allows_trade(self, direction: str, multiframe_result: Optional[Dict[str, Any]]) -> bool:
         if not multiframe_result:
-            return False
+            return True  # no multiframe data → pass through (soft gate)
+        reason = str(multiframe_result.get("reason", "") or "")
+        # If multiframe data was missing, don't block the trade — data wasn't available
+        if reason in ("missing_multiframe_data", "neutral_signal", "multiframe_error"):
+            return True
         action = str(multiframe_result.get("action", "skip") or "skip").strip().lower()
         if direction == "buy":
             return action == "buy"
