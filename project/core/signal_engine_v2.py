@@ -45,6 +45,10 @@ class MultiFactorScorer:
 
     def __init__(self):
         self._regime_weighter = RegimeAwareFactorWeighter()
+        self._cross_asset_enabled = os.getenv("ENABLE_CROSS_ASSET_REGIME_FACTOR", "1").strip().lower() not in {"0", "false", "no", "off"}
+        self._institutional_flow_enabled = os.getenv("ENABLE_INSTITUTIONAL_FLOW_FACTOR", "1").strip().lower() not in {"0", "false", "no", "off"}
+        self._order_book_imbalance_enabled = os.getenv("ENABLE_ORDER_BOOK_IMBALANCE_FACTOR", "1").strip().lower() not in {"0", "false", "no", "off"}
+        self._supply_chain_enabled = os.getenv("ENABLE_SUPPLY_CHAIN_PROPAGATION_FACTOR", "1").strip().lower() not in {"0", "false", "no", "off"}
 
     def score(self, features: pd.Series, symbol: Optional[str] = None) -> Dict:
         scores = {
@@ -55,6 +59,10 @@ class MultiFactorScorer:
             "sentiment": self._score_sentiment(features),
             "earnings_propagation": self._score_earnings_propagation(features),
             "close_reversal": self._score_close_reversal(features),
+            "cross_asset_regime": self._score_cross_asset_regime(features),
+            "institutional_flow": self._score_institutional_flow(features),
+            "order_book_imbalance": self._score_order_book_imbalance(features),
+            "supply_chain": self._score_supply_chain_propagation(features),
         }
 
         regime = self._detect_regime(features)
@@ -314,6 +322,103 @@ class MultiFactorScorer:
             count += 0.15
 
         return score / max(count, 1.0)
+
+    def _score_cross_asset_regime(self, f: pd.Series) -> float:
+        """
+        Cross-asset macro signal from VIX, DXY, yield curve, BTC.
+        Returns -1 to +1.
+        """
+        if not self._cross_asset_enabled:
+            return 0.0
+
+        vix_pct = float(f.get("vix_percentile", 0.5) or 0.5)
+        dxy_momentum = float(f.get("dxy_momentum", 0.0) or 0.0)
+        yield_2y10y = float(f.get("yield_2y10y_spread", 0.01) or 0.01)
+        btc_24h_return = float(f.get("btc_24h_pct_change", 0.0) or 0.0)
+
+        score = 0.0
+        if vix_pct < 0.3:
+            score += 0.3
+        elif vix_pct > 0.7:
+            score -= 0.3
+
+        if dxy_momentum < -0.1:
+            score += 0.2
+        elif dxy_momentum > 0.1:
+            score -= 0.2
+
+        if yield_2y10y < 0:
+            score -= 0.4
+
+        if btc_24h_return < -0.05:
+            score -= 0.2
+        elif btc_24h_return > 0.05:
+            score += 0.1
+
+        return float(np.clip(score, -1.0, 1.0))
+
+    def _score_institutional_flow(self, f: pd.Series) -> float:
+        """
+        FII/DII flows (NSE), dark pool imbalance (US), or exchange flow (crypto).
+        Returns -1 to +1.
+        """
+        if not self._institutional_flow_enabled:
+            return 0.0
+
+        fii_flow_inr = float(f.get("fii_net_flow_inr", 0.0) or 0.0)
+        dark_pool_imbalance = float(f.get("dark_pool_buy_pct", 0.5) or 0.5)
+        exchange_fund_flows = float(f.get("exchange_inflow_pct", 0.5) or 0.5)
+
+        score = 0.0
+        if fii_flow_inr > 200000000:
+            score += 0.5
+        elif fii_flow_inr < -200000000:
+            score -= 0.5
+
+        if dark_pool_imbalance > 0.6:
+            score += 0.3
+        elif dark_pool_imbalance < 0.4:
+            score -= 0.3
+
+        if exchange_fund_flows > 0.55:
+            score += 0.2
+
+        return float(np.clip(score, -1.0, 1.0))
+
+    def _score_order_book_imbalance(self, f: pd.Series) -> float:
+        """
+        Bid volume vs ask volume at top 5 price levels.
+        For crypto/liquid stocks with L2 data.
+        Returns -1 to +1.
+        """
+        if not self._order_book_imbalance_enabled:
+            return 0.0
+
+        bid_volume_l5 = float(f.get("bid_volume_l5", 0.0) or 0.0)
+        ask_volume_l5 = float(f.get("ask_volume_l5", 0.0) or 0.0)
+        total = bid_volume_l5 + ask_volume_l5
+
+        if total == 0:
+            return 0.0
+
+        imbalance = (bid_volume_l5 - ask_volume_l5) / total
+        return float(np.tanh(imbalance * 3.0))
+
+    def _score_supply_chain_propagation(self, f: pd.Series) -> float:
+        """
+        Supply chain relationships: leader earnings/moves propagating downstream.
+        Returns -1 to +1.
+        """
+        if not self._supply_chain_enabled:
+            return 0.0
+
+        sector_leader_signal = float(f.get("sector_leader_signal_strength", 0.0) or 0.0)
+        sector_leader_direction = float(f.get("sector_leader_direction", 0.0) or 0.0)
+        days_since_signal = float(f.get("days_since_sector_signal", 5.0) or 5.0)
+        decay = float(np.exp(-0.3 * max(days_since_signal, 0.0)))
+
+        score = sector_leader_signal * sector_leader_direction * decay
+        return float(np.clip(score, -1.0, 1.0))
 
     def _detect_regime(self, f: pd.Series) -> str:
         vix = f.get("macro_vix_level", f.get("vix_level", 18))

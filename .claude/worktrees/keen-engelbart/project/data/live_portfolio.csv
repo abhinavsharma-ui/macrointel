@@ -1,0 +1,3 @@
+broker,symbol,quantity,avg_cost,current_price,unrealized_pnl,source,cash
+SampleBroker,AAPL,10,195.25,198.40,31.50,holding,2500
+SampleBroker,MSFT,5,420.10,417.80,-11.50,holding,2500
