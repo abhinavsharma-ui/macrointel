@@ -47,9 +47,25 @@ if screen -list | grep -q "$SCREEN_NAME"; then
   echo ""
   echo "  ✓ Dashboard running at http://$(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_VM_IP'):$PORT"
   echo ""
+
+  # Auto-launch watchdog if not already running
+  WATCHDOG_SCRIPT="$PROJECT_DIR/scripts/watchdog.sh"
+  if [ -f "$WATCHDOG_SCRIPT" ]; then
+    if ! screen -list 2>/dev/null | grep -q "\.watchdog"; then
+      echo "[watchdog] Starting watchdog in screen 'watchdog'..."
+      screen -dmS watchdog bash "$WATCHDOG_SCRIPT"
+      echo "[watchdog] ✓ Watchdog running"
+    else
+      echo "[watchdog] Already running"
+    fi
+  fi
+
+  echo ""
   echo "  Useful commands:"
   echo "    screen -r $SCREEN_NAME     # attach to live session"
+  echo "    screen -r watchdog         # attach to watchdog"
   echo "    tail -f $SCRIPT_DIR/dashboard.log  # view logs"
+  echo "    tail -f $SCRIPT_DIR/logs/watchdog.log  # watchdog logs"
   echo "    $SCRIPT_DIR/stop.sh        # stop the server"
   echo "================================================"
 else
