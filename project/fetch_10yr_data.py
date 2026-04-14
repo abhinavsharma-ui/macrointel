@@ -58,9 +58,9 @@ DEFAULT_SYMBOLS = [
 def fetch_symbol_data(ticker: str, period: str = "10y") -> pd.DataFrame:
     """Fetch 10 years of data for a single symbol."""
     try:
-        # Map to yfinance symbol
-        yf_ticker = ticker.replace(".NS", "").replace(".BO", "")
-        
+        # Keep exchange suffixes for Yahoo Finance; stripping `.NS` breaks NSE fetches.
+        yf_ticker = str(ticker).strip()
+
         stock = yf.Ticker(yf_ticker)
         df = stock.history(period=period, auto_adjust=True)
         

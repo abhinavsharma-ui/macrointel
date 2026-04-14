@@ -32,8 +32,9 @@ Usage:
 
 import argparse
 import logging
+import os
 import time
-from datetime import datetime, date
+from datetime import date
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -41,15 +42,49 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
 logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).parent
-FEATURES_DIR = PROJECT_DIR / "data" / "features_10yr"
+FEATURES_DIR = PROJECT_DIR / "data" / "features"
 SNAPSHOTS_DIR = PROJECT_DIR / "data" / "altdata" / "options_snapshots"
 SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 TODAY = date.today().isoformat()
+
+
+def _configure_logging(log_file: Optional[str] = None) -> None:
+    handlers = [logging.StreamHandler()]
+    if log_file:
+        log_path = Path(log_file)
+        if not log_path.is_absolute():
+            log_path = PROJECT_DIR / log_path
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
+def _resolve_features_dir() -> Path:
+    configured = str(os.getenv("FEATURE_STORE_DIR", "")).strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured) if Path(configured).is_absolute() else PROJECT_DIR / configured)
+    candidates.extend(
+        [
+            PROJECT_DIR / "data" / "features",
+            PROJECT_DIR / "data" / "features_10yr",
+        ]
+    )
+    for path in candidates:
+        if path.exists():
+            return path
+    target = candidates[0] if candidates else PROJECT_DIR / "data" / "features"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 # ── Snapshot collection ───────────────────────────────────────────────────────
@@ -219,7 +254,13 @@ def main():
     parser.add_argument("--snapshot-only", action="store_true")
     parser.add_argument("--enrich-only", action="store_true")
     parser.add_argument("--workers", type=int, default=6)
+    parser.add_argument("--log-file", default=None, help="Optional log file path")
     args = parser.parse_args()
+    _configure_logging(args.log_file)
+    global FEATURES_DIR
+    FEATURES_DIR = _resolve_features_dir()
+    logger.info(f"Feature source directory: {FEATURES_DIR}")
+    logger.info(f"Options snapshot directory: {SNAPSHOTS_DIR}")
 
     if args.symbols:
         symbols = args.symbols

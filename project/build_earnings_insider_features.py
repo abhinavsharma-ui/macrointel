@@ -31,7 +31,7 @@ import argparse
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -40,11 +40,45 @@ import numpy as np
 import pandas as pd
 import requests
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
 logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).parent
-FEATURES_DIR = PROJECT_DIR / "data" / "features_10yr"
+FEATURES_DIR = PROJECT_DIR / "data" / "features"
+
+
+def _configure_logging(log_file: Optional[str] = None) -> None:
+    handlers = [logging.StreamHandler()]
+    if log_file:
+        log_path = Path(log_file)
+        if not log_path.is_absolute():
+            log_path = PROJECT_DIR / log_path
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
+def _resolve_features_dir() -> Path:
+    configured = str(os.getenv("FEATURE_STORE_DIR", "")).strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured) if Path(configured).is_absolute() else PROJECT_DIR / configured)
+    candidates.extend(
+        [
+            PROJECT_DIR / "data" / "features",
+            PROJECT_DIR / "data" / "features_10yr",
+        ]
+    )
+    for path in candidates:
+        if path.exists():
+            return path
+    target = candidates[0] if candidates else PROJECT_DIR / "data" / "features"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 def _load_env() -> dict:
     env = {}
@@ -58,7 +92,7 @@ def _load_env() -> dict:
     return env
 
 _ENV = _load_env()
-FINNHUB_KEY = _ENV.get("FINNHUB_API_KEYS", "").split(",")[0].strip()
+FINNHUB_KEY = (_ENV.get("FINNHUB_API_KEYS", "") or _ENV.get("FINNHUB_API_KEY", "")).split(",")[0].strip()
 BASE_URL = "https://finnhub.io/api/v1"
 RATE_DELAY = 0.25
 
@@ -320,7 +354,12 @@ def main():
     parser.add_argument("--workers", type=int, default=2)  # low for Finnhub rate limits
     parser.add_argument("--skip-earnings", action="store_true")
     parser.add_argument("--skip-insider", action="store_true")
+    parser.add_argument("--log-file", default=None, help="Optional log file path")
     args = parser.parse_args()
+    _configure_logging(args.log_file)
+    global FEATURES_DIR
+    FEATURES_DIR = _resolve_features_dir()
+    logger.info(f"Feature source directory: {FEATURES_DIR}")
 
     if not FINNHUB_KEY:
         logger.error("FINNHUB_API_KEYS not set in project/.env")
