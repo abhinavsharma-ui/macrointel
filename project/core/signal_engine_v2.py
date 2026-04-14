@@ -548,7 +548,7 @@ class MetaDecisionEngine:
       - suggest a size multiplier for execution
     """
 
-    TAKE_THRESHOLD = 0.58
+    TAKE_THRESHOLD = 0.40
 
     def __init__(self):
         self._take_threshold = min(

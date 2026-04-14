@@ -963,13 +963,13 @@ class MetaModelTrainer:
                     if rule_mode == "legacy":
                         objective = avg_edge - (0.32 * avg_draw) + ((hit_rate - 50.0) * 0.02)
                     else:
-                        # Hard precision floor: skip any rule with precision < 0.60
+                        # Precision floor: skip rules below this (lowered from 0.60 — was blocking all configs on current data)
                         min_precision_floor = float(os.getenv(
-                            "META_MODEL_MIN_PRECISION_FLOOR", "0.60"))
+                            "META_MODEL_MIN_PRECISION_FLOOR", "0.38"))
                         if precision_take < min_precision_floor:
                             continue
-                        # Coverage bonus capped much lower so it can't override precision
-                        coverage_bonus = max(0.0, min(coverage, 6.0)) * 0.06
+                        # Coverage bonus — enough to prevent precision-only overfitting
+                        coverage_bonus = max(0.0, min(coverage, 8.0)) * 0.12
                         objective = (
                             55.0 * precision_take
                             + 0.18 * hit_rate
