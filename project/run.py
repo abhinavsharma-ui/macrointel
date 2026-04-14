@@ -1683,7 +1683,7 @@ class MacroIntelligenceSystem:
                 "Crypto scalper mode: active | "
                 f"{len(self._crypto_symbols)} symbols | stale cutoff {self._crypto_signal_stale_seconds}s"
             )
-        logger.info(f"Price provider order: {os.getenv('PRICE_PROVIDER_ORDER', 'yfinance,finnhub,alpha_vantage,polygon,eodhd')}")
+        logger.info(f"Price provider order: {os.getenv('PRICE_PROVIDER_ORDER', 'finnhub,yfinance,alpha_vantage,polygon,eodhd')}")
         logger.info(
             "News provider order: "
             f"{os.getenv('NEWS_PROVIDER_ORDER', 'google_rss,sec_filings,press_releases,finnhub,alpha_vantage,eodhd,polygon,newsapi,gnews,rss,nse_announcements,bse_announcements')}"

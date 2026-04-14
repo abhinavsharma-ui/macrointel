@@ -15,8 +15,14 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 import requests
+from dotenv import load_dotenv
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_MODULE_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(_MODULE_ROOT / ".env")
+load_dotenv(_MODULE_ROOT / ".env.example", override=False)
 
 try:
     import yfinance as yf
@@ -127,22 +133,22 @@ class LiveDataConnector:
             logger.debug(f"Finnhub quote error for {symbol}: {e}")
             return None
     
-    def get_quote(self, symbol: str, prefer: str = "yahoo") -> Optional[Dict]:
+    def get_quote(self, symbol: str, prefer: str = "finnhub") -> Optional[Dict]:
         """
         Get quote with fallback.
         
         Args:
             symbol: Stock/crypto symbol (e.g., "RELIANCE.NS", "BTC-USD")
-            prefer: Preferred source ("yahoo", "finnhub", "alphavantage")
+            prefer: Preferred source ("finnhub", "yahoo", "alphavantage")
         """
         if self._is_cache_valid(symbol):
             return self._cache[f"quote_{symbol}"]
         
         sources = [prefer]
-        if prefer == "yahoo":
-            sources.extend(["finnhub", "alphavantage"])
-        elif prefer == "finnhub":
+        if prefer == "finnhub":
             sources.extend(["alphavantage", "yahoo"])
+        elif prefer == "yahoo":
+            sources.extend(["finnhub", "alphavantage"])
         else:
             sources.extend(["finnhub", "yahoo"])
         

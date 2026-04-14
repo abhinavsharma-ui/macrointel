@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from dotenv import load_dotenv
 
 from pipeline.provider_utils import (
     APIKeyPool,
@@ -33,6 +34,10 @@ from pipeline.provider_utils import (
 from pipeline.universe import get_universe
 
 logger = logging.getLogger(__name__)
+
+_MODULE_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(_MODULE_ROOT / ".env")
+load_dotenv(_MODULE_ROOT / ".env.example", override=False)
 
 ALPHA_VANTAGE_BASE = "https://www.alphavantage.co/query"
 FINNHUB_BASE = "https://finnhub.io/api/v1/stock/candle"
@@ -539,20 +544,18 @@ class MultiSourcePriceFetcher:
             "yfinance": YFinanceFetcher(),
         }
         ordered_names = [name for name in PRICE_PROVIDER_ORDER if name in registry]
-        if "yfinance" not in ordered_names:
-            ordered_names.append("yfinance")
+        for fallback_name in ("yfinance",):
+            if fallback_name not in ordered_names and fallback_name in registry:
+                ordered_names.append(fallback_name)
         self.providers = [registry[name] for name in ordered_names]
         self._preferred_provider_by_symbol: Dict[str, str] = {}
 
     def fetch_daily(self, symbol: str, full: bool = False) -> FetchOutcome:
-        primaries = [provider for provider in self.providers if provider.name == "yfinance"]
-        backups = [provider for provider in self.providers if provider.name != "yfinance"]
-        provider_order = primaries + stable_rotate(backups, symbol)
+        provider_order = stable_rotate(self.providers, symbol)
         preferred = self._preferred_provider_by_symbol.get(symbol)
-        if preferred and preferred != "yfinance":
-            provider_order = primaries + [p for p in stable_rotate(backups, symbol) if p.name == preferred] + [
-                p for p in stable_rotate(backups, symbol) if p.name != preferred
-            ]
+        if preferred:
+            rotated = stable_rotate(self.providers, symbol)
+            provider_order = [p for p in rotated if p.name == preferred] + [p for p in rotated if p.name != preferred]
 
         errors: List[str] = []
         attempts = 0
