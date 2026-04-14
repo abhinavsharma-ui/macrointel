@@ -59,6 +59,14 @@ BASE_URL = "https://finnhub.io/api/v1"
 RATE_LIMIT_DELAY = 0.25  # 4 req/sec — free tier allows 60/min
 
 
+def _normalize_daily_index(values) -> pd.DatetimeIndex:
+    idx = pd.to_datetime(values, errors="coerce")
+    idx = pd.DatetimeIndex(idx)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    return idx.normalize()
+
+
 # ── API helpers ──────────────────────────────────────────────────────────────
 
 def _get(endpoint: str, params: dict, retries: int = 3) -> Optional[dict]:
@@ -102,7 +110,10 @@ def fetch_earnings_surprises(symbol: str) -> pd.DataFrame:
             date_str = q.get("period") or q.get("date")
             if not date_str:
                 continue
-            dt = pd.to_datetime(date_str)
+            dt = pd.Timestamp(date_str)
+            if dt.tzinfo is not None:
+                dt = dt.tz_convert("UTC").tz_localize(None)
+            dt = dt.normalize()
             surprise_pct = (actual - estimate) / (abs(estimate) + 1e-9)
             beat = 1 if surprise_pct > 0.01 else (-1 if surprise_pct < -0.01 else 0)
             # YoY: compare to same quarter 1yr ago (4 quarters back)
@@ -142,7 +153,10 @@ def fetch_analyst_recommendations(symbol: str) -> pd.DataFrame:
     rows = []
     for rec in data:
         try:
-            dt = pd.to_datetime(rec.get("period"))
+            dt = pd.Timestamp(rec.get("period"))
+            if dt.tzinfo is not None:
+                dt = dt.tz_convert("UTC").tz_localize(None)
+            dt = dt.normalize()
             sb = int(rec.get("strongBuy") or 0)
             b = int(rec.get("buy") or 0)
             h = int(rec.get("hold") or 0)
@@ -195,7 +209,7 @@ def fetch_news_sentiment(symbol: str, days_back: int = 365 * 10) -> pd.DataFrame
             ts = article.get("datetime")
             if not ts:
                 continue
-            dt = pd.to_datetime(ts, unit="s").normalize()
+            dt = pd.to_datetime(ts, unit="s", utc=True).tz_convert("UTC").tz_localize(None).normalize()
             sentiment = float(article.get("sentiment", 0) or 0)
             rows.append({"date": dt, "sentiment": sentiment})
         except Exception:
@@ -247,11 +261,8 @@ def enrich_symbol(symbol: str) -> bool:
 
     try:
         df = pd.read_parquet(parquet_path)
-        if df.index.name != "date":
-            df.index = pd.to_datetime(df.index)
-            df.index.name = "date"
-        else:
-            df.index = pd.to_datetime(df.index)
+        df.index = _normalize_daily_index(df.index)
+        df.index.name = "date"
     except Exception as e:
         logger.warning(f"Failed to read {symbol}: {e}")
         return False
@@ -262,6 +273,7 @@ def enrich_symbol(symbol: str) -> bool:
     earnings_df = fetch_earnings_surprises(symbol)
     if not earnings_df.empty:
         # Reindex to trading days and forward-fill (signal persists until next quarter)
+        earnings_df.index = _normalize_daily_index(earnings_df.index)
         earnings_df = earnings_df.reindex(df.index, method="ffill")
         for col in earnings_df.columns:
             df[col] = earnings_df[col]
@@ -269,6 +281,7 @@ def enrich_symbol(symbol: str) -> bool:
     # ── Analyst recommendations ──
     rec_df = fetch_analyst_recommendations(symbol)
     if not rec_df.empty:
+        rec_df.index = _normalize_daily_index(rec_df.index)
         rec_df = rec_df.reindex(df.index, method="ffill")
         for col in rec_df.columns:
             df[col] = rec_df[col]
@@ -276,6 +289,7 @@ def enrich_symbol(symbol: str) -> bool:
     # ── News sentiment ──
     news_df = fetch_news_sentiment(symbol)
     if not news_df.empty:
+        news_df.index = _normalize_daily_index(news_df.index)
         news_df = news_df.reindex(df.index, method="ffill")
         for col in news_df.columns:
             df[col] = news_df[col]
