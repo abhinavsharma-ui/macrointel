@@ -2626,8 +2626,16 @@ class MacroIntelligenceSystem:
         best_ask = self._safe_number(intraday.get("best_ask"), 0.0)
         mid_price = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0
         spread_pct = ((best_ask - best_bid) / mid_price) * 100.0 if mid_price > 0 else 999.0
-        depth_age_seconds = self._safe_number(intraday.get("depth_age_seconds"), 999.0)
         tick_age_seconds = self._safe_number(intraday.get("tick_age_seconds"), 999.0)
+        # When depth feed is momentarily unavailable (Binance public depth WS
+        # flaps often with ping/pong timeouts), depth_age_seconds arrives as
+        # None. Treat that as "fall back to the tick-age signal" rather than
+        # blocking every crypto trade on a 999s staleness default.
+        depth_age_raw = intraday.get("depth_age_seconds")
+        if depth_age_raw is None:
+            depth_age_seconds = tick_age_seconds
+        else:
+            depth_age_seconds = self._safe_number(depth_age_raw, tick_age_seconds)
         signal_age_seconds = max(depth_age_seconds, tick_age_seconds)
         book_pressure = abs(self._safe_number(intraday.get("book_pressure"), 0.0))
         depth_imbalance = abs(self._safe_number(intraday.get("book_imbalance"), 0.0))
@@ -3584,8 +3592,17 @@ class MacroIntelligenceSystem:
         risk_reward_ratio = round(take_profit_pct / max(stop_loss_pct, 0.05), 3)
 
         confidence = self._clamp(float(overlay.get("confidence", 0.0) or 0.0), 0.0, 0.99)
+        # Weighted blend of the three independent conviction drivers so the score
+        # spreads across [0, 10] instead of saturating at 10 whenever any single
+        # input happens to be strong. Upper-bound of each term is capped so one
+        # term alone cannot exhaust the budget.
         conviction_score = round(
-            min(10.0, max(confidence * 10.0, abs(score_value) * 4.2, abs(book_pressure) * 5.0)),
+            min(
+                10.0,
+                (confidence * 6.0)
+                + min(abs(score_value) * 1.2, 2.5)
+                + min(abs(book_pressure) * 1.2, 1.5),
+            ),
             1,
         )
         model_agreement = round(
@@ -5625,7 +5642,7 @@ class MacroIntelligenceSystem:
             qualified_edge_fallback = (
                 construction
                 and portfolio_target_pct <= 0
-                and lane in {"normal", "day"}
+                and lane in {"normal", "day", "crypto"}
                 and meta_reason in {
                     "qualified_edge",
                     "qualified_edge_rescue",

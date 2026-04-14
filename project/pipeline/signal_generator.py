@@ -247,9 +247,11 @@ class SignalGenerator:
             rr_ratio=risk_params["risk_reward_ratio"],
         ) if signal != "neutral" else 0.0
 
-        # Conviction score (1-10)
-        base_conviction = conf * 8
-        momentum_bonus  = abs(float(latest.get("momentum_composite", 0))) * 2
+        # Conviction score (1-10) — weighted blend so the score spreads across the
+        # full range. Capping the momentum term prevents it from saturating the
+        # score whenever momentum_composite happens to be extreme.
+        base_conviction = conf * 7.0
+        momentum_bonus  = min(abs(float(latest.get("momentum_composite", 0))) * 1.3, 2.0)
         conviction      = round(min(base_conviction + momentum_bonus, 10), 1)
 
         # Market regime
