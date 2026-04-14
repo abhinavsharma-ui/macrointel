@@ -138,14 +138,33 @@ def main():
     
     parser = argparse.ArgumentParser(description="Fetch 10 years of data")
     parser.add_argument("--symbols", nargs="+", default=None, help="Symbols to fetch")
-    parser.add_argument("--all", action="store_true", help="Fetch full universe")
-    parser.add_argument("--workers", type=int, default=5, help="Parallel workers")
+    parser.add_argument("--all", action="store_true", help="Fetch full universe from universe files")
+    parser.add_argument("--workers", type=int, default=8, help="Parallel workers")
+    parser.add_argument("--limit", type=int, default=None, help="Max symbols to fetch (per universe file)")
     args = parser.parse_args()
-    
+
     symbols = args.symbols
     if args.all:
-        symbols = DEFAULT_SYMBOLS
-    
+        # Load from official universe files instead of hardcoded list
+        universe_files = [
+            PROJECT_DIR / "data" / "universe_us_official.txt",
+            PROJECT_DIR / "data" / "universe_nse_official.txt",
+        ]
+        symbols = []
+        limits = {"us": args.limit or 500, "nse": args.limit or 200}
+        for uf in universe_files:
+            if uf.exists():
+                tag = "nse" if "nse" in uf.name else "us"
+                lines = [l.strip() for l in uf.read_text().splitlines()
+                         if l.strip() and not l.startswith("#")]
+                symbols.extend(lines[:limits[tag]])
+                logger.info(f"Loaded {min(len(lines), limits[tag])} symbols from {uf.name}")
+        # Always include original DEFAULT_SYMBOLS so existing training data stays covered
+        for s in DEFAULT_SYMBOLS:
+            if s not in symbols:
+                symbols.append(s)
+        symbols = list(dict.fromkeys(symbols))  # deduplicate, preserve order
+
     if not symbols:
         symbols = DEFAULT_SYMBOLS[:20]  # Default: top 20
     
