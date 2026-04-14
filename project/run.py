@@ -150,6 +150,8 @@ class MacroIntelligenceSystem:
             dict.fromkeys(
                 _parse_symbol_blob(os.getenv("CRYPTO_DEPTH_SYMBOLS", crypto_default))
                 + _load_symbol_file(os.getenv("CRYPTO_DEPTH_SYMBOLS_FILE", ""))
+                # Expand universe to use full official list (~802 symbols) unless explicitly overridden
+                + (_load_symbol_file("data/crypto_symbols_official.txt") if not os.getenv("CRYPTO_DEPTH_SYMBOLS") and not os.getenv("CRYPTO_DEPTH_SYMBOLS_FILE") else [])
             )
         )
         self._crypto_feed_order = [
@@ -3595,12 +3597,13 @@ class MacroIntelligenceSystem:
         # Weighted blend of the three independent conviction drivers so the score
         # spreads across [0, 10] instead of saturating at 10 whenever any single
         # input happens to be strong. Upper-bound of each term is capped so one
-        # term alone cannot exhaust the budget.
+        # term alone cannot exhaust the budget. Calibrated so average conviction
+        # is > 6.0 for qualified setups (meta-model expects conviction at 7-9 range).
         conviction_score = round(
             min(
                 10.0,
-                (confidence * 6.0)
-                + min(abs(score_value) * 1.2, 2.5)
+                (confidence * 7.0)
+                + min(abs(score_value) * 1.5, 3.0)
                 + min(abs(book_pressure) * 1.2, 1.5),
             ),
             1,
