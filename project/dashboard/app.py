@@ -59,6 +59,7 @@ _dashboard_price_limit = max(0, int(os.getenv("DASHBOARD_PRICE_LIMIT", "500")))
 _dashboard_positions_limit = max(1, int(os.getenv("DASHBOARD_POSITIONS_LIMIT", "500")))
 _dashboard_push_interval = max(1.0, float(os.getenv("DASHBOARD_PUSH_INTERVAL_SECONDS", "2.0")))
 _dashboard_execution_trace_limit = max(25, int(os.getenv("DASHBOARD_EXECUTION_TRACE_LIMIT", "300")))
+_dashboard_meta_batch_limit = max(0, int(os.getenv("DASHBOARD_META_BATCH_LIMIT", "400")))
 _dashboard_target_open_positions = max(
     1,
     int(os.getenv("DAY_TRADE_MAX_OPEN_POSITIONS", os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "12"))),
@@ -839,13 +840,16 @@ def create_app(
         )
         return output
 
-    def _flatten_signal_store(signal_snapshot: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict]:
+    def _flatten_signal_store(
+        signal_snapshot: Optional[Dict[str, Dict[str, Any]]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict]:
         rows: List[Dict] = []
         seen_keys: set[str] = set()
         snapshot = signal_snapshot if signal_snapshot is not None else _signal_store_snapshot()
         batch_meta: Dict[str, Dict[str, Any]] = {}
         try:
-            if snapshot:
+            if snapshot and (_dashboard_meta_batch_limit <= 0 or len(snapshot) <= _dashboard_meta_batch_limit):
                 batch_meta = _get_dashboard_meta_engine().evaluate_universe(dict(snapshot))
         except Exception as exc:
             logger.debug(f"Dashboard batch meta evaluation failed: {exc}")
@@ -859,6 +863,8 @@ def create_app(
             if actual_key not in seen_keys:
                 rows.append(actual)
                 seen_keys.add(actual_key)
+                if limit is not None and limit > 0 and len(rows) >= limit and not _dual_lane_variants_enabled:
+                    break
             if not _dual_lane_variants_enabled:
                 continue
             normal_lane = raw.get("normal_lane_signal")
@@ -876,6 +882,10 @@ def create_app(
                 if variant_key not in seen_keys:
                     rows.append(variant)
                     seen_keys.add(variant_key)
+                    if limit is not None and limit > 0 and len(rows) >= limit:
+                        break
+            if limit is not None and limit > 0 and len(rows) >= limit:
+                break
         return rows
 
     def _today_trade_rows() -> List[Dict]:
@@ -1033,7 +1043,8 @@ def create_app(
     @app.route("/api/signals")
     def get_signals():
         lane_filter = (request.args.get("lane") or "").strip().lower()
-        sigs = _flatten_signal_store(_signal_store_snapshot())
+        requested_limit = max(0, int(request.args.get("limit") or _dashboard_signal_limit or 0))
+        sigs = _flatten_signal_store(_signal_store_snapshot(), limit=requested_limit if requested_limit > 0 else None)
         if lane_filter in {"normal", "day", "crypto"}:
             sigs = [s for s in sigs if str(s.get("lane", "")).lower() == lane_filter]
         sigs.sort(key=lambda s: (
@@ -1384,7 +1395,7 @@ def create_app(
         signal_snapshot = _signal_store_snapshot()
         emit(
             "signals_update",
-            {"signals": _limit_values(_flatten_signal_store(signal_snapshot), _dashboard_signal_limit)},
+            {"signals": _limit_values(_flatten_signal_store(signal_snapshot, limit=_dashboard_signal_limit), _dashboard_signal_limit)},
         )
         if paper_broker:
             emit("portfolio_update", _reprice_paper_broker_summary(paper_broker.get_summary()))
@@ -1460,7 +1471,7 @@ def create_app(
 
                 # Signals
                 if cur_ids:
-                    limited_signals = _limit_values(_flatten_signal_store(signal_snapshot), _dashboard_signal_limit)
+                    limited_signals = _limit_values(_flatten_signal_store(signal_snapshot, limit=_dashboard_signal_limit), _dashboard_signal_limit)
                     fingerprint = "|".join(
                         f"{sig.get('signal_key', sig.get('symbol'))}:{sig.get('signal')}:{round(float(sig.get('confidence', 0.0)), 4)}:{round(float(sig.get('conviction_score', 0.0)), 2)}:{round(float(sig.get('rank_score', 0.0)), 4)}:{sig.get('lane')}:{sig.get('trade_eligible')}"
                         for sig in limited_signals
