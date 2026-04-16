@@ -50,6 +50,8 @@ from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 
+from core import lane_router
+
 logger = logging.getLogger(__name__)
 _startup_time = time.time()
 _dashboard_signal_limit = max(0, int(os.getenv("DASHBOARD_SIGNAL_LIMIT", "500")))
@@ -428,6 +430,15 @@ def create_app(
     ).strip().lower() in {"1", "true", "yes", "on"}
     live_broker = UpstoxPortfolioClient(os.environ.get("UPSTOX_ACCESS_TOKEN", ""))
     manual_broker = ManualPortfolioClient(_live_portfolio_path, _live_portfolio_csv_path)
+    try:
+        from integration.defi_bridge import get_registered_health_payload, maybe_bootstrap_defi_bridge
+
+        maybe_bootstrap_defi_bridge()
+    except Exception as exc:
+        logger.debug("deFi bridge bootstrap unavailable: %s", exc)
+
+        def get_registered_health_payload() -> Dict[str, Any]:
+            return {}
 
     def _limit_values(values, limit: int):
         values = list(values)
@@ -1320,12 +1331,11 @@ def create_app(
             }
         )
 
-    @app.route("/api/health")
-    def health():
+    def _health_payload() -> Dict[str, Any]:
         buf = price_buffer.stats if price_buffer else {}
         broker_summary = paper_broker.get_summary() if paper_broker is not None else {}
         signal_snapshot = _signal_store_snapshot()
-        return jsonify({
+        payload = {
             "status":           "ok",
             "tick_count":       buf.get("total_ticks", 0),
             "active_symbols":   len(price_buffer.active_symbols()) if price_buffer else 0,
@@ -1345,6 +1355,24 @@ def create_app(
             "data_pipeline":   (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("data_pipeline", {})),
             "uptime_seconds":   round(time.time() - _startup_time),
             "timestamp":        datetime.now(timezone.utc).isoformat(),
+        }
+        defi_payload = get_registered_health_payload()
+        if isinstance(defi_payload, dict):
+            payload.update(defi_payload)
+        return payload
+
+    @app.route("/api/health")
+    def health():
+        return jsonify(_health_payload())
+
+    @app.route("/health")
+    def health_extended():
+        payload = _health_payload()
+        return jsonify({
+            "fill_rate_1h": payload.get("fill_rate_1h", 0.0),
+            "avg_fill_ms": payload.get("avg_fill_ms", 0),
+            "session_key_expires_in_s": payload.get("session_key_expires_in_s", 0),
+            "active_solvers": payload.get("active_solvers", []),
         })
 
     # â”€â”€ SocketIO events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1427,6 +1455,8 @@ def create_app(
                     sig = signal_snapshot.get(sid)
                     if sig:
                         socketio.emit("new_signal", sig)
+                        if isinstance(sig, dict):
+                            lane_router.publish_signal(sig)
                 _last_ids.update(new_ids)
                 if cur_ids:
                     limited_signals = _limit_values(_flatten_signal_store(signal_snapshot), _dashboard_signal_limit)
@@ -3702,4 +3732,3 @@ if __name__ == "__main__":
             allow_unsafe_werkzeug=os.getenv("ALLOW_UNSAFE_WERKZEUG", "1").strip().lower()
             in {"1", "true", "yes", "on"},
         )
-
