@@ -255,20 +255,52 @@ class DeFiBridge:
     async def _execute_signal_flow(self, payload: dict[str, object]) -> FillEvent | None:
         trade_signal = self._to_trade_signal(payload)
         if trade_signal is None:
+            LOGGER.info(
+                "signal_skipped",
+                lane=str(payload.get("lane") or ""),
+                signal=str(payload.get("signal") or payload.get("side") or ""),
+                symbol=str(payload.get("symbol") or payload.get("asset") or ""),
+                trade_eligible=bool(payload.get("trade_eligible", True)),
+            )
             return None
         tokenomics_signal = self._tokenomics_signal_for(trade_signal.asset)
         adjusted_signal = replace(
             trade_signal,
             size_usd=round(trade_signal.size_usd * tokenomics_signal.size_scalar, 6),
         )
+        LOGGER.info(
+            "signal_accepted",
+            asset=adjusted_signal.asset,
+            side=adjusted_signal.side,
+            size_usd=adjusted_signal.size_usd,
+            src_chain=adjusted_signal.src_chain,
+            dst_chain=adjusted_signal.dst_chain,
+            tokenomics_ratio=round(tokenomics_signal.ratio, 6),
+            tokenomics_scalar=tokenomics_signal.size_scalar,
+        )
         order = self.intent_composer.compose(adjusted_signal)
         estimate = await self.intent_composer.estimate_output(order)
+        LOGGER.info(
+            "solver_selected",
+            asset=adjusted_signal.asset,
+            solver=estimate.best_solver,
+            net_out_usd=estimate.net_out_usd,
+            fee_bps=estimate.fee_bps,
+            fill_time_est_ms=estimate.fill_time_est_ms,
+        )
         fill_id = await asyncio.to_thread(self.solver_mesh.submit, order, estimate.best_solver)
         self.solver_mesh.track_signal(fill_id, adjusted_signal)
         async for fill_event in self.solver_mesh.watch_fill(fill_id):
             if fill_event.status in {"filled", "expired", "slippage_exceeded"}:
                 self._terminal_events.append(fill_event)
                 self._terminal_gate.set()
+                LOGGER.info(
+                    "fill_terminal",
+                    fill_id=fill_event.fill_id,
+                    status=fill_event.status,
+                    filled_usd=fill_event.filled_usd,
+                    solver=fill_event.solver,
+                )
                 return fill_event
         return None
 

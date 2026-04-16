@@ -1423,6 +1423,17 @@ def create_app(
     def _push_loop():
         while True:
             try:
+                signal_snapshot = _signal_store_snapshot()
+                cur_ids = set(signal_snapshot.keys())
+                new_ids = cur_ids - _last_ids
+                for sid in new_ids:
+                    sig = signal_snapshot.get(sid)
+                    if sig:
+                        lane_router.publish_signal(sig)
+                        if _client_count[0] > 0:
+                            socketio.emit("new_signal", sig)
+                _last_ids.update(new_ids)
+
                 if _client_count[0] == 0:
                     time.sleep(0.5)
                     continue
@@ -1448,16 +1459,6 @@ def create_app(
                         socketio.emit("prices_update", {"prices": prices})
 
                 # Signals
-                signal_snapshot = _signal_store_snapshot()
-                cur_ids = set(signal_snapshot.keys())
-                new_ids = cur_ids - _last_ids
-                for sid in new_ids:
-                    sig = signal_snapshot.get(sid)
-                    if sig:
-                        socketio.emit("new_signal", sig)
-                        if isinstance(sig, dict):
-                            lane_router.publish_signal(sig)
-                _last_ids.update(new_ids)
                 if cur_ids:
                     limited_signals = _limit_values(_flatten_signal_store(signal_snapshot), _dashboard_signal_limit)
                     fingerprint = "|".join(
