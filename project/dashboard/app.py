@@ -888,6 +888,63 @@ def create_app(
                 break
         return rows
 
+    def _dashboard_signal_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+        meta = row.get("meta_decision") if isinstance(row.get("meta_decision"), dict) else {}
+        intraday = row.get("intraday_overlay") if isinstance(row.get("intraday_overlay"), dict) else {}
+        risk = row.get("risk_parameters") if isinstance(row.get("risk_parameters"), dict) else {}
+        return {
+            "symbol": row.get("symbol"),
+            "signal": row.get("signal"),
+            "lane": row.get("lane"),
+            "lane_label": row.get("lane_label"),
+            "signal_key": row.get("signal_key"),
+            "confidence": row.get("confidence"),
+            "conviction_score": row.get("conviction_score"),
+            "rank_score": row.get("rank_score"),
+            "rank_percentile": row.get("rank_percentile"),
+            "trade_eligible": row.get("trade_eligible"),
+            "warmup_only": row.get("warmup_only"),
+            "regime": row.get("regime"),
+            "regime_multiplier": row.get("regime_multiplier"),
+            "signal_style": row.get("signal_style"),
+            "setup_id": row.get("setup_id"),
+            "market": row.get("market"),
+            "last_price": row.get("last_price"),
+            "current_price": row.get("current_price"),
+            "price_change_pct": row.get("price_change_pct"),
+            "price_direction": row.get("price_direction"),
+            "take_probability": row.get("take_probability"),
+            "skip_probability": row.get("skip_probability"),
+            "expected_edge_pct": row.get("expected_edge_pct"),
+            "expected_drawdown_pct": row.get("expected_drawdown_pct"),
+            "size_multiplier": row.get("size_multiplier"),
+            "meta_source": row.get("meta_source"),
+            "meta_decision": {
+                "take_trade": meta.get("take_trade"),
+                "take_probability": meta.get("take_probability"),
+                "skip_probability": meta.get("skip_probability"),
+                "expected_edge_pct": meta.get("expected_edge_pct"),
+                "decision_label": meta.get("decision_label"),
+                "rank": meta.get("rank"),
+            } if meta else {},
+            "risk_parameters": {
+                "stop_loss_pct": risk.get("stop_loss_pct"),
+                "take_profit_pct": risk.get("take_profit_pct"),
+                "trailing_stop_pct": risk.get("trailing_stop_pct"),
+                "suggested_position_size_pct": risk.get("suggested_position_size_pct"),
+                "risk_reward_ratio": risk.get("risk_reward_ratio"),
+                "entry_note": risk.get("entry_note"),
+            } if risk else {},
+            "intraday_overlay": {
+                "setup": intraday.get("setup"),
+                "regime": intraday.get("regime"),
+                "order_flow_imbalance": intraday.get("order_flow_imbalance"),
+                "score": intraday.get("score"),
+                "trade_window_active": intraday.get("trade_window_active"),
+                "note": intraday.get("note"),
+            } if intraday else {},
+        }
+
     def _today_trade_rows() -> List[Dict]:
         if paper_broker is None:
             return []
@@ -1051,14 +1108,15 @@ def create_app(
             0 if s.get("signal") == "buy" else 1 if s.get("signal") == "sell" else 2,
             -_safe_float(s.get("confidence"), 0.0),
         ))
+        signal_payload = [_dashboard_signal_summary(signal) for signal in sigs]
         return jsonify(_json_safe({
-            "signals":    sigs,
-            "count":      len(sigs),
-            "buy_count":  sum(1 for s in sigs if s.get("signal") == "buy"),
-            "sell_count": sum(1 for s in sigs if s.get("signal") == "sell"),
-            "hold_count": sum(1 for s in sigs if s.get("signal") == "neutral"),
+            "signals":    signal_payload,
+            "count":      len(signal_payload),
+            "buy_count":  sum(1 for s in signal_payload if s.get("signal") == "buy"),
+            "sell_count": sum(1 for s in signal_payload if s.get("signal") == "sell"),
+            "hold_count": sum(1 for s in signal_payload if s.get("signal") == "neutral"),
             "lane_counts": {
-                lane: sum(1 for s in sigs if str(s.get("lane", "")).lower() == lane)
+                lane: sum(1 for s in signal_payload if str(s.get("lane", "")).lower() == lane)
                 for lane in ("normal", "day", "crypto")
             },
             "timestamp":  datetime.now(timezone.utc).isoformat(),
@@ -1395,7 +1453,7 @@ def create_app(
         signal_snapshot = _signal_store_snapshot()
         emit(
             "signals_update",
-            {"signals": _limit_values(_flatten_signal_store(signal_snapshot, limit=_dashboard_signal_limit), _dashboard_signal_limit)},
+            {"signals": [_dashboard_signal_summary(signal) for signal in _limit_values(_flatten_signal_store(signal_snapshot, limit=_dashboard_signal_limit), _dashboard_signal_limit)]},
         )
         if paper_broker:
             emit("portfolio_update", _reprice_paper_broker_summary(paper_broker.get_summary()))
@@ -1442,7 +1500,7 @@ def create_app(
                     if sig:
                         lane_router.publish_signal(sig)
                         if _client_count[0] > 0:
-                            socketio.emit("new_signal", sig)
+                            socketio.emit("new_signal", _dashboard_signal_summary(_enrich_signal_row(dict(sig))))
                 _last_ids.update(new_ids)
 
                 if _client_count[0] == 0:
@@ -1471,7 +1529,7 @@ def create_app(
 
                 # Signals
                 if cur_ids:
-                    limited_signals = _limit_values(_flatten_signal_store(signal_snapshot, limit=_dashboard_signal_limit), _dashboard_signal_limit)
+                    limited_signals = [_dashboard_signal_summary(signal) for signal in _limit_values(_flatten_signal_store(signal_snapshot, limit=_dashboard_signal_limit), _dashboard_signal_limit)]
                     fingerprint = "|".join(
                         f"{sig.get('signal_key', sig.get('symbol'))}:{sig.get('signal')}:{round(float(sig.get('confidence', 0.0)), 4)}:{round(float(sig.get('conviction_score', 0.0)), 2)}:{round(float(sig.get('rank_score', 0.0)), 4)}:{sig.get('lane')}:{sig.get('trade_eligible')}"
                         for sig in limited_signals
@@ -2994,15 +3052,28 @@ function updateMetrics(){
       : `${actionable.length} trade-ready - ${buys} live buy - ${sells} live sell - ${watch} watch${activeLane !== 'all' && activeLane !== 'reports' ? ` - ${LANE_LABELS[activeLane]}` : ''}`);
 }
 
-function selectSig(sym){
+async function selectSig(sym){
   sel = sym;
   renderSidebar();
-  const signal = signals[sym];
+  let signal = signals[sym];
   const layout = document.querySelector('.layout');
   if(layout && window.innerWidth <= 1100){
     layout.classList.remove('show-sidebar');
   }
   if(SOCKET_AVAILABLE && signal) io_sock.emit('subscribe_symbol', {symbol: signal.symbol});
+  if(signal && (!signal.factor_scores || !Object.keys(signal.factor_scores || {}).length)){
+    try{
+      const resp = await fetch(`/api/signals/${encodeURIComponent(signal.symbol)}`);
+      if(resp.ok){
+        const fullSignal = normalizeSignal(await resp.json());
+        if(fullSignal){
+          signals[fullSignal.signal_key] = {...signals[fullSignal.signal_key], ...fullSignal};
+          signal = signals[fullSignal.signal_key];
+          renderSidebar();
+        }
+      }
+    }catch(_err){}
+  }
   if(signal){
     setChartSelection(signal, 'signal');
     renderDetail(signal);
