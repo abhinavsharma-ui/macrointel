@@ -910,12 +910,28 @@ class MetaDecisionEngine:
             try:
                 model_features = MetaFeatureBuilder.build(symbol, signal, feature_row)
                 trained = self._trained_model.predict_from_dict(model_features)
+                trained_regressors_ok = bool(trained.get("regressors_reliable", True))
+
+                # Always blend the classifier take-probability — it is trained
+                # regardless of regressor quality.
                 take_prob = (take_prob * 0.35) + (float(trained["take_probability"]) * 0.65)
-                expected_edge_pct = (expected_edge_pct * 0.35) + (float(trained["expected_edge_pct"]) * 0.65)
-                expected_drawdown_pct = max(
-                    0.1,
-                    (expected_drawdown_pct * 0.35) + (float(trained["expected_drawdown_pct"]) * 0.65),
-                )
+
+                if trained_regressors_ok:
+                    # Full blend: regressors passed the null-model quality gate.
+                    expected_edge_pct = (expected_edge_pct * 0.35) + (float(trained["expected_edge_pct"]) * 0.65)
+                    expected_drawdown_pct = max(
+                        0.1,
+                        (expected_drawdown_pct * 0.35) + (float(trained["expected_drawdown_pct"]) * 0.65),
+                    )
+                else:
+                    # Precision-only fallback: edge_model is unreliable — use the
+                    # heuristic edge value as-is so bad regressor predictions cannot
+                    # silently zero-out trade eligibility for all live signals.
+                    # (predict_from_dict already clamps edge to ≥ 0.10 in this mode,
+                    # but we do not want that to inflate the heuristic's estimate
+                    # either, so we keep the heuristic's own value.)
+                    pass  # expected_edge_pct and expected_drawdown_pct unchanged
+
                 edge_ratio = expected_edge_pct / max(expected_drawdown_pct, 0.25)
                 rank_score = (
                     take_prob * 0.46
@@ -925,6 +941,8 @@ class MetaDecisionEngine:
                 )
                 size_multiplier = float(np.clip(0.50 + max(edge_ratio, -0.5) * 0.55, 0.0, 1.8))
                 decision_source = "trained_blend"
+                # In fallback mode the bundle's decision_threshold was capped at
+                # self.take_threshold so it doesn't become impossibly high.
                 trained_threshold = float(trained.get("decision_threshold", self._take_threshold) or self._take_threshold)
                 trained_min_edge = float(trained.get("min_expected_edge_pct", 0.10) or 0.10)
                 trained_min_ratio = float(trained.get("min_edge_ratio", 0.12) or 0.12)
@@ -957,6 +975,19 @@ class MetaDecisionEngine:
                 and edge_ratio_live >= min_ratio_required
                 and conviction >= min_conviction
             )
+            heuristic_conviction_override = (
+                decision_source == "heuristic"
+                and os.getenv("HEURISTIC_CONVICTION_OVERRIDE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+                and conviction >= float(os.getenv("HEURISTIC_CONVICTION_OVERRIDE_FLOOR", "2.5"))
+                and direction != "neutral"
+                and take_prob >= 0.30
+            )
+            take_trade = take_trade or heuristic_conviction_override
+            if heuristic_conviction_override and not (
+                take_prob >= effective_threshold
+                and expected_edge_pct > min_edge_required
+            ):
+                reason = "heuristic_conviction_override"
             rescue_conviction_floor = max(0.30, min_conviction * 0.60)
             rescue_probability_floor = max(0.18, effective_threshold - 0.05)
             rescue_edge_floor = max(0.0, min_edge_required * 0.75)

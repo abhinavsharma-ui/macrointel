@@ -1,0 +1,99 @@
+{
+  "status": "blocked",
+  "updated_at": "2026-04-13T16:09:04.580624+00:00",
+  "entry_readiness_enabled": true,
+  "new_entries_enabled": false,
+  "blocking_reasons": [
+    "price_data_stale",
+    "sentiment_stale",
+    "earnings_stale"
+  ],
+  "data_sources": {
+    "prices": {
+      "updated_at": null,
+      "updated_at_ts": 0.0,
+      "refresh_seconds": 120,
+      "stale_after_seconds": 240.0,
+      "status": "missing",
+      "source": "prices",
+      "age_seconds": null
+    },
+    "sentiment": {
+      "updated_at": null,
+      "updated_at_ts": 0.0,
+      "refresh_seconds": 900,
+      "stale_after_seconds": 1800.0,
+      "status": "missing",
+      "source": "sentiment",
+      "age_seconds": null
+    },
+    "earnings": {
+      "updated_at": null,
+      "updated_at_ts": 0.0,
+      "refresh_seconds": 7200,
+      "stale_after_seconds": 14400.0,
+      "status": "missing",
+      "source": "earnings",
+      "age_seconds": null
+    },
+    "altdata": {
+      "updated_at": null,
+      "updated_at_ts": 0.0,
+      "refresh_seconds": 1800,
+      "stale_after_seconds": 3600.0,
+      "status": "missing",
+      "source": "altdata",
+      "age_seconds": null
+    }
+  },
+  "runtime": {
+    "signal_count": 0,
+    "open_positions": 2,
+    "lane_open_counts": {
+      "crypto": 0,
+      "day": 1,
+      "normal": 1
+    },
+    "lane_targets": {
+      "crypto": 150,
+      "day": 150,
+      "normal": 150
+    },
+    "execution_trace_count": 0,
+    "execution_reconciliation_count": 0,
+    "tick_count": 0,
+    "active_symbols": 0,
+    "universe_sync": {
+      "status": "fresh",
+      "generated_at": "2026-04-13T14:29:48.890995+00:00",
+      "us_symbols": 6000,
+      "nse_symbols": 2127,
+      "crypto_symbols": 800,
+      "binance_crypto_symbols": 722,
+      "bybit_crypto_symbols": 551,
+      "shared_crypto_symbols": 316,
+      "files": {
+        "us": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\universe_us_official.txt",
+        "nse": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\universe_nse_official.txt",
+        "crypto": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\crypto_symbols_official.txt",
+        "binance_crypto": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\crypto_symbols_binance_official.txt",
+        "bybit_crypto": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\crypto_symbols_bybit_official.txt"
+      },
+      "sources": {
+        "us": [
+          "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt",
+          "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
+        ],
+        "nse": [
+          "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+        ],
+        "crypto": [
+          "https://api.binance.com/api/v3/exchangeInfo",
+          "https://api.bybit.com/v5/market/instruments-info"
+        ]
+      }
+    },
+    "pipeline_selection": {},
+    "data_pipeline": {}
+  }
+}

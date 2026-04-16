@@ -1,0 +1,31 @@
+{
+  "saved_at": "2026-04-15T12:56:56.751098+00:00",
+  "signal_store": {},
+  "position_plans": {},
+  "last_trade_timestamps": {},
+  "manual_lane_controls": {
+    "normal": {
+      "enabled": true,
+      "stopped_at": null,
+      "reason": "",
+      "source": "default"
+    },
+    "day": {
+      "enabled": true,
+      "stopped_at": null,
+      "reason": "",
+      "source": "default"
+    },
+    "crypto": {
+      "enabled": true,
+      "stopped_at": null,
+      "reason": "",
+      "source": "test",
+      "updated_at": "2026-04-15T12:56:56.751072+00:00"
+    }
+  },
+  "execution_trace": [],
+  "execution_reconciliation": [],
+  "data_health": {},
+  "system_health": {}
+}

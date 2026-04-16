@@ -1,0 +1,1425 @@
+21:38:46  INFO      pipeline.alerts_scheduler       Production logging configured (log_dir='logs')
+21:38:48  INFO      __main__                        Official universe sync fresh | US=6000 NSE=2127 crypto=800 shared_crypto=316
+21:38:48  INFO      __main__                        Runtime state restored: 0 signals | 2 plans | 0 execution events | 0 reconciliations
+21:38:48  INFO      __main__                        ============================================================
+21:38:48  INFO      __main__                        MACRO INTELLIGENCE SYSTEM - STARTING
+21:38:48  INFO      __main__                        ============================================================
+21:38:48  INFO      __main__                        Performance: profile=balanced | threads=4 | priority_applied=True
+21:38:48  INFO      __main__                        Universe mode: throughput
+21:38:48  INFO      __main__                        Event window mode: active | 3-day high-volatility preset | event digests -> C:\Users\Sidhnath\Downloads\macro_intelligence_complete\project\data\event_intel
+21:38:48  INFO      __main__                        Event window lane split: dual-lane variants disabled
+21:38:48  INFO      __main__                        Day trading mode: active | force exit 5400s | intraday threshold 0.10
+21:38:48  INFO      __main__                        Crypto scalper mode: active | 551 symbols | stale cutoff 240s
+21:38:48  INFO      __main__                        Price provider order: yfinance,finnhub,alpha_vantage,polygon,eodhd
+21:38:48  INFO      __main__                        News provider order: google_rss,rss,nse_announcements,sec_filings,press_releases,finnhub,alpha_vantage,newsapi,gnews,bse_announcements
+21:38:48  INFO      __main__                        Earnings provider order: finnhub,alpha_vantage,eodhd
+21:38:48  INFO      __main__                        Refresh cadence: prices 120s | sentiment 900s | earnings 7200s | altdata 1800s | inference 10s
+21:38:48  INFO      __main__                        Entry readiness guard: enabled | stale multiplier x2.0 | market-open check on
+21:38:48  INFO      __main__                        Execution overlay: top 480 ideas | max 520 positions | max 80 per sector
+21:38:48  INFO      __main__                        Throughput mode: active | lane targets normal=150 day=150 crypto=150
+21:38:48  INFO      __main__                        Alpha quality monitor: enabled | lookback 180d | horizon 5d | buckets 5
+21:38:48  INFO      __main__                        Portfolio correlation guard: max pair 0.96 | target avg 0.55
+21:38:48  INFO      __main__                        Portfolio optimizer: gross 1.00 | beta target 0.10 | max 600 names
+21:38:48  INFO      __main__                        Feature store autosave: C:\Users\Sidhnath\Downloads\macro_intelligence_complete\project\data\features every 180s
+21:39:04  INFO      __main__                        [1/8] Initializing Point-in-Time database...
+21:39:04  INFO      __main__                        [2/8] Initializing execution broker...
+21:39:04  INFO      core.paper_trading              Paper broker state restored: 2 positions | 10 trade records
+21:39:04  INFO      core.paper_trading              Virtual broker initialized: $100,000 capital
+21:39:04  INFO      __main__                        Execution mode: paper
+21:39:04  INFO      __main__                        [3/8] Starting data pipeline...
+21:39:04  INFO      __main__                        [5/8] Starting real-time data feeds...
+21:39:04  INFO      pipeline.price_collector        PriceDataPipeline: fetching 1800 symbols using yfinance, finnhub, alpha_vantage, polygon, eodhd
+21:39:04  WARNING   __main__                        Finnhub free-tier limit reached: streaming 50 of 6082 US symbols
+21:39:04  INFO      core.realtime_engine            Finnhub WebSocket started for 50 symbols
+21:39:04  INFO      core.realtime_engine            Bybit public depth WebSocket started for 60 crypto symbols
+21:39:04  INFO      core.realtime_engine            Bybit public depth WebSocket started for 60 crypto symbols
+21:39:04  INFO      core.realtime_engine            Bybit public depth WebSocket started for 60 crypto symbols
+21:39:04  INFO      core.realtime_engine            Bybit public depth WebSocket started for 60 crypto symbols
+21:39:04  INFO      core.realtime_engine            Bybit public depth WebSocket started for 60 crypto symbols
+21:39:04  INFO      core.realtime_engine            Bybit public depth WebSocket started for 60 crypto symbols
+21:39:04  INFO      core.realtime_engine            Bybit public depth WebSocket started for 60 crypto symbols
+21:39:04  INFO      core.realtime_engine            Bybit public depth WebSocket started for 60 crypto symbols
+21:39:05  INFO      core.realtime_engine            Bybit public depth WebSocket started for 60 crypto symbols
+21:39:05  INFO      core.realtime_engine            Bybit public depth WebSocket started for 11 crypto symbols
+21:39:05  INFO      __main__                        Crypto realtime feeds started: bybit x10 | signal universe=551 | primary_only=True
+21:39:05  INFO      core.realtime_engine            Bybit ticker polling feed started for 551 crypto symbols
+21:39:05  INFO      core.realtime_engine            Polling fallback started for 8172 symbols (5s interval)
+21:39:05  INFO      __main__                        Polling fallback configured for 8172 symbols in batches of 90 (covered by ws=50)
+21:39:05  INFO      __main__                        [6/8] Starting signal inference loop...
+21:39:05  INFO      __main__                        Starting dedicated crypto signal loop...
+21:39:05  INFO      __main__                        [8/8] Starting dashboard on http://localhost:8888
+21:39:07  INFO      core.realtime_engine            Finnhub WebSocket connected
+21:39:07  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=22 | chunk_size=10
+21:39:07  INFO      core.realtime_engine            Subscribed to 50 symbols
+21:39:08  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:39:08  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:39:08  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:39:08  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:39:08  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:39:08  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:39:08  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:39:08  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:39:08  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:39:19  INFO      __main__                        
+====================================================
+21:39:19  INFO      __main__                          Dashboard : http://localhost:8888
+21:39:19  INFO      __main__                        ====================================================
+
+21:39:32  INFO      pipeline.feature_bridge         Feature bridge: 52 features loaded
+21:39:32  INFO      pipeline.feature_bridge         Feature bridge: scaler loaded
+21:39:34  INFO      core.signal_engine_v2           MetaDecisionEngine: trained meta checkpoint loaded
+21:39:39  INFO      pipeline.price_collector        PriceDataPipeline progress: 25/1800 scanned | 25 ok | 0 skipped | latest ICICIBANK.NS via yfinance
+21:39:41  INFO      __main__                        XGBoost model loaded successfully
+21:39:42  INFO      core.signal_engine_v2           MetaDecisionEngine: trained meta checkpoint loaded
+21:39:44  INFO      __main__                        Signal bootstrap queued 311 feature files from C:\Users\Sidhnath\Downloads\macro_intelligence_complete\project\data\features
+21:39:54  INFO      pipeline.price_collector        PriceDataPipeline progress: 50/1800 scanned | 49 ok | 1 skipped | latest AI via yfinance
+21:39:58  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:40:35  INFO      pipeline.price_collector        PriceDataPipeline progress: 100/1800 scanned | 96 ok | 4 skipped | latest C via yfinance
+21:40:48  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:40:48  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:40:48  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:40:53  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:41:00  INFO      pipeline.price_collector        PriceDataPipeline progress: 125/1800 scanned | 120 ok | 5 skipped | latest DXCM via yfinance
+21:41:08  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:41:08  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:41:08  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:41:08  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:41:08  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:41:08  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:41:08  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:41:08  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:41:08  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:41:08  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:41:08  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:41:08  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:41:12  INFO      __main__                        Signal bootstrap progress: batch 1/2 | 250/311 files loaded | 250 restored | 0 failures
+21:41:12  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:41:13  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:41:13  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:41:13  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:41:17  INFO      pipeline.price_collector        PriceDataPipeline progress: 150/1800 scanned | 144 ok | 6 skipped | latest SLB via yfinance
+21:41:19  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:41:28  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:41:28  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:41:28  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:41:28  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:41:28  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:41:28  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:41:28  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:41:28  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:41:28  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:41:29  INFO      __main__                        Signal bootstrap progress: batch 2/2 | 311/311 files loaded | 61 restored | 0 failures
+21:41:29  INFO      __main__                        Signal bootstrap ready: 862 cached signals restored while live data warms (311 files queued, 0 failures)
+21:41:32  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:41:32  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:41:32  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:41:35  INFO      pipeline.price_collector        PriceDataPipeline progress: 175/1800 scanned | 168 ok | 7 skipped | latest SLV via yfinance
+21:41:48  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:41:48  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:41:48  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:41:56  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:42:08  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:42:08  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:42:09  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:42:10  INFO      pipeline.price_collector        PriceDataPipeline progress: 200/1800 scanned | 191 ok | 9 skipped | latest AEP via yfinance
+21:42:13  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:42:20  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:42:23  INFO      pipeline.price_collector        PriceDataPipeline progress: 225/1800 scanned | 216 ok | 9 skipped | latest HCLTECH.NS via yfinance
+21:42:28  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:42:28  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:42:28  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:42:33  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:42:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:42:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:42:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:42:40  INFO      pipeline.price_collector        PriceDataPipeline progress: 250/1800 scanned | 241 ok | 9 skipped | latest MOTHERSON.NS via yfinance
+21:42:40  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:42:50  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:42:50  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:42:50  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:42:50  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:42:50  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:42:50  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:42:55  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:42:55  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:43:15  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:43:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:43:15  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:43:15  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:43:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:43:15  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:43:15  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:43:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:43:15  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:43:15  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:43:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:43:15  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:43:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:43:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:43:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:43:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:43:22  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:43:26  INFO      pipeline.price_collector        PriceDataPipeline progress: 300/1800 scanned | 287 ok | 13 skipped | latest LICI.NS via yfinance
+21:43:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:43:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:43:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:43:35  INFO      pipeline.price_collector        PriceDataPipeline progress: 325/1800 scanned | 309 ok | 16 skipped | latest METROPOLIS.NS via yfinance
+21:43:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:43:40  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:43:40  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:43:40  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:43:50  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:44:04  INFO      pipeline.price_collector        PriceDataPipeline progress: 350/1800 scanned | 332 ok | 18 skipped | latest ABIG via yfinance
+21:44:07  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:44:15  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:44:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:44:15  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:44:18  INFO      pipeline.price_collector        PriceDataPipeline progress: 375/1800 scanned | 357 ok | 18 skipped | latest ACMR via yfinance
+21:44:20  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:44:29  INFO      pipeline.price_collector        PriceDataPipeline progress: 400/1800 scanned | 382 ok | 18 skipped | latest ADTN via yfinance
+21:44:34  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:44:34  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:44:34  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:44:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:44:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:44:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:44:36  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:44:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:44:39  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:44:39  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:44:39  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:44:40  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:44:43  INFO      pipeline.price_collector        PriceDataPipeline progress: 425/1800 scanned | 406 ok | 19 skipped | latest AFSC via yfinance
+21:44:45  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:44:54  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:44:54  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:44:54  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:44:54  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:44:54  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:44:54  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:44:58  INFO      pipeline.price_collector        PriceDataPipeline progress: 450/1800 scanned | 431 ok | 19 skipped | latest AIHS via yfinance
+21:44:58  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:44:58  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:45:10  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:45:12  INFO      pipeline.price_collector        PriceDataPipeline progress: 475/1800 scanned | 456 ok | 19 skipped | latest ALBT via yfinance
+21:45:18  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:45:27  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:45:28  INFO      pipeline.price_collector        PriceDataPipeline progress: 500/1800 scanned | 481 ok | 19 skipped | latest ALPS via yfinance
+21:45:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:45:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:45:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:45:39  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:45:39  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:45:39  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:45:43  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:45:45  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:45:46  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:45:46  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:45:46  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:45:52  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:45:55  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:45:55  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:45:55  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:46:00  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:46:06  INFO      pipeline.price_collector        PriceDataPipeline progress: 550/1800 scanned | 529 ok | 21 skipped | latest ANNA via yfinance
+21:46:07  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:46:14  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:46:14  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:46:14  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:46:17  INFO      pipeline.price_collector        PriceDataPipeline progress: 575/1800 scanned | 554 ok | 21 skipped | latest APPX via yfinance
+21:46:18  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:46:19  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:46:19  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:46:19  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:46:23  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:46:28  INFO      pipeline.price_collector        PriceDataPipeline progress: 600/1800 scanned | 579 ok | 21 skipped | latest ARMG via yfinance
+21:46:34  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:46:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:46:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:46:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:46:39  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:46:40  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:46:40  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:46:40  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:46:41  INFO      pipeline.price_collector        PriceDataPipeline progress: 625/1800 scanned | 604 ok | 21 skipped | latest ASRV via yfinance
+21:46:44  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:46:46  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:46:46  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:46:46  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:46:51  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:46:52  INFO      pipeline.price_collector        PriceDataPipeline progress: 650/1800 scanned | 629 ok | 21 skipped | latest ATON via yfinance
+21:47:03  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:47:03  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:47:03  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:47:08  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:47:08  INFO      pipeline.price_collector        PriceDataPipeline progress: 675/1800 scanned | 654 ok | 21 skipped | latest AVGX via yfinance
+21:47:11  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:47:24  INFO      pipeline.price_collector        PriceDataPipeline progress: 700/1800 scanned | 679 ok | 21 skipped | latest AZI via yfinance
+21:47:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:47:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:47:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:47:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:47:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:47:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:47:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:47:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:47:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:47:41  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:47:41  INFO      pipeline.price_collector        PriceDataPipeline progress: 725/1800 scanned | 704 ok | 21 skipped | latest BBIO via yfinance
+21:47:41  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:47:41  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:47:44  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:47:44  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:47:44  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:47:44  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:47:44  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:47:44  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:47:48  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:47:48  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:47:54  INFO      pipeline.price_collector        PriceDataPipeline progress: 750/1800 scanned | 729 ok | 21 skipped | latest BDSX via yfinance
+21:47:59  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:48:07  INFO      pipeline.price_collector        PriceDataPipeline progress: 775/1800 scanned | 754 ok | 21 skipped | latest BGM via yfinance
+21:48:15  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:48:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:48:15  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:48:18  INFO      pipeline.price_collector        PriceDataPipeline progress: 800/1800 scanned | 779 ok | 21 skipped | latest BLBD via yfinance
+21:48:20  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:48:30  INFO      pipeline.price_collector        PriceDataPipeline progress: 825/1800 scanned | 804 ok | 21 skipped | latest BNAI via yfinance
+21:48:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:48:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:48:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:48:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:48:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:48:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:48:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:48:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:48:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:48:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:48:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:48:40  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:48:41  INFO      pipeline.price_collector        PriceDataPipeline progress: 850/1800 scanned | 829 ok | 21 skipped | latest BRAG via yfinance
+21:48:43  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:48:44  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:48:44  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:48:44  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:48:48  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:48:53  INFO      pipeline.price_collector        PriceDataPipeline progress: 875/1800 scanned | 854 ok | 21 skipped | latest BTBD via yfinance
+21:48:55  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:48:55  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:48:55  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:48:59  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:49:03  INFO      pipeline.price_collector        PriceDataPipeline progress: 900/1800 scanned | 879 ok | 21 skipped | latest BVFL via yfinance
+21:49:15  INFO      pipeline.price_collector        PriceDataPipeline progress: 925/1800 scanned | 904 ok | 21 skipped | latest CAKE via yfinance
+21:49:21  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:49:21  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:49:21  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:49:25  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:49:25  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:49:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:49:27  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:49:30  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:49:32  INFO      pipeline.price_collector        PriceDataPipeline progress: 950/1800 scanned | 929 ok | 21 skipped | latest CBFV via yfinance
+21:49:33  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:49:33  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:49:33  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:49:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:49:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:49:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:49:38  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:49:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:49:43  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:49:46  INFO      pipeline.price_collector        PriceDataPipeline progress: 975/1800 scanned | 954 ok | 21 skipped | latest CCRN via yfinance
+21:49:56  INFO      pipeline.price_collector        PriceDataPipeline progress: 1000/1800 scanned | 979 ok | 21 skipped | latest CELU via yfinance
+21:50:01  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:50:01  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:50:01  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:50:06  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:50:10  INFO      pipeline.price_collector        PriceDataPipeline progress: 1025/1800 scanned | 1004 ok | 21 skipped | latest CGCT via yfinance
+21:50:16  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:50:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:50:16  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:50:20  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:50:20  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:50:20  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:50:21  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:50:21  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:50:21  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:50:21  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:50:25  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:50:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:50:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:50:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:50:26  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:50:26  INFO      pipeline.price_collector        PriceDataPipeline progress: 1050/1800 scanned | 1029 ok | 21 skipped | latest CHRI via yfinance
+21:50:27  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:50:27  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:50:27  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:50:29  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:50:29  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:50:29  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:50:30  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:50:31  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:50:34  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:50:35  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:50:41  INFO      pipeline.price_collector        PriceDataPipeline progress: 1075/1800 scanned | 1054 ok | 21 skipped | latest CLIR via yfinance
+21:50:48  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:50:48  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:50:48  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:50:53  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:50:56  INFO      pipeline.price_collector        PriceDataPipeline progress: 1100/1800 scanned | 1079 ok | 21 skipped | latest CMPR via yfinance
+21:51:10  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:51:10  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:51:10  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:51:12  INFO      pipeline.price_collector        PriceDataPipeline progress: 1125/1800 scanned | 1104 ok | 21 skipped | latest CODX via yfinance
+21:51:15  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:51:20  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:51:20  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:51:20  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:51:20  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:51:21  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:51:21  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:51:25  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:51:26  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:51:26  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:51:27  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:51:27  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:51:27  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:51:28  INFO      pipeline.price_collector        PriceDataPipeline progress: 1150/1800 scanned | 1129 ok | 21 skipped | latest COYA via yfinance
+21:51:31  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:51:36  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:51:36  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:51:36  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:51:40  INFO      pipeline.price_collector        PriceDataPipeline progress: 1175/1800 scanned | 1154 ok | 21 skipped | latest CRMD via yfinance
+21:51:40  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:51:40  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:51:40  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:51:40  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:51:45  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:51:51  INFO      pipeline.price_collector        PriceDataPipeline progress: 1200/1800 scanned | 1179 ok | 21 skipped | latest CSCS via yfinance
+21:51:55  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:51:55  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:51:55  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:51:55  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:51:55  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:51:55  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:52:00  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:52:00  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:52:05  INFO      pipeline.price_collector        PriceDataPipeline progress: 1225/1800 scanned | 1204 ok | 21 skipped | latest CUB via yfinance
+21:52:14  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:52:14  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:52:14  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:52:16  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:52:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:52:16  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:52:18  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:52:18  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:52:18  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:52:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:52:21  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:52:22  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:52:24  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:52:24  INFO      pipeline.price_collector        PriceDataPipeline progress: 1250/1800 scanned | 1229 ok | 21 skipped | latest CXSE via yfinance
+21:52:34  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:52:34  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:52:34  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:52:37  INFO      pipeline.price_collector        PriceDataPipeline progress: 1275/1800 scanned | 1254 ok | 21 skipped | latest DBCAU via yfinance
+21:52:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:52:42  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:52:42  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:52:42  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:52:46  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:52:46  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:52:46  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:52:47  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:52:51  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:52:52  INFO      pipeline.price_collector        PriceDataPipeline progress: 1300/1800 scanned | 1279 ok | 21 skipped | latest DGICB via yfinance
+21:52:55  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:52:55  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:52:55  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:53:00  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:53:05  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:53:05  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:53:05  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:53:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:53:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:53:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:53:06  INFO      pipeline.price_collector        PriceDataPipeline progress: 1325/1800 scanned | 1304 ok | 21 skipped | latest DMAC via yfinance
+21:53:09  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:53:10  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:53:14  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:53:14  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:53:14  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:53:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:53:19  INFO      pipeline.price_collector        PriceDataPipeline progress: 1350/1800 scanned | 1328 ok | 22 skipped | latest DRMA via yfinance
+21:53:21  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:53:21  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:53:21  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:53:25  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:53:25  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:53:29  INFO      pipeline.price_collector        PriceDataPipeline progress: 1375/1800 scanned | 1353 ok | 22 skipped | latest DVGR via yfinance
+21:53:41  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:53:41  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:53:41  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:53:41  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:53:41  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:53:41  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:53:42  INFO      pipeline.price_collector        PriceDataPipeline progress: 1400/1800 scanned | 1378 ok | 22 skipped | latest DXPE via yfinance
+21:53:46  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:53:46  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:53:47  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:53:47  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:53:47  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:53:52  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:53:54  INFO      pipeline.price_collector        PriceDataPipeline progress: 1425/1800 scanned | 1403 ok | 22 skipped | latest EDRY via yfinance
+21:54:06  INFO      pipeline.price_collector        PriceDataPipeline progress: 1450/1800 scanned | 1428 ok | 22 skipped | latest EKG via yfinance
+21:54:14  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:54:14  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:54:14  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:54:14  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:54:15  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:54:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:54:15  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:54:15  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:54:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:54:15  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:54:18  INFO      pipeline.price_collector        PriceDataPipeline progress: 1475/1800 scanned | 1453 ok | 22 skipped | latest EMXC via yfinance
+21:54:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:54:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:54:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:54:21  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:54:21  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:54:21  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:54:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:54:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:54:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:54:26  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:54:30  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:54:32  INFO      pipeline.price_collector        PriceDataPipeline progress: 1500/1800 scanned | 1478 ok | 22 skipped | latest EQPT via yfinance
+21:54:35  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:54:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:54:35  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:54:40  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:54:41  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:54:41  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:54:41  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:54:42  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:54:42  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:54:42  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:54:46  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:54:46  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:54:48  INFO      pipeline.price_collector        PriceDataPipeline progress: 1525/1800 scanned | 1503 ok | 22 skipped | latest ETHMU via yfinance
+21:54:57  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:55:04  INFO      pipeline.price_collector        PriceDataPipeline progress: 1550/1800 scanned | 1528 ok | 22 skipped | latest EXEL via yfinance
+21:55:14  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:55:14  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:55:14  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:55:15  INFO      pipeline.price_collector        PriceDataPipeline progress: 1575/1800 scanned | 1553 ok | 22 skipped | latest FATN via yfinance
+21:55:15  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:55:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:55:15  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:55:18  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:55:20  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:55:21  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:55:21  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:55:21  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:55:22  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:55:22  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:55:22  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:55:26  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:55:27  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:55:28  INFO      pipeline.price_collector        PriceDataPipeline progress: 1600/1800 scanned | 1578 ok | 22 skipped | latest FCVT via yfinance
+21:55:36  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:55:36  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:55:36  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:55:36  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:55:41  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:55:41  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:55:41  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:55:41  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:55:43  INFO      pipeline.price_collector        PriceDataPipeline progress: 1625/1800 scanned | 1603 ok | 22 skipped | latest FEMS via yfinance
+21:55:46  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:55:56  INFO      pipeline.price_collector        PriceDataPipeline progress: 1650/1800 scanned | 1628 ok | 22 skipped | latest FICS via yfinance
+21:56:00  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:56:00  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:56:00  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:56:00  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:56:00  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:56:00  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:56:05  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:56:05  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:56:07  INFO      pipeline.price_collector        PriceDataPipeline progress: 1675/1800 scanned | 1653 ok | 22 skipped | latest FLNC via yfinance
+21:56:10  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:56:19  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:56:19  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:56:19  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:56:22  INFO      pipeline.price_collector        PriceDataPipeline progress: 1700/1800 scanned | 1678 ok | 22 skipped | latest FNX via yfinance
+21:56:23  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:56:31  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:56:31  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:56:31  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:56:36  INFO      pipeline.price_collector        PriceDataPipeline progress: 1725/1800 scanned | 1703 ok | 22 skipped | latest FRPT via yfinance
+21:56:36  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:56:41  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:56:41  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:56:41  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:56:41  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:56:41  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:56:41  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:56:45  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:56:46  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:56:46  INFO      pipeline.price_collector        PriceDataPipeline progress: 1750/1800 scanned | 1728 ok | 22 skipped | latest FTGC via yfinance
+21:56:50  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:56:51  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:56:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:56:54  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:56:58  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:56:59  INFO      pipeline.price_collector        PriceDataPipeline progress: 1775/1800 scanned | 1753 ok | 22 skipped | latest FV via yfinance
+21:57:01  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:57:01  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:57:01  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:57:05  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:57:08  INFO      pipeline.price_collector        PriceDataPipeline progress: 1800/1800 scanned | 1778 ok | 22 skipped | latest GBLI via yfinance
+21:57:08  INFO      pipeline.price_collector        PriceDataPipeline skipped 22 symbols with no data: TATAMOTORS.NS, VIX, MRO, ZOMATO.NS, SQ, PXD ...
+21:57:08  INFO      pipeline.price_collector        PriceDataPipeline complete: 1778/1800 symbols OK, 22 errors, 1778 fetched, 0 reused
+21:57:15  INFO      __main__                        Sentiment batch 1/24: 25 symbols
+21:57:15  INFO      pipeline.sentiment_collector    SentimentPipeline: 25 symbols, last 3 days
+21:57:23  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:57:23  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:57:23  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:57:28  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:57:31  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:57:31  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:57:31  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:57:36  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:57:37  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:57:51  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:57:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:57:51  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:57:54  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:57:54  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:57:54  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:57:55  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:57:55  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:57:55  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:57:55  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:57:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:57:56  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:57:57  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:57:58  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:57:58  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:57:58  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:57:58  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:57:58  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:57:58  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:57:58  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:57:59  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:57:59  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:57:59  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:58:00  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:58:01  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:58:01  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:58:01  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:58:01  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:58:02  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=22 | chunk_size=10
+21:58:03  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:58:03  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:58:06  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:58:28  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:58:28  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:58:29  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:58:34  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:58:51  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:58:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:58:51  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:58:56  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+21:58:57  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:59:05  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:59:05  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:59:05  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:59:05  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:59:05  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:59:05  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:59:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:59:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:59:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:59:07  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:59:07  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:59:07  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:59:10  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:59:10  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:59:10  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:59:12  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:59:25  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:59:25  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:59:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:59:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:59:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:59:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:59:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:59:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:59:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:59:30  INFO      pipeline.sentiment_collector    Sentiment progress 10/25 | with news 8 | official 3 | no news 2
+21:59:30  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:59:30  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:59:31  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:59:41  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:59:41  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:59:41  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:59:46  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+21:59:46  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+21:59:46  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+21:59:46  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+21:59:51  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:00:00  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:00:00  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:00:00  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:00:05  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:00:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:00:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:00:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:00:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:00:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:00:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:00:07  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:00:07  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:00:07  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:00:11  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:00:11  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:00:12  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:00:12  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:00:12  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:00:12  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:00:17  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:00:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:00:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:00:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:00:31  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:00:31  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:00:31  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:00:31  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:00:35  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:00:46  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:00:46  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:00:46  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:00:50  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=22 | chunk_size=10
+22:00:52  INFO      pipeline.sentiment_collector    Sentiment progress 20/25 | with news 13 | official 5 | no news 7
+22:00:56  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:00:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:00:56  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:00:59  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:00:59  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:00:59  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:01:02  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:01:04  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:01:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:01:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:01:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:01:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:01:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:01:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:01:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:01:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:01:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:01:10  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:01:10  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:01:10  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:01:11  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:01:11  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:01:11  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:01:12  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:01:12  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:01:12  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:01:16  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:01:16  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:01:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:01:16  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:01:17  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:01:21  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:01:31  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:01:31  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:01:31  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:01:36  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:01:46  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:01:46  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:01:46  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:01:51  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:02:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:02:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:02:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:02:12  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:02:12  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:02:12  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:02:12  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:02:12  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:02:12  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:02:12  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:02:12  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:02:13  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:02:13  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:02:17  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:02:17  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:02:17  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:02:19  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:02:19  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:02:19  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:02:21  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+22:02:24  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:02:31  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:02:31  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:02:31  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:02:32  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:02:32  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:02:32  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:02:36  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:02:37  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:02:39  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:02:39  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:02:39  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:02:44  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:02:46  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:02:46  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:02:46  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:02:52  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:00  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:00  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:00  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:05  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:11  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:11  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:11  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:11  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:11  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:16  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:19  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:19  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:19  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:20  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:20  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:20  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:24  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:24  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:45  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:45  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:45  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:46  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:46  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:46  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:50  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:51  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:51  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:51  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:51  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:51  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:51  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:51  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:52  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:52  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:52  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:56  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=22 | chunk_size=10
+22:03:56  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:56  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:57  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:03:59  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:59  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:59  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:59  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:59  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:59  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:03:59  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:03:59  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:03:59  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:04:04  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:04:04  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:04:04  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:04:12  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:04:12  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:04:12  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:04:17  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:04:37  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:04:37  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:04:37  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:04:39  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:04:39  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:04:39  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:04:42  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:04:44  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:04:46  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:04:46  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:04:46  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:04:51  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:04:51  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:04:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:04:51  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:04:52  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:04:52  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:04:52  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:04:52  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:04:52  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:04:52  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:04:56  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:04:58  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:04:58  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:05:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:05:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:05:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:05:11  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:05:18  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:05:18  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:05:18  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:05:23  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:05:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:05:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:05:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:05:27  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:05:27  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:05:27  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:05:31  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:05:32  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:05:32  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:05:32  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:05:32  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:05:37  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:05:39  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:05:39  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:05:39  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:05:41  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:05:41  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:05:41  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:05:44  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:05:44  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:05:44  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:05:44  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:05:45  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:05:49  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:06:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:06:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:06:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:06:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:06:10  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=22 | chunk_size=10
+22:06:11  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:06:16  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:17  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:06:17  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:06:19  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:19  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:06:19  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:06:20  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+22:06:21  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:21  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:06:21  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:06:22  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:06:22  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:22  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:06:22  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:06:24  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:24  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:06:24  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:06:24  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:06:25  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:25  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:25  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:06:25  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:06:25  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:06:25  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:06:25  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:06:28  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:06:29  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:06:29  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:06:32  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:06:32  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:32  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:06:32  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:06:38  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:06:59  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:06:59  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:07:00  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:07:04  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:07:12  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:07:12  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:07:12  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:07:17  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:07:18  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:07:18  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:07:18  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:07:18  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:07:18  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:07:18  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:07:18  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:07:18  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:07:18  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:07:18  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:07:18  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:07:18  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:07:23  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:07:23  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:07:23  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:07:25  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:07:25  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:07:25  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:07:25  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:07:28  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:07:32  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:07:32  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:07:32  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:07:37  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:07:45  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:07:45  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:07:45  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:07:50  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:08:22  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:08:22  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:08:22  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:08:25  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:08:25  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:08:25  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:08:25  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:08:25  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:08:25  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:08:25  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:08:25  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:08:25  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:08:31  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:08:31  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:08:31  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:08:31  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:08:31  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:08:32  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:08:32  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:08:32  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:08:32  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:08:32  WARNING   core.realtime_engine            Finnhub WebSocket error: ping/pong timed out
+22:08:32  ERROR     websocket                       ping/pong timed out - goodbye
+22:08:32  INFO      core.realtime_engine            Finnhub WebSocket closed: None
+22:08:32  INFO      core.realtime_engine            Reconnecting in 5s...
+22:08:33  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:08:33  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:08:33  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:08:33  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:08:33  INFO      pipeline.sentiment_collector    Sentiment progress 25/25 | with news 13 | official 5 | no news 12
+22:08:47  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:08:47  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:08:47  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:08:47  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:08:47  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:08:47  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:08:47  INFO      pipeline.sentiment_collector    SentimentPipeline complete: rows=17 | symbols_with_news=13/25 | official_hits=5 | fallback_symbols=8 | no_news=12
+22:08:47  INFO      pipeline.sentiment_collector    Sentiment providers: multi_source=12, press_releases=8, sec_filings=5
+22:08:47  INFO      pipeline.sentiment_collector    Sentiment no-news preview: NVDA, META, MA, UNH, XOM, QQQ
+22:08:48  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=22 | chunk_size=10
+22:08:48  INFO      __main__                        Sentiment batch 2/24: 25 symbols
+22:08:48  INFO      pipeline.sentiment_collector    SentimentPipeline: 25 symbols, last 3 days
+22:08:48  INFO      core.realtime_engine            Finnhub WebSocket connected
+22:08:49  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:08:49  INFO      core.realtime_engine            Subscribed to 50 symbols
+22:08:49  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:08:52  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:08:52  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:08:52  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:08:55  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:08:55  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:08:58  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:09:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:09:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:09:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:09:27  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:09:27  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:09:27  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:09:32  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:09:33  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:09:33  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:09:34  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:09:34  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:09:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:09:47  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:09:47  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:09:48  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:09:48  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:09:48  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:09:48  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:09:53  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:09:53  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:10:07  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:10:07  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:10:07  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:10:07  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:10:07  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:10:07  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:10:12  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:10:13  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:10:27  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:10:27  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:10:27  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:10:32  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:10:32  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:10:32  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:10:33  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:10:33  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:10:33  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:10:33  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:10:33  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:10:33  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:10:33  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:10:34  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:10:34  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:10:34  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:10:37  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:10:38  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:10:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:10:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:10:44  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+22:10:49  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:10:49  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:10:49  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:10:54  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:11:07  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:11:07  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:11:07  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:11:11  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:11:11  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:11:11  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:11:13  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:11:16  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:11:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:11:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:11:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:11:27  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:11:27  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:11:27  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:11:28  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:11:28  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:11:28  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:11:31  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:11:33  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:11:33  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:11:34  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:11:34  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:11:34  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:11:37  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:11:37  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:11:37  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:11:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:11:43  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:12:09  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:12:09  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:12:09  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:12:11  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:12:11  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:12:11  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:12:11  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:12:11  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:12:11  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:12:13  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:12:13  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:12:13  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:12:14  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:12:16  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=22 | chunk_size=10
+22:12:17  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:12:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:12:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:12:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:12:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:12:27  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:12:27  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:12:27  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:12:27  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:12:27  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:12:28  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:12:29  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:12:29  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:12:29  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:12:31  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:12:32  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:12:32  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:12:32  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:12:32  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:12:33  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:12:33  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:12:33  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:12:33  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:12:35  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:12:38  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:12:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:13:02  WARNING   core.realtime_engine            Finnhub WebSocket error: ping/pong timed out
+22:13:02  ERROR     websocket                       ping/pong timed out - goodbye
+22:13:06  INFO      core.realtime_engine            Finnhub WebSocket closed: None
+22:13:06  INFO      core.realtime_engine            Reconnecting in 5s...
+22:13:09  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:13:09  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:13:09  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:13:09  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:13:09  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:13:09  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:13:14  INFO      core.realtime_engine            Finnhub WebSocket connected
+22:13:15  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:13:15  INFO      core.realtime_engine            Subscribed to 50 symbols
+22:13:15  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:13:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:13:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:13:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:13:27  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:13:27  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:13:27  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:13:31  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:13:32  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:13:33  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:13:33  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:13:33  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:13:38  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:13:51  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:13:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:13:53  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:13:53  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:13:53  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:13:54  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:13:54  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:13:54  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:13:54  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:13:55  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:13:55  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:13:55  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:14:00  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:00  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:00  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:01  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:11  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:14:11  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:14:11  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:14:16  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:37  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:14:38  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:14:38  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:14:38  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:14:38  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:14:38  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:14:38  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:14:38  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:14:38  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:14:38  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:14:38  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:14:38  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:14:38  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:14:38  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:14:38  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:14:38  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:14:38  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:14:39  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:14:47  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+22:14:50  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=22 | chunk_size=10
+22:14:51  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:14:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:14:51  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:14:51  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:51  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:51  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:51  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:52  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:57  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:14:58  WARNING   core.realtime_engine            Finnhub WebSocket error: ping/pong timed out
+22:14:58  ERROR     websocket                       ping/pong timed out - goodbye
+22:15:01  INFO      core.realtime_engine            Finnhub WebSocket closed: None
+22:15:01  INFO      core.realtime_engine            Reconnecting in 5s...
+22:15:01  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:15:01  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:15:01  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:15:06  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:15:07  INFO      core.realtime_engine            Finnhub WebSocket connected
+22:15:08  INFO      core.realtime_engine            Subscribed to 50 symbols
+22:15:14  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:15:14  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:15:14  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:15:19  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:15:19  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:15:19  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:15:19  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:15:25  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:15:34  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:15:34  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:15:34  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:15:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:15:52  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:15:52  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:15:52  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:15:52  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:15:52  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:15:52  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:15:54  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:15:54  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:15:54  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:15:54  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:15:54  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:15:54  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:15:57  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:15:57  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:15:59  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:15:59  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:16:12  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:16:12  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:16:12  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:16:17  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:16:26  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:16:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:16:26  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:16:32  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:16:34  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:16:34  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:16:34  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:16:37  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:16:37  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:16:37  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:16:39  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:16:40  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:16:40  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:16:41  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:16:42  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:16:46  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:16:52  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:16:52  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:16:52  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:16:54  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:16:54  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:16:54  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:16:54  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:16:54  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:16:54  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:16:57  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:16:59  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:16:59  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:17:06  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:17:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:17:06  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:17:16  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:17:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:17:16  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:17:18  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:17:20  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=22 | chunk_size=10
+22:17:36  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:17:36  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:17:36  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:17:36  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:17:36  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:17:36  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:17:39  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:17:39  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:17:39  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:17:41  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:17:41  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:17:44  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:17:56  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:17:56  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:17:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:17:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:17:56  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:17:56  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:17:56  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:17:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:17:56  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:17:57  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:17:57  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:17:57  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:18:00  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:18:00  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:18:00  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:18:01  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:18:01  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:18:02  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:18:02  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:18:05  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:18:19  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:18:19  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:18:20  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:18:23  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:18:23  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:18:23  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:18:24  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+22:18:24  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:18:28  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:18:39  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:18:39  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:18:39  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:18:44  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:18:56  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:18:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:18:56  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:18:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:18:56  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:18:56  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:18:58  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:18:58  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:18:59  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:19:00  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:19:00  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:19:00  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:19:01  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:19:02  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:19:03  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:19:04  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:19:16  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:19:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:19:16  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:19:21  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:19:21  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:19:21  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:19:21  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:19:22  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:19:22  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:19:22  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:19:26  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:19:27  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:19:39  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:19:39  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:19:39  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:19:44  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:19:44  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:19:44  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:19:45  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:19:50  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:20:04  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:20:04  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:20:04  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:20:10  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=22 | chunk_size=10
+22:20:16  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:20:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:20:16  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:20:16  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:20:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:20:16  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:20:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:20:16  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:20:16  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:20:16  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:20:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:20:16  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:20:18  WARNING   core.realtime_engine            Finnhub WebSocket error: ping/pong timed out
+22:20:18  ERROR     websocket                       ping/pong timed out - goodbye
+22:20:18  INFO      core.realtime_engine            Finnhub WebSocket closed: None
+22:20:19  INFO      core.realtime_engine            Reconnecting in 5s...
+22:20:22  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:20:22  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:20:22  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:20:23  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:20:24  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:20:24  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:20:24  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:20:25  INFO      core.realtime_engine            Finnhub WebSocket connected
+22:20:26  INFO      core.realtime_engine            Subscribed to 50 symbols
+22:20:26  INFO      __main__                        Crypto signals: 551 updated | 551 meta refreshed | total=551
+22:20:29  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:20:37  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:20:37  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:20:37  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:20:40  WARNING   core.realtime_engine            Bybit public depth WebSocket error: [WinError 10054] An existing connection was forcibly closed by the remote host
+22:20:40  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+22:20:40  INFO      core.realtime_engine            Bybit public depth WebSocket closed
+22:20:42  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10
+22:20:46  INFO      core.realtime_engine            Bybit public depth WebSocket connected | topics=120 | chunk_size=10

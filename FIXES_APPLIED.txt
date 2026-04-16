@@ -1,0 +1,59 @@
+MODEL IMPROVEMENT FIXES APPLIED
+================================
+Timestamp: 2026-04-15 18:00 UTC
+
+FILE 1: xgboost_model.py
+✓ Fix 1:  Removed duplicate ENHANCED_PARAMS block (was lines 409-430)
+✓ Fix 2:  Removed scale_pos_weight from DEFAULT_PARAMS and ENHANCED_PARAMS
+✓ Fix 3:  Added compute_sample_weight import & balanced class weights in fit()
+✓ Fix 4:  Fixed directional_accuracy metric - now measures on true directional labels only
+✓ Fix 5:  Increased CV n_estimators from 300 → 600 for better fold metrics
+✓ Fix 6:  Added balanced sample weights to Optuna fold training
+           (focal loss weighting can be added later via Optuna trial param)
+
+FILE 2: institutional_retraining.py
+✓ Fix 7:  Increased dominance_buffer from 0.20 → 0.60 for cleaner labels
+✓ Fix 8:  Replaced in-sample MAE with 3-fold cross-validated MAE
+           Added cross_val_score import for honest regressor assessment
+✓ Fix 9:  Improved regressor parameters:
+           - learning_rate: 0.045 → 0.03 (slower, better generalization)
+           - max_depth: 6 → 4 (shallower trees)
+           - max_iter: 480 → 700 (more iterations compensate)
+           - min_samples_leaf: 18 → 25 (stronger regularization)
+           - l2_regularization: 0.09 → 0.15 (increase penalty)
+           - max_bins: added 128 (smooth predictions)
+✓ Fix 10: Made MAE limits adaptive - now use 85% of null-model baseline
+           instead of hardcoded constants. Respects env override.
+✓ Fix 11: Improved regressor reliability warning message with CV_MAE and limits
+
+FILE 3: train_orchestrator.py
+✓ Fix 12: Added minimum threshold floor (max(threshold, 0.008))
+          Prevents hold band collapse in low-vol regimes
+
+NEW FEATURES ADDED
+==================
+MetaFeatureBuilder.FEATURE_COLUMNS now includes:
+  - stop_x_vol_ratio:         Stop loss × volatility ratio
+  - tp_x_momentum:            Take profit × momentum magnitude
+  - rrr_x_confidence:         Risk/reward ratio × model confidence
+  - momentum_sentiment_align: Momentum direction × sentiment Z-score
+  - conviction_under_stress:  Conviction score × volatility regime
+  - event_x_horizon:          Event strength × adaptive horizon
+  - barrier_vol_ratio:        Stop loss / realized volatility ratio
+
+EXPECTED IMPROVEMENTS
+====================
+1. Accuracy (3-class): Higher, cleaner label distribution from dominance_buffer increase
+2. Directional Accuracy: LOWER but MORE HONEST - now includes false-hold penalties
+3. Edge/Draw MAE: LOWER via CV evaluation (honest assessment) + improved regressor params
+4. Regressor Reliability: Should stay enabled longer with better features & params
+5. Fold Consistency: More stable due to balanced class weighting
+
+NEXT STEP
+=========
+Run institutional retraining to see new metrics:
+  python -m retrain_institutional_models
+or via your training pipeline.
+
+The new directional_accuracy metric will appear lower than before (was ~0.55, 
+expect ~0.45-0.50 now) but this is CORRECT - the old metric was misleading.

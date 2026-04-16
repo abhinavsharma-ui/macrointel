@@ -79,6 +79,31 @@ def _load_symbol_file(path_value: str) -> List[str]:
         return []
 
 
+_TRACE_FALLBACK_TIMESTAMP = datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _normalize_trace_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(row)
+    parsed = _parse_iso_datetime(normalized.get("timestamp"))
+    normalized["timestamp"] = (parsed or _TRACE_FALLBACK_TIMESTAMP).astimezone(timezone.utc).isoformat()
+    return normalized
+
+
 class MacroIntelligenceSystem:
     def __init__(self):
         self._signal_store: Dict = {}
@@ -643,6 +668,8 @@ class MacroIntelligenceSystem:
         self._last_runtime_state_save_ts = 0.0
         self._execution_trace: List[Dict] = []
         self._execution_reconciliation: List[Dict] = []
+        self._manual_lane_controls_lock = threading.RLock()
+        self._manual_lane_controls: Dict[str, Dict[str, Any]] = self._default_manual_lane_controls()
         self._intraday_state: Dict[str, Dict] = {}
         self._intraday_state_lock = threading.RLock()
         self._intraday_subscription_attached = False
@@ -658,6 +685,7 @@ class MacroIntelligenceSystem:
         self._components["execution_overfit"] = {}
         self._components["latest_feature_rows"] = {}
         self._components["execution_reconciliation"] = self._execution_reconciliation
+        self._components["manual_lane_controls"] = self._manual_lane_controls
         self._components["feature_matrices"] = {}
         self._components["event_feature_map"] = {}
         self._components["data_versions"] = dict(self._data_versions)
@@ -685,6 +713,22 @@ class MacroIntelligenceSystem:
             return 0.0
         return max(refresh_seconds, refresh_seconds * self._entry_stale_multiplier)
 
+    def _execution_price_for_signal(self, symbol: str, signal: Optional[Dict] = None) -> Optional[float]:
+        current_price = self._get_latest_close(symbol)
+        if current_price is not None:
+            return current_price
+        payload = signal if isinstance(signal, dict) else {}
+        intraday = payload.get("intraday_overlay", {}) if isinstance(payload.get("intraday_overlay"), dict) else {}
+        best_bid = self._safe_number(intraday.get("best_bid"), 0.0)
+        best_ask = self._safe_number(intraday.get("best_ask"), 0.0)
+        if best_bid > 0 and best_ask > 0:
+            return (best_bid + best_ask) / 2.0
+        for key in ("last_price", "mid_price", "reference_price", "price"):
+            value = self._safe_number(intraday.get(key), 0.0)
+            if value > 0:
+                return value
+        return None
+
     def _seed_data_health(self) -> Dict[str, Dict[str, Any]]:
         seeded: Dict[str, Dict[str, Any]] = {}
         for source in ("prices", "sentiment", "earnings", "altdata"):
@@ -705,12 +749,63 @@ class MacroIntelligenceSystem:
         except Exception as exc:
             logger.warning(f"{log_label} save failed: {exc}")
 
+    def _default_manual_lane_controls(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            lane: {
+                "enabled": True,
+                "stopped_at": None,
+                "reason": "",
+                "source": "default",
+            }
+            for lane in self._lane_engine_order
+        }
+
+    def _manual_lane_controls_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        with self._manual_lane_controls_lock:
+            return {lane: dict(control or {}) for lane, control in self._manual_lane_controls.items()}
+
+    def _lane_entry_enabled(self, lane: str) -> bool:
+        lane_key = str(lane or "normal").lower()
+        with self._manual_lane_controls_lock:
+            control = dict(self._manual_lane_controls.get(lane_key) or {})
+        return bool(control.get("enabled", True))
+
+    def _set_manual_lane_enabled(self, lane: str, enabled: bool, *, source: str, reason: str = "") -> Dict[str, Any]:
+        lane_key = str(lane or "").strip().lower()
+        if lane_key not in self._lane_engine_order:
+            raise ValueError(f"Unsupported lane '{lane}'")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._manual_lane_controls_lock:
+            control = dict(self._manual_lane_controls.get(lane_key) or {})
+            control["enabled"] = bool(enabled)
+            control["stopped_at"] = None if enabled else now_iso
+            control["reason"] = "" if enabled else str(reason or "manual_stop")
+            control["source"] = str(source or "operator")
+            control["updated_at"] = now_iso
+            self._manual_lane_controls[lane_key] = control
+        self._components["manual_lane_controls"] = self._manual_lane_controls
+        self._persist_runtime_state(force=True)
+        logger.info(
+            "Manual lane control: %s -> %s (%s)",
+            lane_key,
+            "enabled" if enabled else "stopped",
+            control.get("source", "operator"),
+        )
+        return {lane_key: dict(control)}
+
+    def manual_stop_lane(self, lane: str, *, source: str = "dashboard", reason: str = "manual_stop") -> Dict[str, Any]:
+        return self._set_manual_lane_enabled(lane, False, source=source, reason=reason)
+
+    def manual_resume_lane(self, lane: str, *, source: str = "dashboard") -> Dict[str, Any]:
+        return self._set_manual_lane_enabled(lane, True, source=source, reason="")
+
     def _serialize_runtime_state(self) -> Dict[str, Any]:
         return {
             "saved_at": datetime.now(timezone.utc).isoformat(),
             "signal_store": self._signal_store,
             "position_plans": self._position_plans,
             "last_trade_timestamps": self._last_trade_timestamps,
+            "manual_lane_controls": self._manual_lane_controls_snapshot(),
             "execution_trace": self._execution_trace[-self._execution_trace_limit :],
             "execution_reconciliation": self._execution_reconciliation[-self._execution_trace_limit :],
             "data_health": self._data_health,
@@ -743,7 +838,11 @@ class MacroIntelligenceSystem:
 
         self._execution_trace.clear()
         self._execution_trace.extend(
-            [dict(row) for row in (payload.get("execution_trace") or []) if isinstance(row, dict)][-self._execution_trace_limit :]
+            [
+                _normalize_trace_row(row)
+                for row in (payload.get("execution_trace") or [])
+                if isinstance(row, dict)
+            ][-self._execution_trace_limit :]
         )
         self._signal_store.clear()
         for symbol_key, signal in (payload.get("signal_store") or {}).items():
@@ -764,7 +863,11 @@ class MacroIntelligenceSystem:
             self._signal_store[symbol] = restored_signal
         self._execution_reconciliation.clear()
         self._execution_reconciliation.extend(
-            [dict(row) for row in (payload.get("execution_reconciliation") or []) if isinstance(row, dict)][-self._execution_trace_limit :]
+            [
+                _normalize_trace_row(row)
+                for row in (payload.get("execution_reconciliation") or [])
+                if isinstance(row, dict)
+            ][-self._execution_trace_limit :]
         )
         self._position_plans.clear()
         for position_key, plan in (payload.get("position_plans") or {}).items():
@@ -776,6 +879,18 @@ class MacroIntelligenceSystem:
                 self._last_trade_timestamps[str(lane_key)] = float(value)
             except Exception:
                 continue
+        restored_controls = self._default_manual_lane_controls()
+        loaded_controls = payload.get("manual_lane_controls") or {}
+        if isinstance(loaded_controls, dict):
+            for lane in self._lane_engine_order:
+                if isinstance(loaded_controls.get(lane), dict):
+                    restored_controls[lane].update(loaded_controls[lane])
+                    restored_controls[lane]["enabled"] = bool(restored_controls[lane].get("enabled", True))
+                    if restored_controls[lane]["enabled"]:
+                        restored_controls[lane]["stopped_at"] = None
+        with self._manual_lane_controls_lock:
+            self._manual_lane_controls = restored_controls
+        self._components["manual_lane_controls"] = self._manual_lane_controls
 
         restored_health = self._seed_data_health()
         loaded_health = payload.get("data_health") or {}
@@ -988,6 +1103,11 @@ class MacroIntelligenceSystem:
             or (lane_key == "day" and self._entry_require_live_price_day)
             or (lane_key == "crypto" and self._entry_require_live_price_crypto)
         )
+        # Paper trading should not hard-block crypto entries just because the
+        # live depth/tick overlay is flaky. We still keep the stricter live
+        # price requirement when live execution is enabled.
+        if lane_key == "crypto" and not self._live_execution_enabled:
+            live_required = False
         live_tick = self._latest_live_tick(symbol) if live_required else None
         live_tick_age_seconds = None
         live_source = ""
@@ -1059,13 +1179,14 @@ class MacroIntelligenceSystem:
                 "status": "ok" if not blocking_reasons else "blocked",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "entry_readiness_enabled": self._entry_readiness_enabled,
-                "new_entries_enabled": self._entry_readiness_enabled and not blocking_reasons,
+                "new_entries_enabled": (not self._entry_readiness_enabled) or not blocking_reasons,
                 "blocking_reasons": blocking_reasons,
                 "data_sources": source_snapshots,
                 "runtime": {
                     "signal_count": len(self._signal_store),
                     "open_positions": open_positions,
                     "lane_open_counts": lane_counts,
+                    "manual_lane_controls": self._manual_lane_controls_snapshot(),
                     "lane_targets": {
                         lane: int((self._lane_engine_config.get(lane, {}) or {}).get("target_open_positions", 0) or 0)
                         for lane in self._lane_engine_order
@@ -2644,8 +2765,22 @@ class MacroIntelligenceSystem:
         spread_velocity = self._safe_number(intraday.get("spread_velocity"), 0.0)
         flicker_filter_retention = self._safe_number(intraday.get("flicker_filter_retention"), 1.0)
         trade_window_active = bool(intraday.get("trade_window_active", True))
-        if bool(intraday.get("quote_only_fallback", False)):
+        quote_only_fallback = bool(intraday.get("quote_only_fallback", False))
+        if quote_only_fallback and self._live_execution_enabled:
             return {"allow": False, "reason": "crypto_quote_only_fallback", "size_multiplier": 0.0}
+        if quote_only_fallback and not self._live_execution_enabled:
+            # In paper mode, let quote-only crypto signals participate. They
+            # already carry a synthetic bid/ask spread and a conservative size.
+            return {
+                "allow": True,
+                "reason": "paper_quote_only_fallback",
+                "size_multiplier": 0.60,
+                "spread_pct": round(spread_pct, 5),
+                "signal_age_seconds": round(signal_age_seconds, 3),
+                "spread_velocity": round(spread_velocity, 8),
+                "flicker_filter_retention": round(flicker_filter_retention, 4),
+                "execution_mode": "maker",
+            }
         if spread_pct > self._crypto_scalper_max_spread_pct:
             return {"allow": False, "reason": "crypto_wide_spread", "size_multiplier": 0.0}
         if depth_age_seconds > self._crypto_scalper_max_depth_age_seconds:
@@ -5665,8 +5800,9 @@ class MacroIntelligenceSystem:
                 and float(intraday.get("confidence", 0.0) or 0.0) >= 0.42
                 and intraday.get("direction") == "buy"
             )
+            optimizer_bypass_enabled = os.getenv("OPTIMIZER_ZERO_WEIGHT_BYPASS_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
             if construction and portfolio_target_pct <= 0 and not (
-                zero_weight_fallback or qualified_edge_fallback or intraday_daytrade_override
+                zero_weight_fallback or qualified_edge_fallback or intraday_daytrade_override or optimizer_bypass_enabled
             ):
                 self._record_execution_event(
                     symbol,
@@ -5680,6 +5816,13 @@ class MacroIntelligenceSystem:
                 )
                 continue
             if meta and not meta.get("take_trade", False):
+                meta_status = self._components.get("meta_model_status") or {}
+                meta_precision = float(meta_status.get("mean_precision") or 0.0)
+                meta_edge = float(meta_status.get("mean_taken_edge_pct") or 0.0)
+                meta_degraded = meta_precision < 0.05 and meta_edge < 0.05
+                degraded_bypass_enabled = os.getenv("META_DEGRADED_BYPASS_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
+                degraded_min_conviction = max(0.5, float(os.getenv("META_DEGRADED_BYPASS_MIN_CONVICTION", "1.8")))
+
                 if (
                     lane == "crypto"
                     and self._event_window_mode
@@ -5687,6 +5830,12 @@ class MacroIntelligenceSystem:
                     and conviction >= (min_conviction * 0.90)
                 ):
                     signal["meta_override"] = "event_window_crypto"
+                elif meta_degraded and degraded_bypass_enabled and conviction >= degraded_min_conviction:
+                    signal["meta_override"] = "degraded_model_bypass"
+                    logger.debug(
+                        f"Meta degraded bypass: {symbol} lane={lane} conviction={conviction:.2f} "
+                        f"(meta precision={meta_precision:.3f} edge={meta_edge:.3f})"
+                    )
                 else:
                     self._record_execution_event(
                         symbol,
@@ -5738,10 +5887,38 @@ class MacroIntelligenceSystem:
                     },
                 )
                 continue
-
-            current_price = self._get_latest_close(symbol)
-            if current_price is None:
+            signal["manual_lane_control"] = (self._manual_lane_controls_snapshot().get(lane) or {})
+            if not self._lane_entry_enabled(lane):
+                self._record_execution_event(
+                    symbol,
+                    "buy",
+                    "skipped",
+                    "manual_lane_stopped",
+                    signal=signal,
+                    position_key=position_key,
+                    score=rank_score,
+                    conviction=conviction,
+                    details={
+                        "manual_lane_enabled": False,
+                        "manual_lane_stopped_at": signal["manual_lane_control"].get("stopped_at"),
+                    },
+                )
                 continue
+
+            current_price = self._execution_price_for_signal(symbol, signal)
+            if current_price is None:
+                self._record_execution_event(
+                    symbol,
+                    "buy",
+                    "skipped",
+                    "price_unavailable",
+                    signal=signal,
+                    position_key=position_key,
+                    score=rank_score,
+                    conviction=conviction,
+                )
+                continue
+            signal["execution_reference_price"] = round(float(current_price), 8)
             candidates_by_lane[lane].append((self._get_signal_score(signal), symbol, signal, current_price))
         return candidates_by_lane
 
@@ -5769,6 +5946,21 @@ class MacroIntelligenceSystem:
                 if new_positions >= lane_config.get("max_new_per_cycle", self._auto_trade_max_new_per_cycle):
                     self._record_execution_event(symbol, "buy", "skipped", "cycle_entry_limit", signal=signal, position_key=position_key, score=score)
                     break
+                if not self._lane_entry_enabled(lane):
+                    self._record_execution_event(
+                        symbol,
+                        "buy",
+                        "skipped",
+                        "manual_lane_stopped",
+                        signal=signal,
+                        position_key=position_key,
+                        score=score,
+                        details={
+                            "manual_lane_enabled": False,
+                            "manual_lane_stopped_at": (self._manual_lane_controls_snapshot().get(lane) or {}).get("stopped_at"),
+                        },
+                    )
+                    continue
                 if broker.has_open_position(position_key=position_key):
                     self._record_execution_event(symbol, "buy", "skipped", "already_in_portfolio", signal=signal, position_key=position_key, score=score)
                     continue
@@ -6088,8 +6280,9 @@ class MacroIntelligenceSystem:
         if not broker:
             return
         current_prices = {}
-        for position_key, _, symbol, _, _ in self._iter_open_positions(broker):
-            current_price = self._get_latest_close(symbol)
+        for position_key, _, symbol, lane, _ in self._iter_open_positions(broker):
+            current_signal = self._get_lane_signal(symbol, lane)
+            current_price = self._execution_price_for_signal(symbol, current_signal)
             if current_price is not None:
                 current_prices[position_key] = current_price
                 current_prices[symbol] = current_price
@@ -6119,6 +6312,7 @@ class MacroIntelligenceSystem:
             meta_model_status=self._components.get("meta_model_status"),
             learning_status=self._components.get("learning_status"),
             system_health=self._components.get("system_health"),
+            runtime_controller=self,
             security_suite=self._components.get("security"),
         )
         logger.info(f"\n{'=' * 52}")

@@ -223,6 +223,26 @@ class VirtualBroker:
         order.filled_at = datetime.now(timezone.utc)
         order.status = OrderStatus.FILLED
 
+        position_key = self._order_position_key(order)
+        existing_position = self.positions.get(position_key)
+        signed_qty = order.quantity if order.side == OrderSide.BUY else -order.quantity
+        closed_qty = 0.0
+        position_effect = "open"
+        if existing_position is not None:
+            existing_qty = float(getattr(existing_position, "quantity", 0.0) or 0.0)
+            if abs(existing_qty) > 1e-9:
+                if (existing_qty > 0) == (signed_qty > 0):
+                    position_effect = "increase"
+                else:
+                    closed_qty = min(abs(existing_qty), abs(signed_qty))
+                    new_qty = existing_qty + signed_qty
+                    if abs(new_qty) < 1e-9:
+                        position_effect = "close"
+                    elif abs(signed_qty) > abs(existing_qty):
+                        position_effect = "flip"
+                    else:
+                        position_effect = "reduce"
+
         realized_pnl = self._update_position(order)
         self._update_cash(order, fill_price, commission)
         self.orders.append(order)
@@ -231,7 +251,7 @@ class VirtualBroker:
         trade_record = {
             "order_id": order.order_id,
             "symbol": order.symbol,
-            "position_key": self._order_position_key(order),
+            "position_key": position_key,
             "side": order.side,
             "quantity": order.quantity,
             "requested_quantity": round(requested_quantity, 8),
@@ -248,6 +268,9 @@ class VirtualBroker:
             "signal_source": order.signal_source,
             "realized_pnl": round(realized_pnl, 4),
             "filled_at": order.filled_at.isoformat(),
+            "position_effect": position_effect,
+            "closed_qty": round(closed_qty, 8),
+            "is_closing_fill": closed_qty > 1e-9,
             "metadata": dict(order.metadata or {}),
         }
         self.trade_log.append(trade_record)
@@ -438,8 +461,28 @@ class VirtualBroker:
         for trade in self.trade_log:
             if trade.get("realized_pnl") is None or not trade.get("filled_at"):
                 continue
-            closed.append(trade)
+            if self._is_closing_trade_record(trade):
+                closed.append(trade)
         return closed
+
+    @staticmethod
+    def _is_closing_trade_record(trade: Dict) -> bool:
+        if not isinstance(trade, dict):
+            return False
+        if bool(trade.get("is_closing_fill")):
+            return True
+        closed_qty = float(trade.get("closed_qty", 0.0) or 0.0)
+        if closed_qty > 1e-9:
+            return True
+        realized_pnl = float(trade.get("realized_pnl", 0.0) or 0.0)
+        if abs(realized_pnl) > 1e-9:
+            return True
+        metadata = dict(trade.get("metadata") or {})
+        if metadata.get("exit_reason") or metadata.get("action_reason"):
+            return True
+        if str(trade.get("signal_source") or "").strip().lower() == "manual_close":
+            return True
+        return False
 
     def _session_closed_trade_log(self, closed_trade_log: Optional[List[Dict]] = None) -> List[Dict]:
         today = datetime.now(timezone.utc).date()
@@ -1027,4 +1070,3 @@ class VirtualBroker:
                 )
         except Exception as exc:
             logger.warning(f"Paper broker state load failed: {exc}")
-

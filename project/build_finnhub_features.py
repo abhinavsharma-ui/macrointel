@@ -56,15 +56,26 @@ def _load_env() -> dict:
 _ENV = _load_env()
 FINNHUB_KEY = _ENV.get("FINNHUB_API_KEYS", "").split(",")[0].strip()
 BASE_URL = "https://finnhub.io/api/v1"
-RATE_LIMIT_DELAY = 0.25  # 4 req/sec — free tier allows 60/min
+RATE_LIMIT_DELAY = 0.5  # 2 req/sec — free tier allows 60/min, being conservative
+RATE_LIMIT_SLEEP_ON_429 = 90  # Sleep longer on rate limit (was 60s, increased to 90s)
 
 
 def _normalize_daily_index(values) -> pd.DatetimeIndex:
     idx = pd.to_datetime(values, errors="coerce")
     idx = pd.DatetimeIndex(idx)
+    # Convert to UTC first if timezone-aware
     if idx.tz is not None:
-        idx = idx.tz_convert("UTC").tz_localize(None)
-    return idx.normalize()
+        idx = idx.tz_convert("UTC")
+    # ALWAYS strip timezone to avoid datetime64[ms, TZ] dtype issues
+    idx = idx.tz_localize(None)
+    # Normalize to midnight
+    idx = idx.normalize()
+    # Standardize resolution to nanoseconds (fixes pandas 2.x dtype mismatches)
+    try:
+        idx = idx.as_unit("ns")
+    except AttributeError:
+        idx = pd.DatetimeIndex(idx.astype("datetime64[ns]"))
+    return idx
 
 
 # ── API helpers ──────────────────────────────────────────────────────────────
@@ -75,10 +86,17 @@ def _get(endpoint: str, params: dict, retries: int = 3) -> Optional[dict]:
         try:
             r = requests.get(f"{BASE_URL}/{endpoint}", params=params, timeout=10)
             if r.status_code == 429:
-                logger.warning("Rate limited — sleeping 60s")
-                time.sleep(60)
+                logger.warning(f"Rate limited (429) — sleeping {RATE_LIMIT_SLEEP_ON_429}s")
+                time.sleep(RATE_LIMIT_SLEEP_ON_429)
                 continue
+            if r.status_code == 401:
+                logger.error("API key invalid (401) — check FINNHUB_API_KEYS in .env")
+                return None
+            if r.status_code == 403:
+                logger.error("API key forbidden (403) — quota may be exceeded")
+                return None
             if r.status_code != 200:
+                logger.debug(f"API returned {r.status_code} for {endpoint}")
                 return None
             return r.json()
         except Exception as e:
@@ -263,54 +281,106 @@ def enrich_symbol(symbol: str) -> bool:
         df = pd.read_parquet(parquet_path)
         df.index = _normalize_daily_index(df.index)
         df.index.name = "date"
+        # Ensure index dtype is consistent (pandas 2.x parquet may return datetime64[us])
+        if hasattr(df.index, "as_unit"):
+            df.index = df.index.as_unit("ns")
     except Exception as e:
         logger.warning(f"Failed to read {symbol}: {e}")
         return False
 
+    # Skip if already enriched with Finnhub features
+    if "analyst_consensus_score" in df.columns and "earnings_beat" in df.columns:
+        return True  # Already done, no API calls needed
+
+    # No-data cache — symbols Finnhub has no data for, never hit them again
+    NO_DATA_CACHE = FEATURES_DIR.parent / ".finnhub_no_data_cache.txt"
+    if NO_DATA_CACHE.exists():
+        if symbol in set(NO_DATA_CACHE.read_text().splitlines()):
+            return False
+
+    # Pre-check: 1 cheap call to see if Finnhub covers this symbol at all
+    profile = _get("stock/profile2", {"symbol": symbol})
+    time.sleep(RATE_LIMIT_DELAY)
+    if not profile or not profile.get("name"):
+        with open(NO_DATA_CACHE, "a") as cf:
+            cf.write(symbol + "\n")
+        return False
+
     original_cols = set(df.columns)
+    features_added = []
 
     # ── Earnings surprises ──
     earnings_df = fetch_earnings_surprises(symbol)
     if not earnings_df.empty:
         # Reindex to trading days and forward-fill (signal persists until next quarter)
         earnings_df.index = _normalize_daily_index(earnings_df.index)
-        earnings_df = earnings_df.reindex(df.index, method="ffill")
+        earnings_df = earnings_df.reindex(df.index).ffill()
         for col in earnings_df.columns:
             df[col] = earnings_df[col]
+        features_added.append("earnings")
+    else:
+        logger.debug(f"{symbol}: earnings API returned empty")
 
     # ── Analyst recommendations ──
     rec_df = fetch_analyst_recommendations(symbol)
     if not rec_df.empty:
         rec_df.index = _normalize_daily_index(rec_df.index)
-        rec_df = rec_df.reindex(df.index, method="ffill")
+        rec_df = rec_df.reindex(df.index).ffill()
         for col in rec_df.columns:
             df[col] = rec_df[col]
+        features_added.append("analyst_recs")
+    else:
+        logger.debug(f"{symbol}: analyst API returned empty")
 
     # ── News sentiment ──
     news_df = fetch_news_sentiment(symbol)
     if not news_df.empty:
         news_df.index = _normalize_daily_index(news_df.index)
-        news_df = news_df.reindex(df.index, method="ffill")
+        news_df = news_df.reindex(df.index).ffill()
         for col in news_df.columns:
             df[col] = news_df[col]
+        features_added.append("news_sentiment")
+    else:
+        logger.debug(f"{symbol}: news API returned empty")
 
     # ── Scalar fundamentals (broadcast as constant columns) ──
     fundamentals = fetch_basic_financials(symbol)
+    fundamental_count = 0
     for k, v in fundamentals.items():
         if v is not None:
             try:
                 df[k] = float(v)
+                fundamental_count += 1
             except (TypeError, ValueError):
                 pass
+    if fundamental_count > 0:
+        features_added.append(f"fundamentals({fundamental_count})")
+    else:
+        logger.debug(f"{symbol}: fundamentals API returned empty")
 
     new_cols = set(df.columns) - original_cols
     if not new_cols:
-        logger.warning(f"{symbol}: no new features added (API may have returned empty)")
+        NO_DATA_CACHE = FEATURES_DIR.parent / ".finnhub_no_data_cache.txt"
+        with open(NO_DATA_CACHE, "a") as cf:
+            cf.write(symbol + "\n")
         return False
 
     # Save enriched parquet
     df.to_parquet(parquet_path)
     logger.info(f"{symbol}: added {len(new_cols)} Finnhub features — {sorted(new_cols)}")
+    return True
+
+
+def _validate_api_key() -> bool:
+    """Quick validation that API key is working."""
+    test = _get("quote", {"symbol": "AAPL"})
+    if test is None:
+        logger.error("API key validation failed — API returned empty/error. Check key is valid.")
+        return False
+    if "data" not in test and "c" not in test:  # quote endpoint returns 'c' for last price
+        logger.error("API key validation failed — unexpected response format")
+        return False
+    logger.info("API key validated successfully")
     return True
 
 
@@ -325,13 +395,18 @@ def main():
         logger.error("FINNHUB_API_KEYS not set in project/.env")
         return 1
 
+    logger.info(f"API key: {FINNHUB_KEY[:8]}...")
+    if not _validate_api_key():
+        return 1
+
+    time.sleep(2)  # Wait after validation before main run
+
     if args.symbols:
         symbols = args.symbols
     else:
         symbols = [p.stem for p in sorted(FEATURES_DIR.glob("*.parquet"))]
 
     logger.info(f"Enriching {len(symbols)} symbols with Finnhub features")
-    logger.info(f"API key: {FINNHUB_KEY[:8]}...")
 
     success = 0
     failed = 0

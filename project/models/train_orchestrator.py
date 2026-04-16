@@ -58,6 +58,9 @@ def build_labels(feature_matrix: pd.DataFrame, horizon: int = 5) -> pd.Series:
     fwd_ret = close.pct_change(horizon).shift(-horizon)
     daily_std = close.pct_change().std()
     threshold = daily_std * 0.5 * (horizon ** 0.5)
+    # Minimum threshold floor: in low-vol regimes, ensure hold band doesn't collapse
+    # This prevents creating nearly 50/50 buy/sell splits with almost no holds
+    threshold = max(threshold, 0.008)
 
     labels = pd.cut(
         fwd_ret,

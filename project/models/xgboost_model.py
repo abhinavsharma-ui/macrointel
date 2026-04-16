@@ -32,6 +32,7 @@ import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.utils.class_weight import compute_sample_weight
 
 from models.calibration import MultiClassPlattCalibrator
 
@@ -349,7 +350,7 @@ def add_regime_conditional_features(X: pd.DataFrame) -> pd.DataFrame:
     return X.fillna(0)
 
 
-def _fit_xgb_classifier(model, X, y, eval_set=None, early_stopping_rounds: Optional[int] = None, verbose=False):
+def _fit_xgb_classifier(model, X, y, eval_set=None, early_stopping_rounds: Optional[int] = None, verbose=False, sample_weight=None):
     """
     XGBoost's sklearn API changed in v3 and no longer accepts
     early_stopping_rounds in fit(). This helper supports both APIs.
@@ -358,6 +359,9 @@ def _fit_xgb_classifier(model, X, y, eval_set=None, early_stopping_rounds: Optio
         "eval_set": eval_set,
         "verbose": verbose,
     }
+    if sample_weight is not None:
+        fit_kwargs["sample_weight"] = sample_weight
+
     fit_sig = inspect.signature(model.fit)
     if "early_stopping_rounds" in fit_sig.parameters:
         fit_kwargs["early_stopping_rounds"] = early_stopping_rounds if eval_set else None
@@ -401,7 +405,6 @@ class XGBoostSignalModel:
         "eval_metric":     "mlogloss",
         "random_state":    42,
         "n_jobs":         DEFAULT_N_JOBS,
-        "scale_pos_weight": 1.2,
         "booster":        "gbtree",
         "tree_method":    "hist",
     }
@@ -424,32 +427,8 @@ class XGBoostSignalModel:
         "eval_metric":    "mlogloss",
         "random_state":   42,
         "n_jobs":       DEFAULT_N_JOBS,
-        "scale_pos_weight": 1.3,
         "booster":       "gbtree",
         "num_class":    3,
-    }
-
-    ENHANCED_PARAMS = {
-        "n_estimators":       1500,
-        "max_depth":          7,
-        "learning_rate":    0.008,
-        "eta":             0.008,
-        "subsample":        0.70,
-        "colsample_bytree":  0.60,
-        "colsample_bylevel": 0.60,
-        "reg_alpha":        0.20,
-        "reg_lambda":       2.0,
-        "min_child_weight": 20,
-        "gamma":           0.20,
-        "max_delta_step": 3,
-        "tree_method":      "hist",
-        "objective":       "multi:softprob",
-        "eval_metric":    "mlogloss",
-        "random_state":   42,
-        "n_jobs":         DEFAULT_N_JOBS,
-        "scale_pos_weight": 1.3,
-        "booster":        "gbtree",
-        "num_class":     3,
     }
 
     def __init__(self, params: Optional[Dict] = None):
@@ -518,7 +497,10 @@ class XGBoostSignalModel:
 
         # Train - clean X before passing
         X_clean = X_sel.replace([np.inf, -np.inf], np.nan).ffill().fillna(0).clip(-1e10, 1e10)
-        
+
+        # Compute balanced class weights for multiclass
+        sample_weight = compute_sample_weight(class_weight="balanced", y=y)
+
         # Train
         _fit_xgb_classifier(
             self.model,
@@ -527,6 +509,7 @@ class XGBoostSignalModel:
             eval_set=fit_eval,
             early_stopping_rounds=early_stopping_rounds if fit_eval else None,
             verbose=verbose > 0,
+            sample_weight=sample_weight,
         )
         self._is_fitted = True
 
@@ -632,18 +615,22 @@ class XGBoostSignalModel:
             X_train_sel = sel.fit_transform(X_train, y_train)
             X_test_sel  = sel.transform(X_test)
 
-            fold_model = xgb.XGBClassifier(**{**self.params, "n_estimators": 300})
-            fold_model.fit(X_train_sel.fillna(0), y_train, verbose=False)
+            fold_model = xgb.XGBClassifier(**{**self.params, "n_estimators": 600})
+
+            # Compute balanced class weights for this fold
+            fold_sample_weight = compute_sample_weight(class_weight="balanced", y=y_train)
+            fold_model.fit(X_train_sel.fillna(0), y_train, sample_weight=fold_sample_weight, verbose=False)
 
             y_pred = fold_model.predict(X_test_sel.fillna(0))
             fold_acc = accuracy_score(y_test, y_pred)
             fold_f1  = f1_score(y_test, y_pred, average="weighted", zero_division=0)
 
-            # Direction accuracy: did we get buy/sell right (ignoring hold)?
-            directional_mask = (y_test != 1) & (y_pred != 1)
+            # Direction accuracy: measure on true directional events (y_test != 1)
+            # This includes cases where model predicted hold — a false-hold error
+            directional_mask = (y_test != 1)
             dir_acc = (
                 accuracy_score(y_test[directional_mask], y_pred[directional_mask])
-                if directional_mask.any() else 0
+                if directional_mask.any() else 0.0
             )
 
             fold_metrics.append({
@@ -751,6 +738,9 @@ class XGBoostOptimizer:
                 X_tr, X_vl = X_aug.iloc[train_idx], X_aug.iloc[val_idx]
                 y_tr, y_vl = y.iloc[train_idx], y.iloc[val_idx]
 
+                # Compute balanced class weights for this fold
+                trial_sample_weight = compute_sample_weight(class_weight="balanced", y=y_tr)
+
                 model = xgb.XGBClassifier(**params)
                 _fit_xgb_classifier(
                     model,
@@ -759,13 +749,15 @@ class XGBoostOptimizer:
                     eval_set=[(X_vl.fillna(0), y_vl)],
                     early_stopping_rounds=30,
                     verbose=False,
+                    sample_weight=trial_sample_weight,
                 )
                 y_pred = model.predict(X_vl.fillna(0))
-                directional_mask = (y_vl != 1) & (y_pred != 1)
+                # Direction accuracy on true directional events (y_vl != 1)
+                directional_mask = (y_vl != 1)
                 if directional_mask.any():
                     dir_acc = accuracy_score(y_vl[directional_mask], y_pred[directional_mask])
                 else:
-                    dir_acc = 0
+                    dir_acc = 0.0
                 scores.append(dir_acc)
 
                 # Optuna pruning

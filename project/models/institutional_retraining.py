@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.metrics import accuracy_score, precision_score, recall_score
+from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import StandardScaler
 from dotenv import load_dotenv
 
@@ -189,7 +190,7 @@ def _triple_barrier_direction_label(frame: pd.DataFrame, idx: int, base_horizon_
 
     long_edge = float(long_stats["edge_pct"])
     short_edge = float(short_stats["edge_pct"])
-    dominance_buffer = 0.20
+    dominance_buffer = 0.60
     if long_edge > max(abs(short_edge), dominance_buffer):
         return 2
     if short_edge > max(abs(long_edge), dominance_buffer):
@@ -207,6 +208,9 @@ class DirectionalMetaArtifacts:
     min_expected_edge_pct: float
     min_edge_ratio: float
     direction: str
+    # True when edge/drawdown regressors passed the reliability check.
+    # False means the deployment bundle fell back to precision-only gating.
+    regressors_reliable: bool = True
 
 
 class MetaFeatureBuilder:
@@ -279,6 +283,14 @@ class MetaFeatureBuilder:
         "meta_month_cos",
         "meta_dow_sin",
         "meta_dow_cos",
+        # Regressor-oriented interaction features for better edge/drawdown prediction
+        "stop_x_vol_ratio",
+        "tp_x_momentum",
+        "rrr_x_confidence",
+        "momentum_sentiment_align",
+        "conviction_under_stress",
+        "event_x_horizon",
+        "barrier_vol_ratio",
     ]
 
     FACTOR_MAP = {
@@ -453,6 +465,33 @@ class MetaFeatureBuilder:
             ):
                 payload[col] = 0.0
 
+        # Compute regressor-oriented interaction features
+        # These features improve edge and drawdown regression accuracy
+        if feature_row is not None:
+            stop_loss = payload.get("stop_loss_pct", 2.0)
+            vol_ratio = payload.get("vol_regime_ratio", 0.0)
+            tp = payload.get("take_profit_pct", 5.0)
+            mom = payload.get("momentum_20d", 0.0)
+            rrr = payload.get("risk_reward_ratio", 2.0)
+            conf = payload.get("confidence", 0.0)
+            sent_z = payload.get("sentiment_zscore", 0.0)
+            conv = payload.get("conviction_score", 0.0)
+            event_str = payload.get("event_move_strength", 0.0)
+            horizon = payload.get("adaptive_horizon_multiplier", 1.0)
+            realized_vol = payload.get("realized_vol_21d", 0.02)
+
+            payload["stop_x_vol_ratio"] = float(stop_loss * max(vol_ratio, 0.1))
+            payload["tp_x_momentum"] = float(tp * abs(mom))
+            payload["rrr_x_confidence"] = float(rrr * conf)
+            payload["momentum_sentiment_align"] = float(np.sign(mom) * sent_z) if mom != 0 else 0.0
+            payload["conviction_under_stress"] = float(conv * max(vol_ratio, 0.1))
+            payload["event_x_horizon"] = float(event_str * horizon)
+            payload["barrier_vol_ratio"] = float(stop_loss / max(realized_vol * 100, 0.1))
+        else:
+            for col in ("stop_x_vol_ratio", "tp_x_momentum", "rrr_x_confidence", "momentum_sentiment_align",
+                       "conviction_under_stress", "event_x_horizon", "barrier_vol_ratio"):
+                payload[col] = 0.0
+
         for col in cls.FEATURE_COLUMNS:
             payload.setdefault(col, 0.0)
         return payload
@@ -606,26 +645,60 @@ class TrainedMetaModel:
                     decision_threshold=float(
                         os.getenv(
                             "META_MODEL_RUNTIME_THRESHOLD",
-                            str(rules.get("decision_threshold", 0.52) or 0.52),
+                            str(
+                                bundle_payload.get(
+                                    "decision_threshold",
+                                    rules.get("decision_threshold", 0.52) or 0.52,
+                                )
+                            ),
                         )
                     ),
                     min_expected_edge_pct=float(
                         os.getenv(
                             "META_MODEL_RUNTIME_MIN_EDGE_PCT",
-                            str(rules.get("min_expected_edge_pct", 0.18) or 0.18),
+                            str(
+                                bundle_payload.get(
+                                    "min_expected_edge_pct",
+                                    rules.get("min_expected_edge_pct", 0.18) or 0.18,
+                                )
+                            ),
                         )
                     ),
                     min_edge_ratio=float(
                         os.getenv(
                             "META_MODEL_RUNTIME_MIN_EDGE_RATIO",
-                            str(rules.get("min_edge_ratio", 0.08) or 0.08),
+                            str(
+                                bundle_payload.get(
+                                    "min_edge_ratio",
+                                    rules.get("min_edge_ratio", 0.08) or 0.08,
+                                )
+                            ),
                         )
                     ),
                     direction=direction,
+                    # Restore reliability flag persisted at training time; default
+                    # to True for bundles saved before this field was introduced.
+                    regressors_reliable=bool(bundle_payload.get("regressors_reliable", True)),
                 )
             if not resolved_bundles:
                 return None
             return cls(resolved_bundles, feature_columns)
+
+        def _log_loaded_bundle_state(model: "TrainedMetaModel", source_label: str) -> None:
+            try:
+                for bundle_direction, bundle in sorted(model.bundles.items()):
+                    logger.info(
+                        "Meta model load [%s] %s bundle: regressors_reliable=%s "
+                        "decision_threshold=%.4f min_expected_edge_pct=%.4f min_edge_ratio=%.4f",
+                        source_label,
+                        bundle_direction,
+                        getattr(bundle, "regressors_reliable", True),
+                        float(getattr(bundle, "decision_threshold", 0.0) or 0.0),
+                        float(getattr(bundle, "min_expected_edge_pct", 0.0) or 0.0),
+                        float(getattr(bundle, "min_edge_ratio", 0.0) or 0.0),
+                    )
+            except Exception as exc:
+                logger.debug("Meta model bundle-state logging failed (%s): %s", source_label, exc)
 
         try:
             force_directional = os.getenv("META_MODEL_FORCE_LOAD_DIRECTIONAL", "0").strip().lower() in {
@@ -644,6 +717,7 @@ class TrainedMetaModel:
             if report and cls._report_is_acceptable(report):
                 directional_model = _directional_model_from(report, META_DIRECTIONAL_PATH)
                 if directional_model is not None:
+                    _log_loaded_bundle_state(directional_model, "current")
                     return directional_model
             elif report and force_directional and META_DIRECTIONAL_PATH.exists():
                 directional_model = _directional_model_from(report, META_DIRECTIONAL_PATH)
@@ -652,6 +726,7 @@ class TrainedMetaModel:
                         "Meta model: loading directional checkpoint despite failed walk-forward gate "
                         "(META_MODEL_FORCE_LOAD_DIRECTIONAL=1). Paper/live outcomes may be weak."
                     )
+                    _log_loaded_bundle_state(directional_model, "current_forced")
                     return directional_model
             elif report:
                 _log_rejected_report(report, "current")
@@ -661,6 +736,7 @@ class TrainedMetaModel:
                 previous_model = _directional_model_from(previous_report, META_DIRECTIONAL_PREVIOUS_PATH)
                 if previous_model is not None:
                     logger.info("Meta model load: using previous validated directional checkpoint")
+                    _log_loaded_bundle_state(previous_model, "previous")
                     return previous_model
             elif previous_report and force_directional and META_DIRECTIONAL_PREVIOUS_PATH.exists():
                 previous_model = _directional_model_from(previous_report, META_DIRECTIONAL_PREVIOUS_PATH)
@@ -669,6 +745,7 @@ class TrainedMetaModel:
                         "Meta model: loading previous directional checkpoint despite failed gate "
                         "(META_MODEL_FORCE_LOAD_DIRECTIONAL=1)."
                     )
+                    _log_loaded_bundle_state(previous_model, "previous_forced")
                     return previous_model
             elif previous_report:
                 _log_rejected_report(previous_report, "previous")
@@ -707,7 +784,9 @@ class TrainedMetaModel:
                 ),
                 direction="legacy",
             )
-            return cls({"long": legacy_bundle, "short": legacy_bundle}, feature_columns)
+            legacy_model = cls({"long": legacy_bundle, "short": legacy_bundle}, feature_columns)
+            _log_loaded_bundle_state(legacy_model, "legacy")
+            return legacy_model
         except Exception as exc:
             logger.warning(f"Meta model load failed: {exc}")
             return None
@@ -720,6 +799,16 @@ class TrainedMetaModel:
         take_probability = float(bundle.calibrator.transform(np.array([raw_take_probability]))[0]) if bundle.calibrator else raw_take_probability
         expected_edge_pct = float(bundle.edge_model.predict(frame)[0])
         expected_drawdown_pct = float(abs(bundle.drawdown_model.predict(frame)[0]))
+
+        # When the bundle is in precision-only fallback mode (regressors were not
+        # reliable enough during training), the edge_model output is untrustworthy.
+        # Clamp it to a small positive floor so it cannot drag the blended
+        # expected_edge_pct below zero in _evaluate_one and silently reject every
+        # live signal through the "negative_expected_edge" gate.
+        regressors_reliable = getattr(bundle, "regressors_reliable", True)
+        if not regressors_reliable:
+            expected_edge_pct = max(expected_edge_pct, 0.10)
+
         return {
             "take_probability": round(take_probability, 4),
             "expected_edge_pct": round(expected_edge_pct, 3),
@@ -728,6 +817,7 @@ class TrainedMetaModel:
             "min_expected_edge_pct": round(float(bundle.min_expected_edge_pct), 4),
             "min_edge_ratio": round(float(bundle.min_edge_ratio), 4),
             "direction_bundle": direction,
+            "regressors_reliable": regressors_reliable,
         }
 
 
@@ -1029,39 +1119,78 @@ class MetaModelTrainer:
             random_state=42,
             class_weight="balanced",
         )
+        # Improved regressor parameters: shallower, more regularized, better generalization
         edge_model = HistGradientBoostingRegressor(
-            learning_rate=0.045,
-            max_depth=6,
-            max_iter=480,
-            min_samples_leaf=18,
-            l2_regularization=0.09,
+            learning_rate=0.03,
+            max_depth=4,
+            max_iter=700,
+            min_samples_leaf=25,
+            l2_regularization=0.15,
+            max_bins=128,
             random_state=42,
         )
         drawdown_model = HistGradientBoostingRegressor(
-            learning_rate=0.045,
-            max_depth=6,
-            max_iter=480,
-            min_samples_leaf=18,
-            l2_regularization=0.09,
+            learning_rate=0.03,
+            max_depth=4,
+            max_iter=700,
+            min_samples_leaf=25,
+            l2_regularization=0.15,
+            max_bins=128,
             random_state=42,
             loss="absolute_error",
         )
 
         classifier.fit(X_core, y_core, sample_weight=core_weight)
-        edge_model.fit(X, y_edge, sample_weight=sample_weight)
-        drawdown_model.fit(X, y_drawdown, sample_weight=sample_weight)
+        # Regressors are NOT sample-weighted: the edge/drawdown targets already
+        # have a built-in magnitude signal (barrier values), and weighting by
+        # |edge| causes the model to predict high-magnitude values for all samples,
+        # making the unweighted MAE (used for reliability checks) much worse than
+        # a null predictor. The classifier continues to use sample_weight.
+        edge_model.fit(X, y_edge)
+        drawdown_model.fit(X, y_drawdown)
 
-        # --- Regressor quality check: MAE on training set ---
-        edge_mae = float(np.mean(np.abs(edge_model.predict(X) - y_edge.to_numpy())))
-        draw_mae = float(np.mean(np.abs(drawdown_model.predict(X) - y_drawdown.to_numpy())))
-        edge_mae_limit = float(os.getenv("META_MODEL_EDGE_MAE_LIMIT", "2.5"))
-        draw_mae_limit = float(os.getenv("META_MODEL_DRAW_MAE_LIMIT", "3.0"))
-        regressors_reliable = (edge_mae <= edge_mae_limit and draw_mae <= draw_mae_limit)
+        # --- Regressor quality check: use cross-validated MAE vs null-model baseline ---
+        # In-sample MAE is always optimistic. Use 3-fold CV for honest assessment.
+        edge_cv_mae = -cross_val_score(
+            HistGradientBoostingRegressor(
+                learning_rate=0.03, max_depth=4, max_iter=700,
+                min_samples_leaf=25, l2_regularization=0.15, max_bins=128, random_state=42
+            ),
+            X, y_edge, cv=3, scoring="neg_mean_absolute_error"
+        ).mean()
+        draw_cv_mae = -cross_val_score(
+            HistGradientBoostingRegressor(
+                learning_rate=0.03, max_depth=4, max_iter=700,
+                min_samples_leaf=25, l2_regularization=0.15, max_bins=128, random_state=42,
+                loss="absolute_error"
+            ),
+            X, y_drawdown, cv=3, scoring="neg_mean_absolute_error"
+        ).mean()
+
+        # Null-model MAE (predict the mean): if our model can't beat this, it adds
+        # no value. Use the null MAE as the reliability ceiling rather than a
+        # fixed constant that ignores the actual data distribution.
+        null_edge_mae = float(np.mean(np.abs(y_edge.to_numpy() - float(y_edge.mean()))))
+        null_draw_mae = float(np.mean(np.abs(y_drawdown.to_numpy() - float(y_drawdown.mean()))))
+        env_edge_limit = float(os.getenv("META_MODEL_EDGE_MAE_LIMIT", "0"))
+        env_draw_limit = float(os.getenv("META_MODEL_DRAW_MAE_LIMIT", "0"))
+        skill_threshold = float(os.getenv("META_MODEL_SKILL_THRESHOLD", "0.85"))
+        # Default limit: model must beat null-model by at least 15% (skill_threshold=0.85)
+        # to be considered reliable. Allow env override for specific limits.
+        edge_mae_limit = env_edge_limit if env_edge_limit > 0 else null_edge_mae * skill_threshold
+        draw_mae_limit = env_draw_limit if env_draw_limit > 0 else null_draw_mae * skill_threshold
+        regressors_reliable = (edge_cv_mae <= edge_mae_limit and draw_cv_mae <= draw_mae_limit)
         if not regressors_reliable:
             logger.warning(
-                "Regressor drift detected (%s): edge_MAE=%.3f (limit %.1f), "
-                "draw_MAE=%.3f (limit %.1f). Falling back to precision-only gate.",
-                direction, edge_mae, edge_mae_limit, draw_mae, draw_mae_limit,
+                "Regressor drift detected (%s): edge_CV_MAE=%.3f (null %.3f, limit %.3f), "
+                "draw_CV_MAE=%.3f (null %.3f, limit %.3f). Falling back to precision-only gate.",
+                direction, edge_cv_mae, null_edge_mae, edge_mae_limit, draw_cv_mae, null_draw_mae, draw_mae_limit,
+            )
+        else:
+            logger.info(
+                "Regressor quality OK (%s): edge_MAE=%.3f (null %.3f), "
+                "draw_MAE=%.3f (null %.3f).",
+                direction, edge_mae, null_edge_mae, draw_mae, null_draw_mae,
             )
 
         if use_cv_calibration:
@@ -1100,10 +1229,22 @@ class MetaModelTrainer:
         drawdown_pred = np.abs(drawdown_model.predict(X))
         decision_rule = self._select_decision_rule(train_df, calibrated_take_prob, edge_pred, drawdown_pred)
         # If regressors are unreliable, disable edge/ratio gates (precision-only mode)
+        # and reset the decision threshold to the base take-threshold so the
+        # over-optimised precision-only threshold doesn't block all live signals.
         if not regressors_reliable:
             decision_rule["min_expected_edge_pct"] = 0.0
             decision_rule["min_edge_ratio"] = 0.0
-            logger.info("Regressor fallback (%s): edge/ratio gates disabled, precision-only gate active.", direction)
+            # Cap threshold at take_threshold so precision-only mode doesn't
+            # produce an impossibly high bar that rejects every live signal.
+            decision_rule["decision_threshold"] = min(
+                float(decision_rule["decision_threshold"]),
+                float(self.take_threshold),
+            )
+            logger.info(
+                "Regressor fallback (%s): edge/ratio gates disabled, "
+                "decision_threshold capped at %.3f (precision-only gate active).",
+                direction, decision_rule["decision_threshold"],
+            )
         return DirectionalMetaArtifacts(
             classifier=classifier,
             calibrator=calibrator,
@@ -1113,6 +1254,7 @@ class MetaModelTrainer:
             min_expected_edge_pct=float(decision_rule["min_expected_edge_pct"]),
             min_edge_ratio=float(decision_rule["min_edge_ratio"]),
             direction=direction,
+            regressors_reliable=regressors_reliable,
         )
 
     def build_training_dataset(self, feature_matrices: Dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -1363,35 +1505,6 @@ class MetaModelTrainer:
         if not bundles:
             raise ValueError("Failed to train any directional meta bundles")
 
-        if META_DIRECTIONAL_PATH.exists():
-            try:
-                META_DIRECTIONAL_PREVIOUS_PATH.write_bytes(META_DIRECTIONAL_PATH.read_bytes())
-            except Exception:
-                pass
-        if META_REPORT_PATH.exists():
-            try:
-                META_REPORT_PREVIOUS_PATH.write_bytes(META_REPORT_PATH.read_bytes())
-            except Exception:
-                pass
-
-        joblib.dump(
-            {
-                "bundles": {
-                    direction: {
-                        "classifier": bundle.classifier,
-                        "calibrator": bundle.calibrator,
-                        "edge_model": bundle.edge_model,
-                        "drawdown_model": bundle.drawdown_model,
-                    }
-                    for direction, bundle in bundles.items()
-                },
-                "feature_columns": MetaFeatureBuilder.FEATURE_COLUMNS,
-            },
-            META_DIRECTIONAL_PATH,
-        )
-        with open(META_FEATURES_PATH, "wb") as f:
-            pickle.dump(MetaFeatureBuilder.FEATURE_COLUMNS, f)
-
         report = {
             "status": "ok",
             "rows": int(len(dataset)),
@@ -1412,7 +1525,85 @@ class MetaModelTrainer:
                 "warmup_rows_env": os.getenv("META_MODEL_WARMUP_ROWS", ""),
             },
         }
-        META_REPORT_PATH.write_text(json.dumps(report, indent=2))
+
+        def _report_score(candidate_report: Dict) -> float:
+            """Collapse walk-forward quality to a single comparison score."""
+            summary = (candidate_report.get("walk_forward") or {}).get("summary") or {}
+            precision = float(summary.get("mean_precision") or 0.0)
+            edge = float(summary.get("mean_taken_edge_pct") or 0.0)
+            hit_rate = float(summary.get("mean_taken_hit_rate_pct") or 0.0)
+            return precision * 0.5 + (edge / 2.0) * 0.3 + (hit_rate / 100.0) * 0.2
+
+        new_passes = TrainedMetaModel._report_is_acceptable(report)
+        new_score = _report_score(report)
+
+        existing_score = 0.0
+        if META_REPORT_PATH.exists():
+            try:
+                existing_report = json.loads(META_REPORT_PATH.read_text(encoding="utf-8"))
+                if TrainedMetaModel._report_is_acceptable(existing_report):
+                    existing_score = _report_score(existing_report)
+            except Exception:
+                pass
+
+        if not new_passes:
+            logger.warning(
+                "Meta model quality gate FAILED - new model does not meet minimum thresholds "
+                "(score=%.4f). Keeping existing checkpoint (score=%.4f). New report NOT saved.",
+                new_score,
+                existing_score,
+            )
+            return report
+
+        if new_score < existing_score * 0.95:
+            logger.warning(
+                "Meta model quality gate REGRESSION - new score %.4f is worse than existing %.4f. "
+                "Keeping existing checkpoint. New report NOT saved.",
+                new_score,
+                existing_score,
+            )
+            return report
+
+        logger.info(
+            "Meta model quality gate PASSED - new score %.4f vs existing %.4f. Saving new checkpoint.",
+            new_score,
+            existing_score,
+        )
+
+        if META_DIRECTIONAL_PATH.exists():
+            try:
+                META_DIRECTIONAL_PREVIOUS_PATH.write_bytes(META_DIRECTIONAL_PATH.read_bytes())
+            except Exception:
+                pass
+        if META_REPORT_PATH.exists():
+            try:
+                META_REPORT_PREVIOUS_PATH.write_bytes(META_REPORT_PATH.read_bytes())
+            except Exception:
+                pass
+
+        joblib.dump(
+            {
+                "bundles": {
+                    direction: {
+                        "classifier": bundle.classifier,
+                        "calibrator": bundle.calibrator,
+                        "edge_model": bundle.edge_model,
+                        "drawdown_model": bundle.drawdown_model,
+                        "decision_threshold": float(bundle.decision_threshold),
+                        "min_expected_edge_pct": float(bundle.min_expected_edge_pct),
+                        "min_edge_ratio": float(bundle.min_edge_ratio),
+                        # Persist so predict_from_dict knows whether to clamp edge
+                        "regressors_reliable": getattr(bundle, "regressors_reliable", True),
+                    }
+                    for direction, bundle in bundles.items()
+                },
+                "feature_columns": MetaFeatureBuilder.FEATURE_COLUMNS,
+            },
+            META_DIRECTIONAL_PATH,
+        )
+        with open(META_FEATURES_PATH, "wb") as f:
+            pickle.dump(MetaFeatureBuilder.FEATURE_COLUMNS, f)
+        META_REPORT_PATH.write_text(json.dumps(report, indent=2), encoding="utf-8")
         logger.info(
             "Meta model trained: "
             f"{report['rows']} rows | {report['positive_labels']} positive labels | "

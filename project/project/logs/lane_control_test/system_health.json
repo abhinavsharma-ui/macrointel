@@ -1,0 +1,93 @@
+{
+  "status": "blocked",
+  "updated_at": "2026-04-15T12:52:46.400040+00:00",
+  "entry_readiness_enabled": true,
+  "new_entries_enabled": false,
+  "blocking_reasons": [
+    "price_data_stale",
+    "sentiment_stale",
+    "earnings_stale"
+  ],
+  "data_sources": {
+    "prices": {
+      "updated_at": null,
+      "updated_at_ts": 0.0,
+      "refresh_seconds": 120,
+      "stale_after_seconds": 240.0,
+      "status": "missing",
+      "source": "prices",
+      "age_seconds": null
+    },
+    "sentiment": {
+      "updated_at": null,
+      "updated_at_ts": 0.0,
+      "refresh_seconds": 900,
+      "stale_after_seconds": 1800.0,
+      "status": "missing",
+      "source": "sentiment",
+      "age_seconds": null
+    },
+    "earnings": {
+      "updated_at": null,
+      "updated_at_ts": 0.0,
+      "refresh_seconds": 7200,
+      "stale_after_seconds": 14400.0,
+      "status": "missing",
+      "source": "earnings",
+      "age_seconds": null
+    },
+    "altdata": {
+      "updated_at": null,
+      "updated_at_ts": 0.0,
+      "refresh_seconds": 1800,
+      "stale_after_seconds": 3600.0,
+      "status": "missing",
+      "source": "altdata",
+      "age_seconds": null
+    }
+  },
+  "runtime": {
+    "signal_count": 0,
+    "open_positions": 0,
+    "lane_open_counts": {
+      "crypto": 0,
+      "day": 0,
+      "normal": 0
+    },
+    "manual_lane_controls": {
+      "crypto": {
+        "enabled": false,
+        "stopped_at": "2026-04-15T12:52:46.399861+00:00",
+        "reason": "manual_stop",
+        "source": "test",
+        "updated_at": "2026-04-15T12:52:46.399861+00:00"
+      },
+      "day": {
+        "enabled": true,
+        "stopped_at": null,
+        "reason": "",
+        "source": "default"
+      },
+      "normal": {
+        "enabled": true,
+        "stopped_at": null,
+        "reason": "",
+        "source": "default"
+      }
+    },
+    "lane_targets": {
+      "crypto": 150,
+      "day": 150,
+      "normal": 150
+    },
+    "execution_trace_count": 0,
+    "execution_reconciliation_count": 0,
+    "tick_count": 0,
+    "active_symbols": 0,
+    "universe_sync": {
+      "status": "error"
+    },
+    "pipeline_selection": {},
+    "data_pipeline": {}
+  }
+}

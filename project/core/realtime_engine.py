@@ -991,7 +991,11 @@ class FinnhubWebSocket:
                     on_error=self._on_error,
                     on_close=self._on_close,
                 )
-                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+                # Disable library-level WebSocket ping/pong — Finnhub's server
+                # sends its own keepalives, and the 10-second PONG timeout causes
+                # spurious disconnects under CPU load (e.g. during retraining).
+                # The reconnect loop below handles any genuine dead-connection.
+                self.ws.run_forever(ping_interval=0, ping_timeout=None)
             except Exception as e:
                 logger.error(f"Finnhub WebSocket error: {e}")
 

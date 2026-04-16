@@ -57,6 +57,9 @@ _dashboard_price_limit = max(0, int(os.getenv("DASHBOARD_PRICE_LIMIT", "500")))
 _dashboard_positions_limit = max(1, int(os.getenv("DASHBOARD_POSITIONS_LIMIT", "500")))
 _dashboard_push_interval = max(1.0, float(os.getenv("DASHBOARD_PUSH_INTERVAL_SECONDS", "2.0")))
 _dashboard_execution_trace_limit = max(25, int(os.getenv("DASHBOARD_EXECUTION_TRACE_LIMIT", "300")))
+_dashboard_trade_log_limit = max(25, int(os.getenv("DASHBOARD_TRADE_LOG_LIMIT", "250")))
+_dashboard_win_rate_window = max(5, int(os.getenv("PAPER_WIN_RATE_WINDOW_TRADES", "50")))
+_dashboard_win_rate_min_trades = max(1, int(os.getenv("PAPER_WIN_RATE_MIN_TRADES", "5")))
 _dashboard_target_open_positions = max(
     1,
     int(os.getenv("DAY_TRADE_MAX_OPEN_POSITIONS", os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "12"))),
@@ -394,6 +397,7 @@ def create_app(
     meta_model_status: Optional[Dict] = None,
     learning_status: Optional[Dict] = None,
     system_health: Optional[Dict] = None,
+    runtime_controller=None,
     latency_monitor=None,
     security_suite=None,
 ) -> tuple:
@@ -499,13 +503,29 @@ def create_app(
 
     def _to_datetime(value: Any) -> Optional[datetime]:
         if isinstance(value, datetime):
-            return value
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
         if not value:
             return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
         try:
-            return datetime.fromisoformat(str(value))
+            parsed = datetime.fromisoformat(text)
         except Exception:
             return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+    _trace_fallback_timestamp = datetime.fromtimestamp(0, tz=timezone.utc)
+
+    def _normalize_trace_row(row: Any) -> Dict[str, Any]:
+        if not isinstance(row, dict):
+            return {}
+        normalized = dict(row)
+        parsed = _to_datetime(normalized.get("timestamp"))
+        normalized["timestamp"] = (parsed or _trace_fallback_timestamp).astimezone(timezone.utc).isoformat()
+        return normalized
 
     def _infer_lane(symbol: str, payload: Optional[Dict] = None, metadata: Optional[Dict] = None) -> str:
         payload = payload or {}
@@ -750,6 +770,41 @@ def create_app(
         payload["return_periods"] = _build_return_periods(payload)
         return payload
 
+    def _dashboard_portfolio_summary() -> Dict[str, Any]:
+        if paper_broker is None:
+            return {
+                "initial_capital": 100000,
+                "current_portfolio_value": 100000,
+                "total_return_pct": 0,
+                "cash": 100000,
+                "open_positions": 0,
+                "total_trades": 0,
+                "win_rate_pct": 0,
+                "kill_switch_active": False,
+                "positions": {},
+                "note": "paper_broker not connected",
+            }
+        summary = _reprice_paper_broker_summary(paper_broker.get_summary())
+        trade_summary = (_build_trade_log().get("summary") or {})
+        if trade_summary:
+            summary["closed_trades"] = trade_summary.get("closed_trades", summary.get("closed_trades", 0))
+            summary["winning_closed_trades"] = trade_summary.get("winning_trades", summary.get("winning_closed_trades", 0))
+            summary["losing_closed_trades"] = trade_summary.get("losing_trades", summary.get("losing_closed_trades", 0))
+            summary["breakeven_closed_trades"] = trade_summary.get("breakeven_trades", summary.get("breakeven_closed_trades", 0))
+            summary["lifetime_win_rate_pct"] = trade_summary.get("lifetime_win_rate_pct", summary.get("lifetime_win_rate_pct", 0.0))
+            summary["recent_win_rate_pct"] = trade_summary.get("recent_win_rate_pct", summary.get("recent_win_rate_pct", 0.0))
+            summary["recent_closed_trades"] = trade_summary.get("recent_closed_trades", summary.get("recent_closed_trades", 0))
+            summary["session_win_rate_pct"] = trade_summary.get("session_win_rate_pct", summary.get("session_win_rate_pct", 0.0))
+            summary["session_closed_trades"] = trade_summary.get("session_closed_trades", summary.get("session_closed_trades", 0))
+            summary["win_rate_pct"] = trade_summary.get("win_rate_pct", summary.get("win_rate_pct", 0.0))
+            summary["win_rate_basis"] = trade_summary.get("win_rate_basis", summary.get("win_rate_basis", "lifetime"))
+            summary["win_rate_label"] = trade_summary.get("win_rate_label", summary.get("win_rate_label", "closed paper trades"))
+            summary["win_rate_sample_size"] = trade_summary.get("win_rate_sample_size", summary.get("win_rate_sample_size", 0))
+            summary["trade_log_total_count"] = trade_summary.get("closed_trades", 0) + trade_summary.get("open_trades", 0)
+            summary["trade_lane_breakdown"] = trade_summary.get("lane_breakdown", {})
+        summary["return_periods"] = _build_return_periods(summary)
+        return summary
+
     def _build_return_periods(summary: Dict[str, Any]) -> List[Dict[str, Any]]:
         payload = dict(summary or {})
         now = datetime.now(timezone.utc)
@@ -885,12 +940,24 @@ def create_app(
         trades_today = _today_trade_rows()
         current_positions = _snapshot_mapping(getattr(paper_broker, "positions", {})) if paper_broker is not None else {}
         lane_positions = defaultdict(int)
+        lane_open_unrealized = defaultdict(float)
         for position_key, position in current_positions.items():
-            if getattr(position, "quantity", 0) <= 0:
+            quantity = _safe_float(getattr(position, "quantity", None), _safe_float((position or {}).get("quantity"), 0.0) if isinstance(position, dict) else 0.0)
+            if quantity <= 0:
                 continue
-            symbol = str(getattr(position, "symbol", position_key) or position_key)
+            symbol = str(
+                getattr(position, "symbol", None)
+                or ((position or {}).get("symbol") if isinstance(position, dict) else None)
+                or position_key
+            )
             signal = signal_snapshot.get(symbol, {})
-            lane_positions[_infer_lane(symbol, payload=signal, metadata={"position_key": position_key})] += 1
+            lane = _infer_lane(symbol, payload=signal, metadata={"position_key": position_key})
+            lane_positions[lane] += 1
+            unrealized_pnl = _safe_float(
+                getattr(position, "unrealized_pnl", None),
+                _safe_float((position or {}).get("unrealized_pnl"), 0.0) if isinstance(position, dict) else 0.0,
+            )
+            lane_open_unrealized[lane] += unrealized_pnl
 
         signal_counts = defaultdict(int)
         trade_ready_counts = defaultdict(int)
@@ -908,6 +975,7 @@ def create_app(
 
         lanes = []
         total_day_pnl = 0.0
+        total_open_unrealized_pnl = 0.0
         total_closed = 0
         total_fills = 0
         for lane in ("normal", "day", "crypto"):
@@ -917,7 +985,9 @@ def create_app(
             wins = [r for r in closed_rows if _safe_float(r.get("realized_pnl"), 0.0) > 0]
             losses = [r for r in closed_rows if _safe_float(r.get("realized_pnl"), 0.0) < 0]
             day_pnl = round(sum(_safe_float(r.get("realized_pnl"), 0.0) for r in closed_rows), 2)
+            open_unrealized_pnl = round(lane_open_unrealized.get(lane, 0.0), 2)
             total_day_pnl += day_pnl
+            total_open_unrealized_pnl += open_unrealized_pnl
             total_closed += len(closed_rows)
             total_fills += fills
             gross_wins = sum(_safe_float(r.get("realized_pnl"), 0.0) for r in wins)
@@ -983,6 +1053,7 @@ def create_app(
                     "fills_today": fills,
                     "closed_trades_today": len(closed_rows),
                     "day_pnl": day_pnl,
+                    "open_unrealized_pnl": open_unrealized_pnl,
                     "win_rate_pct": win_rate_pct,
                     "profit_factor": profit_factor,
                     "avg_closed_pnl": avg_pnl,
@@ -996,6 +1067,7 @@ def create_app(
         overall = {
             "report_date": datetime.now(timezone.utc).date().isoformat(),
             "total_day_pnl": round(total_day_pnl, 2),
+            "total_open_unrealized_pnl": round(total_open_unrealized_pnl, 2),
             "fills_today": total_fills,
             "closed_trades_today": total_closed,
             "open_positions": sum(lane_positions.values()),
@@ -1003,6 +1075,476 @@ def create_app(
             "kill_switch_reason": getattr(paper_broker, "_kill_switch_reason", "") if paper_broker is not None else "",
         }
         return {"overall": overall, "lanes": lanes}
+
+    def _resolved_lane(symbol: str, position_key: Optional[str] = None, payload: Optional[Dict] = None, metadata: Optional[Dict] = None) -> str:
+        key = str(position_key or "").strip()
+        if "::" in key:
+            return key.rsplit("::", 1)[-1].lower()
+        return _infer_lane(symbol, payload=payload, metadata=metadata)
+
+    def _is_crypto_record(
+        symbol: str,
+        *,
+        position_key: Optional[str] = None,
+        payload: Optional[Dict] = None,
+        metadata: Optional[Dict] = None,
+        market: Any = None,
+    ) -> bool:
+        lane = _resolved_lane(symbol, position_key=position_key, payload=payload, metadata=metadata)
+        if lane == "crypto":
+            return True
+        market_text = " ".join(
+            part
+            for part in (
+                str(market or "").strip(),
+                str((metadata or {}).get("market") or "").strip(),
+                str((payload or {}).get("market") or "").strip(),
+            )
+            if part
+        ).lower()
+        if any(token in market_text for token in ("crypto", "binance", "bybit")):
+            return True
+        clean_symbol = str(symbol or "").strip().upper()
+        return clean_symbol.endswith(("USDT", "USDC", "BUSD", "FDUSD", "TUSD", "USDE"))
+
+    def _build_trade_log(lane_filter: Optional[str] = None, display_limit: Optional[int] = _dashboard_trade_log_limit) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        empty_payload = {
+            "summary": {
+                "fill_events": 0,
+                "closed_trades": 0,
+                "open_trades": 0,
+                "winning_trades": 0,
+                "losing_trades": 0,
+                "breakeven_trades": 0,
+                "win_rate_pct": 0.0,
+                "lifetime_win_rate_pct": 0.0,
+                "recent_win_rate_pct": 0.0,
+                "recent_closed_trades": 0,
+                "session_win_rate_pct": 0.0,
+                "session_closed_trades": 0,
+                "gross_closed_pnl": 0.0,
+                "net_closed_pnl": 0.0,
+                "gross_open_pnl": 0.0,
+                "net_open_pnl": 0.0,
+                "gross_unrealized_pnl": 0.0,
+                "net_unrealized_pnl": 0.0,
+                "total_commission": 0.0,
+                "avg_hold_minutes": None,
+                "best_trade_net_pnl": None,
+                "best_trade_symbol": "",
+                "worst_trade_net_pnl": None,
+                "worst_trade_symbol": "",
+                "last_trade_at": None,
+                "win_rate_label": "waiting for closed paper trades",
+                "win_rate_basis": "lifetime",
+                "win_rate_sample_size": 0,
+                "lane_breakdown": {},
+            },
+            "trades": [],
+            "count": 0,
+            "total_count": 0,
+            "display_limit": display_limit,
+            "timestamp": now.isoformat(),
+        }
+        if paper_broker is None:
+            empty_payload["note"] = "paper_broker not connected"
+            return empty_payload
+
+        summary = _reprice_paper_broker_summary(paper_broker.get_summary())
+        open_positions = dict(summary.get("positions") or {})
+        trade_log = sorted(
+            [row for row in list(getattr(paper_broker, "trade_log", []) or []) if isinstance(row, dict)],
+            key=lambda row: _to_datetime(row.get("filled_at")) or _trace_fallback_timestamp,
+        )
+        if not trade_log and not open_positions:
+            return empty_payload
+
+        def _new_cycle(
+            *,
+            symbol: str,
+            position_key: str,
+            lane: str,
+            market: str,
+            opening_side: str,
+            opened_at: datetime,
+            metadata: Dict[str, Any],
+            signal_source: str,
+        ) -> Dict[str, Any]:
+            return {
+                "symbol": symbol,
+                "position_key": position_key,
+                "lane": lane,
+                "lane_label": _lane_label(lane),
+                "market": market,
+                "opening_side": opening_side,
+                "entry_time": opened_at.isoformat(),
+                "exit_time": None,
+                "last_fill_time": opened_at.isoformat(),
+                "entry_qty": 0.0,
+                "exit_qty": 0.0,
+                "open_qty": 0.0,
+                "entry_notional": 0.0,
+                "exit_notional": 0.0,
+                "entry_commission": 0.0,
+                "exit_commission": 0.0,
+                "gross_realized_pnl": 0.0,
+                "entry_fill_count": 0,
+                "exit_fill_count": 0,
+                "fill_count": 0,
+                "partial_fill_count": 0,
+                "slippage_pct_sum": 0.0,
+                "slippage_pct_count": 0,
+                "fill_ratio_sum": 0.0,
+                "fill_ratio_count": 0,
+                "entry_reason": str(metadata.get("entry_reason") or signal_source or ""),
+                "exit_reason": str(metadata.get("exit_reason") or metadata.get("action_reason") or ""),
+                "setup_id": str(metadata.get("setup_id") or metadata.get("signal_style") or signal_source or ""),
+                "signal_style": str(metadata.get("signal_style") or ""),
+                "time_bucket": str(metadata.get("entry_time_bucket") or metadata.get("time_bucket") or ""),
+                "entry_regime": str(metadata.get("entry_regime") or metadata.get("regime") or ""),
+                "execution_mode": str(metadata.get("execution_mode") or ""),
+                "signal_source": str(signal_source or ""),
+                "entry_take_probability": _safe_float(metadata.get("entry_take_probability"), None),
+                "entry_expected_edge_pct": _safe_float(metadata.get("entry_expected_edge_pct"), None),
+                "entry_expected_drawdown_pct": _safe_float(metadata.get("entry_expected_drawdown_pct"), None),
+            }
+
+        def _finalize_cycle(cycle: Dict[str, Any]) -> Dict[str, Any]:
+            position_key = str(cycle.get("position_key") or "")
+            position = dict(open_positions.get(position_key) or {})
+            qty_open = abs(_safe_float(position.get("quantity"), cycle.get("open_qty", 0.0)))
+            entry_qty = _safe_float(cycle.get("entry_qty"), 0.0)
+            exit_qty = _safe_float(cycle.get("exit_qty"), 0.0)
+            entry_notional = _safe_float(cycle.get("entry_notional"), 0.0)
+            exit_notional = _safe_float(cycle.get("exit_notional"), 0.0)
+            avg_entry_price = (entry_notional / entry_qty) if entry_qty > 0 else None
+            avg_exit_price = (exit_notional / exit_qty) if exit_qty > 0 else None
+            current_price = _safe_float(position.get("current_price"), None)
+            if current_price is None and avg_entry_price is not None and qty_open > 0:
+                current_price = avg_entry_price + (_safe_float(position.get("unrealized_pnl"), 0.0) / max(qty_open, 1e-9))
+
+            if cycle.get("opening_side") == "sell":
+                gross_unrealized = (avg_entry_price - current_price) * qty_open if current_price is not None and avg_entry_price is not None else 0.0
+                avg_buy_price = avg_exit_price
+                avg_sell_price = avg_entry_price
+            else:
+                gross_unrealized = _safe_float(position.get("unrealized_pnl"), 0.0)
+                avg_buy_price = avg_entry_price
+                avg_sell_price = avg_exit_price
+
+            gross_realized = _safe_float(cycle.get("gross_realized_pnl"), 0.0)
+            total_commission = _safe_float(cycle.get("entry_commission"), 0.0) + _safe_float(cycle.get("exit_commission"), 0.0)
+            gross_pnl = gross_realized + gross_unrealized
+            net_pnl = gross_pnl - total_commission
+            entry_time = _to_datetime(cycle.get("entry_time")) or _trace_fallback_timestamp
+            exit_time = _to_datetime(cycle.get("exit_time"))
+            last_fill_time = _to_datetime(cycle.get("last_fill_time")) or entry_time
+            status = "open" if qty_open > 1e-9 else "closed"
+            hold_end = exit_time if exit_time is not None else now
+            hold_minutes = max(0.0, round((hold_end - entry_time).total_seconds() / 60.0, 1))
+            avg_slippage_pct = (
+                _safe_float(cycle.get("slippage_pct_sum"), 0.0) / max(int(cycle.get("slippage_pct_count") or 0), 1)
+                if int(cycle.get("slippage_pct_count") or 0) > 0
+                else None
+            )
+            avg_fill_ratio_pct = (
+                (_safe_float(cycle.get("fill_ratio_sum"), 0.0) / max(int(cycle.get("fill_ratio_count") or 0), 1)) * 100.0
+                if int(cycle.get("fill_ratio_count") or 0) > 0
+                else None
+            )
+            display_qty = exit_qty if status == "closed" and exit_qty > 0 else qty_open
+
+            return {
+                "symbol": cycle.get("symbol"),
+                "position_key": position_key,
+                "lane": cycle.get("lane"),
+                "lane_label": cycle.get("lane_label"),
+                "market": cycle.get("market"),
+                "status": status,
+                "position_direction": "short" if cycle.get("opening_side") == "sell" else "long",
+                "entry_time": entry_time.isoformat(),
+                "exit_time": exit_time.isoformat() if exit_time is not None else None,
+                "last_fill_time": last_fill_time.isoformat(),
+                "hold_minutes": hold_minutes,
+                "entry_qty": round(entry_qty, 8),
+                "exit_qty": round(exit_qty, 8),
+                "open_qty": round(qty_open, 8),
+                "quantity": round(display_qty, 8),
+                "avg_entry_price": round(avg_entry_price, 8) if avg_entry_price is not None else None,
+                "avg_exit_price": round(avg_exit_price, 8) if avg_exit_price is not None else None,
+                "avg_buy_price": round(avg_buy_price, 8) if avg_buy_price is not None else None,
+                "avg_sell_price": round(avg_sell_price, 8) if avg_sell_price is not None else None,
+                "current_price": round(current_price, 8) if current_price is not None else None,
+                "gross_realized_pnl": round(gross_realized, 2),
+                "gross_unrealized_pnl": round(gross_unrealized, 2),
+                "gross_pnl": round(gross_pnl, 2),
+                "net_pnl": round(net_pnl, 2),
+                "net_return_pct": round((net_pnl / entry_notional) * 100.0, 2) if entry_notional > 0 else None,
+                "gross_return_pct": round((gross_pnl / entry_notional) * 100.0, 2) if entry_notional > 0 else None,
+                "commission": round(total_commission, 2),
+                "entry_commission": round(_safe_float(cycle.get("entry_commission"), 0.0), 2),
+                "exit_commission": round(_safe_float(cycle.get("exit_commission"), 0.0), 2),
+                "entry_notional": round(entry_notional, 2),
+                "exit_notional": round(exit_notional, 2),
+                "fill_count": int(cycle.get("fill_count") or 0),
+                "entry_fill_count": int(cycle.get("entry_fill_count") or 0),
+                "exit_fill_count": int(cycle.get("exit_fill_count") or 0),
+                "partial_fill_count": int(cycle.get("partial_fill_count") or 0),
+                "avg_slippage_pct": round(avg_slippage_pct, 4) if avg_slippage_pct is not None else None,
+                "avg_fill_ratio_pct": round(avg_fill_ratio_pct, 2) if avg_fill_ratio_pct is not None else None,
+                "entry_reason": cycle.get("entry_reason"),
+                "exit_reason": cycle.get("exit_reason"),
+                "setup_id": cycle.get("setup_id"),
+                "signal_style": cycle.get("signal_style"),
+                "time_bucket": cycle.get("time_bucket"),
+                "entry_regime": cycle.get("entry_regime"),
+                "execution_mode": cycle.get("execution_mode"),
+                "signal_source": cycle.get("signal_source"),
+                "entry_take_probability": cycle.get("entry_take_probability"),
+                "entry_expected_edge_pct": cycle.get("entry_expected_edge_pct"),
+                "entry_expected_drawdown_pct": cycle.get("entry_expected_drawdown_pct"),
+            }
+
+        active_cycles: Dict[str, Dict[str, Any]] = {}
+        rows: List[Dict[str, Any]] = []
+        crypto_fill_events = 0
+
+        for trade in trade_log:
+            symbol = str(trade.get("symbol") or "").strip().upper()
+            metadata = dict(trade.get("metadata") or {})
+            position_key = str(trade.get("position_key") or metadata.get("position_key") or symbol)
+            lane = _resolved_lane(symbol, position_key=position_key, payload=trade, metadata=metadata)
+            market = str(metadata.get("market") or trade.get("market") or "")
+            if lane_filter == "crypto" and not _is_crypto_record(
+                symbol,
+                position_key=position_key,
+                payload=trade,
+                metadata=metadata,
+                market=market,
+            ):
+                continue
+            if lane_filter in {"normal", "day"} and lane != lane_filter:
+                continue
+
+            side = str(trade.get("side") or "").strip().lower()
+            qty = abs(_safe_float(trade.get("quantity"), 0.0))
+            if side not in {"buy", "sell"} or qty <= 0:
+                continue
+
+            crypto_fill_events += 1
+            filled_at = _to_datetime(trade.get("filled_at")) or _trace_fallback_timestamp
+            fill_price = _safe_float(trade.get("fill_price"), 0.0)
+            commission = _safe_float(trade.get("commission"), 0.0)
+            realized_pnl = _safe_float(trade.get("realized_pnl"), 0.0)
+            slippage_pct = _safe_float(trade.get("slippage_pct"), None)
+            fill_ratio = _safe_float(trade.get("fill_ratio"), None)
+            signal_source = str(trade.get("signal_source") or "")
+
+            cycle = active_cycles.get(position_key)
+            if cycle is None:
+                cycle = _new_cycle(
+                    symbol=symbol,
+                    position_key=position_key,
+                    lane=lane,
+                    market=market,
+                    opening_side=side,
+                    opened_at=filled_at,
+                    metadata=metadata,
+                    signal_source=signal_source,
+                )
+                active_cycles[position_key] = cycle
+
+            cycle["last_fill_time"] = filled_at.isoformat()
+            cycle["fill_count"] += 1
+            if slippage_pct is not None:
+                cycle["slippage_pct_sum"] += slippage_pct
+                cycle["slippage_pct_count"] += 1
+            if fill_ratio is not None:
+                cycle["fill_ratio_sum"] += fill_ratio
+                cycle["fill_ratio_count"] += 1
+            if bool(trade.get("partial_fill") or metadata.get("partial_fill")):
+                cycle["partial_fill_count"] += 1
+
+            if not cycle.get("entry_reason"):
+                cycle["entry_reason"] = str(metadata.get("entry_reason") or signal_source or "")
+            if not cycle.get("setup_id"):
+                cycle["setup_id"] = str(metadata.get("setup_id") or metadata.get("signal_style") or signal_source or "")
+            if not cycle.get("signal_style"):
+                cycle["signal_style"] = str(metadata.get("signal_style") or "")
+            if not cycle.get("time_bucket"):
+                cycle["time_bucket"] = str(metadata.get("entry_time_bucket") or metadata.get("time_bucket") or "")
+            if not cycle.get("entry_regime"):
+                cycle["entry_regime"] = str(metadata.get("entry_regime") or metadata.get("regime") or "")
+            if not cycle.get("execution_mode"):
+                cycle["execution_mode"] = str(metadata.get("execution_mode") or "")
+
+            if side == cycle.get("opening_side"):
+                cycle["entry_qty"] += qty
+                cycle["open_qty"] += qty
+                cycle["entry_notional"] += qty * fill_price
+                cycle["entry_commission"] += commission
+                cycle["entry_fill_count"] += 1
+            else:
+                open_qty_before = _safe_float(cycle.get("open_qty"), 0.0)
+                closed_qty = min(open_qty_before, qty) if open_qty_before > 0 else qty
+                commission_ratio = (closed_qty / qty) if qty > 0 else 1.0
+                cycle["exit_qty"] += closed_qty
+                cycle["open_qty"] = max(0.0, open_qty_before - closed_qty)
+                cycle["exit_notional"] += closed_qty * fill_price
+                cycle["exit_commission"] += commission * commission_ratio
+                cycle["gross_realized_pnl"] += realized_pnl
+                cycle["exit_fill_count"] += 1
+                cycle["exit_time"] = filled_at.isoformat()
+                cycle["exit_reason"] = str(metadata.get("exit_reason") or metadata.get("action_reason") or cycle.get("exit_reason") or "")
+
+                remainder_qty = max(0.0, qty - closed_qty)
+                if cycle["open_qty"] <= 1e-9:
+                    rows.append(_finalize_cycle(cycle))
+                    active_cycles.pop(position_key, None)
+                    if remainder_qty > 1e-9:
+                        next_cycle = _new_cycle(
+                            symbol=symbol,
+                            position_key=position_key,
+                            lane=lane,
+                            market=market,
+                            opening_side=side,
+                            opened_at=filled_at,
+                            metadata=metadata,
+                            signal_source=signal_source,
+                        )
+                        next_cycle["entry_qty"] += remainder_qty
+                        next_cycle["open_qty"] += remainder_qty
+                        next_cycle["entry_notional"] += remainder_qty * fill_price
+                        next_cycle["entry_commission"] += commission * (1.0 - commission_ratio)
+                        next_cycle["entry_fill_count"] += 1
+                        next_cycle["fill_count"] += 1
+                        if slippage_pct is not None:
+                            next_cycle["slippage_pct_sum"] += slippage_pct
+                            next_cycle["slippage_pct_count"] += 1
+                        if fill_ratio is not None:
+                            next_cycle["fill_ratio_sum"] += fill_ratio
+                            next_cycle["fill_ratio_count"] += 1
+                        if bool(trade.get("partial_fill") or metadata.get("partial_fill")):
+                            next_cycle["partial_fill_count"] += 1
+                        active_cycles[position_key] = next_cycle
+
+        for cycle in active_cycles.values():
+            rows.append(_finalize_cycle(cycle))
+
+        rows.sort(key=lambda row: _to_datetime(row.get("last_fill_time")) or _trace_fallback_timestamp, reverse=True)
+        limited_rows = rows[:display_limit] if display_limit else list(rows)
+
+        closed_rows = [row for row in rows if row.get("status") == "closed"]
+        open_rows = [row for row in rows if row.get("status") == "open"]
+        winners = [row for row in closed_rows if _safe_float(row.get("net_pnl"), 0.0) > 0]
+        losers = [row for row in closed_rows if _safe_float(row.get("net_pnl"), 0.0) < 0]
+        breakeven = [
+            row
+            for row in closed_rows
+            if abs(_safe_float(row.get("net_pnl"), 0.0)) <= 1e-9
+        ]
+        holds = [row.get("hold_minutes") for row in closed_rows if row.get("hold_minutes") is not None]
+        best_trade = max(closed_rows, key=lambda row: _safe_float(row.get("net_pnl"), float("-inf")), default=None)
+        worst_trade = min(closed_rows, key=lambda row: _safe_float(row.get("net_pnl"), float("inf")), default=None)
+
+        def _cycle_win_rate_snapshot(source_rows: List[Dict[str, Any]], basis: str) -> Dict[str, Any]:
+            wins = sum(1 for row in source_rows if _safe_float(row.get("net_pnl"), 0.0) > 0)
+            losses = sum(1 for row in source_rows if _safe_float(row.get("net_pnl"), 0.0) < 0)
+            flat = sum(1 for row in source_rows if abs(_safe_float(row.get("net_pnl"), 0.0)) <= 1e-9)
+            closed_count = len(source_rows)
+            labels = {
+                "recent": f"last {closed_count} closed paper trades",
+                "session": f"today | {closed_count} closed paper trades",
+                "lifetime": f"lifetime | {closed_count} closed paper trades",
+            }
+            return {
+                "basis": basis,
+                "label": labels.get(basis, f"{closed_count} closed paper trades"),
+                "closed_trades": closed_count,
+                "wins": wins,
+                "losses": losses,
+                "breakeven": flat,
+                "win_rate_pct": round((wins / max(closed_count, 1)) * 100.0, 1) if closed_count else 0.0,
+            }
+
+        recent_closed_rows = closed_rows[:_dashboard_win_rate_window]
+        session_closed_rows = []
+        for row in closed_rows:
+            close_ts = _to_datetime(row.get("exit_time") or row.get("last_fill_time"))
+            if close_ts and close_ts.astimezone(timezone.utc).date() == now.date():
+                session_closed_rows.append(row)
+
+        lifetime_win_rate = _cycle_win_rate_snapshot(closed_rows, "lifetime")
+        recent_win_rate = _cycle_win_rate_snapshot(recent_closed_rows, "recent")
+        session_win_rate = _cycle_win_rate_snapshot(session_closed_rows, "session")
+        headline_win_rate = lifetime_win_rate
+        if recent_win_rate["closed_trades"] >= _dashboard_win_rate_min_trades:
+            headline_win_rate = recent_win_rate
+        elif session_win_rate["closed_trades"] >= _dashboard_win_rate_min_trades:
+            headline_win_rate = session_win_rate
+
+        lane_breakdown = {}
+        for lane_name in ("normal", "day", "crypto"):
+            lane_rows = [row for row in rows if str(row.get("lane") or "").lower() == lane_name]
+            lane_closed = [row for row in lane_rows if row.get("status") == "closed"]
+            lane_open = [row for row in lane_rows if row.get("status") == "open"]
+            lane_winners = [row for row in lane_closed if _safe_float(row.get("net_pnl"), 0.0) > 0]
+            lane_breakdown[lane_name] = {
+                "lane": lane_name,
+                "lane_label": _lane_label(lane_name),
+                "trade_count": len(lane_rows),
+                "closed_trades": len(lane_closed),
+                "open_trades": len(lane_open),
+                "win_rate_pct": round((len(lane_winners) / max(len(lane_closed), 1)) * 100.0, 1) if lane_closed else 0.0,
+                "net_pnl": round(sum(_safe_float(row.get("net_pnl"), 0.0) for row in lane_rows), 2),
+            }
+
+        return {
+            "summary": {
+                "fill_events": crypto_fill_events,
+                "closed_trades": len(closed_rows),
+                "open_trades": len(open_rows),
+                "winning_trades": len(winners),
+                "losing_trades": len(losers),
+                "breakeven_trades": len(breakeven),
+                "win_rate_pct": headline_win_rate["win_rate_pct"],
+                "lifetime_win_rate_pct": lifetime_win_rate["win_rate_pct"],
+                "recent_win_rate_pct": recent_win_rate["win_rate_pct"],
+                "recent_closed_trades": recent_win_rate["closed_trades"],
+                "session_win_rate_pct": session_win_rate["win_rate_pct"],
+                "session_closed_trades": session_win_rate["closed_trades"],
+                "gross_closed_pnl": round(sum(_safe_float(row.get("gross_pnl"), 0.0) for row in closed_rows), 2),
+                "net_closed_pnl": round(sum(_safe_float(row.get("net_pnl"), 0.0) for row in closed_rows), 2),
+                "gross_open_pnl": round(sum(_safe_float(row.get("gross_pnl"), 0.0) for row in open_rows), 2),
+                "net_open_pnl": round(sum(_safe_float(row.get("net_pnl"), 0.0) for row in open_rows), 2),
+                "gross_unrealized_pnl": round(sum(_safe_float(row.get("gross_unrealized_pnl"), 0.0) for row in open_rows), 2),
+                "net_unrealized_pnl": round(
+                    sum(_safe_float(row.get("gross_unrealized_pnl"), 0.0) for row in open_rows)
+                    - sum(_safe_float(row.get("commission"), 0.0) for row in open_rows),
+                    2,
+                ),
+                "total_commission": round(sum(_safe_float(row.get("commission"), 0.0) for row in rows), 2),
+                "avg_hold_minutes": round(sum(float(value) for value in holds) / len(holds), 1) if holds else None,
+                "best_trade_net_pnl": round(_safe_float((best_trade or {}).get("net_pnl"), 0.0), 2) if best_trade else None,
+                "best_trade_symbol": str((best_trade or {}).get("symbol") or ""),
+                "worst_trade_net_pnl": round(_safe_float((worst_trade or {}).get("net_pnl"), 0.0), 2) if worst_trade else None,
+                "worst_trade_symbol": str((worst_trade or {}).get("symbol") or ""),
+                "last_trade_at": rows[0].get("last_fill_time") if rows else None,
+                "win_rate_label": headline_win_rate["label"],
+                "win_rate_basis": headline_win_rate["basis"],
+                "win_rate_sample_size": headline_win_rate["closed_trades"],
+                "lane_breakdown": lane_breakdown,
+            },
+            "trades": limited_rows,
+            "count": len(limited_rows),
+            "total_count": len(rows),
+            "display_limit": display_limit,
+            "timestamp": now.isoformat(),
+        }
+
+    def _build_crypto_trade_log() -> Dict[str, Any]:
+        return _build_trade_log("crypto", display_limit=_dashboard_trade_log_limit)
 
     def _load_event_intel() -> Dict[str, Any]:
         try:
@@ -1080,14 +1622,7 @@ def create_app(
 
     @app.route("/api/portfolio")
     def get_portfolio():
-        if paper_broker is None:
-            return jsonify({"initial_capital": 100000, "current_portfolio_value": 100000,
-                            "total_return_pct": 0, "cash": 100000, "open_positions": 0,
-                            "total_trades": 0, "win_rate_pct": 0, "kill_switch_active": False,
-                            "positions": {}, "note": "paper_broker not connected"})
-        summary = _reprice_paper_broker_summary(paper_broker.get_summary())
-        summary["return_periods"] = _build_return_periods(summary)
-        return jsonify(summary)
+        return jsonify(_dashboard_portfolio_summary())
 
     @app.route("/api/positions")
     def get_positions():
@@ -1122,6 +1657,44 @@ def create_app(
             "cash": summary.get("cash"),
             "portfolio_value": summary.get("current_portfolio_value", summary.get("portfolio_value")),
         })
+
+    @app.route("/api/crypto-trade-log")
+    def get_crypto_trade_log():
+        return jsonify(_json_safe(_build_crypto_trade_log()))
+
+    @app.route("/api/trades")
+    def get_trades():
+        return jsonify(_json_safe(_build_trade_log(display_limit=None)))
+
+    @app.route("/api/lane-control/<lane>/stop", methods=["POST"])
+    def stop_lane_control(lane):
+        lane_name = str(lane or "").strip().lower()
+        if lane_name not in {"normal", "day", "crypto"}:
+            return jsonify({"error": f"Unsupported lane '{lane}'"}), 400
+        if runtime_controller is None or not hasattr(runtime_controller, "manual_stop_lane"):
+            return jsonify({"error": "Lane control unavailable"}), 503
+        reason = ""
+        payload = request.get_json(silent=True)
+        if isinstance(payload, dict):
+            reason = str(payload.get("reason") or "").strip()
+        try:
+            controls = runtime_controller.manual_stop_lane(lane_name, source="dashboard", reason=reason or "manual_stop")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({"ok": True, "lane": lane_name, "manual_lane_controls": _json_safe(controls)})
+
+    @app.route("/api/lane-control/<lane>/resume", methods=["POST"])
+    def resume_lane_control(lane):
+        lane_name = str(lane or "").strip().lower()
+        if lane_name not in {"normal", "day", "crypto"}:
+            return jsonify({"error": f"Unsupported lane '{lane}'"}), 400
+        if runtime_controller is None or not hasattr(runtime_controller, "manual_resume_lane"):
+            return jsonify({"error": "Lane control unavailable"}), 503
+        try:
+            controls = runtime_controller.manual_resume_lane(lane_name, source="dashboard")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({"ok": True, "lane": lane_name, "manual_lane_controls": _json_safe(controls)})
 
     @app.route("/api/live-portfolio")
     def get_live_portfolio():
@@ -1187,8 +1760,8 @@ def create_app(
 
     @app.route("/api/execution-trace")
     def get_execution_trace():
-        rows = list(_execution_trace)
-        rows.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+        rows = [_normalize_trace_row(row) for row in list(_execution_trace) if isinstance(row, dict)]
+        rows.sort(key=lambda r: _to_datetime(r.get("timestamp")) or _trace_fallback_timestamp, reverse=True)
         limited = rows[:_dashboard_execution_trace_limit]
         return jsonify(
             {
@@ -1214,8 +1787,8 @@ def create_app(
 
     @app.route("/api/execution-divergence")
     def get_execution_divergence():
-        rows = list(_execution_reconciliation or [])
-        rows.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+        rows = [_normalize_trace_row(row) for row in list(_execution_reconciliation or []) if isinstance(row, dict)]
+        rows.sort(key=lambda r: _to_datetime(r.get("timestamp")) or _trace_fallback_timestamp, reverse=True)
         limited = rows[:_dashboard_execution_trace_limit]
         total = len(rows)
         matched = 0
@@ -1294,6 +1867,84 @@ def create_app(
             return jsonify({"note": "Meta model status not ready yet."})
         return jsonify(_meta_model_status)
 
+    @app.route("/api/trade_debug")
+    def trade_debug():
+        """Show why each trade-ready signal is or isn't being executed."""
+        signal_store = _signal_store_snapshot()
+        runtime_controls = (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("manual_lane_controls", {}) or {})
+        rows = []
+        for symbol, signal in list(signal_store.items()):
+            if not isinstance(signal, dict):
+                continue
+            lane = str(signal.get("lane") or "normal").lower()
+            meta = signal.get("meta_decision") or {}
+            construction = signal.get("portfolio_construction") or {}
+            entry_readiness = signal.get("entry_readiness") or {}
+            governor = signal.get("governor_decision") or {}
+            execution_filter = signal.get("execution_filter") or {}
+            manual_lane_control = signal.get("manual_lane_control") or runtime_controls.get(lane) or {}
+            intraday = signal.get("intraday_overlay") or {}
+            best_bid = float(intraday.get("best_bid", 0.0) or 0.0)
+            best_ask = float(intraday.get("best_ask", 0.0) or 0.0)
+            execution_price_hint = round((best_bid + best_ask) / 2.0, 8) if best_bid > 0 and best_ask > 0 else None
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "lane": lane,
+                    "signal_direction": signal.get("signal"),
+                    "conviction": round(float(signal.get("conviction_score", 0.0) or 0.0), 3),
+                    "trade_eligible": signal.get("trade_eligible", False),
+                    "take_trade": meta.get("take_trade", False),
+                    "take_probability": round(float(meta.get("take_probability", 0.0) or 0.0), 4),
+                    "meta_reason": meta.get("reason", ""),
+                    "meta_source": meta.get("source", ""),
+                    "expected_edge_pct": round(float(meta.get("expected_edge_pct", 0.0) or 0.0), 3),
+                    "portfolio_target_pct": round(float(construction.get("target_position_pct", 0.0) or 0.0), 4),
+                    "entry_readiness": entry_readiness.get("reason", ""),
+                    "entry_allowed": entry_readiness.get("allow", True),
+                    "meta_override": signal.get("meta_override", ""),
+                    "governor_allow": governor.get("allow", True),
+                    "governor_reason": governor.get("reason", ""),
+                    "manual_lane_enabled": manual_lane_control.get("enabled", True),
+                    "manual_lane_stopped_at": manual_lane_control.get("stopped_at"),
+                    "execution_filter_allow": execution_filter.get("allow", True),
+                    "execution_filter_reason": execution_filter.get("reason", ""),
+                    "quote_only_fallback": bool(intraday.get("quote_only_fallback", False)),
+                    "tick_age_seconds": round(float(intraday.get("tick_age_seconds", 0.0) or 0.0), 3),
+                    "depth_age_seconds": round(float(intraday.get("depth_age_seconds", 0.0) or 0.0), 3) if intraday.get("depth_age_seconds") is not None else None,
+                    "execution_price_hint": execution_price_hint,
+                    "execution_reference_price": signal.get("execution_reference_price"),
+                }
+            )
+
+        trade_ready = [r for r in rows if r["trade_eligible"] or r["take_trade"]]
+        buy_signals = [r for r in rows if r["signal_direction"] == "buy"]
+        blocked_by_meta = [r for r in buy_signals if not r["take_trade"]]
+        blocked_by_readiness = [r for r in buy_signals if not r["entry_allowed"]]
+        blocked_by_governor = [r for r in buy_signals if not r["governor_allow"]]
+        blocked_by_manual_lane = [r for r in buy_signals if not r["manual_lane_enabled"]]
+        blocked_by_execution_filter = [r for r in buy_signals if not r["execution_filter_allow"]]
+        zero_weight = [r for r in buy_signals if r["portfolio_target_pct"] <= 0]
+        missing_execution_price = [r for r in buy_signals if not r["execution_reference_price"] and not r["execution_price_hint"]]
+
+        return jsonify(
+            {
+                "summary": {
+                    "total_signals": len(rows),
+                    "buy_signals": len(buy_signals),
+                    "trade_ready": len(trade_ready),
+                    "blocked_by_meta_skip": len(blocked_by_meta),
+                    "blocked_by_entry_readiness": len(blocked_by_readiness),
+                    "blocked_by_governor": len(blocked_by_governor),
+                    "blocked_by_manual_lane": len(blocked_by_manual_lane),
+                    "blocked_by_execution_filter": len(blocked_by_execution_filter),
+                    "blocked_by_zero_weight": len(zero_weight),
+                    "missing_execution_price": len(missing_execution_price),
+                },
+                "buy_signals_sample": sorted(buy_signals, key=lambda r: r["conviction"], reverse=True)[:20],
+            }
+        )
+
     @app.route("/api/learning-status")
     def get_learning_status():
         if not _learning_status:
@@ -1340,6 +1991,7 @@ def create_app(
             "data_sources":     (_system_health.get("data_sources", {}) if isinstance(_system_health, dict) else {}),
             "lane_open_counts": (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("lane_open_counts", {})),
             "lane_targets":     (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("lane_targets", {})),
+            "manual_lane_controls": (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("manual_lane_controls", {})),
             "universe_sync":    (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("universe_sync", {})),
             "pipeline_selection": (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("pipeline_selection", {})),
             "data_pipeline":   (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("data_pipeline", {})),
@@ -1359,7 +2011,7 @@ def create_app(
             {"signals": _limit_values(_flatten_signal_store(signal_snapshot), _dashboard_signal_limit)},
         )
         if paper_broker:
-            emit("portfolio_update", _reprice_paper_broker_summary(paper_broker.get_summary()))
+            emit("portfolio_update", _dashboard_portfolio_summary())
         if _stress_results:
             emit("stress_update", _stress_results)
         try:
@@ -1440,7 +2092,7 @@ def create_app(
 
                 # Portfolio
                 if paper_broker:
-                    socketio.emit("portfolio_update", _reprice_paper_broker_summary(paper_broker.get_summary()))
+                    socketio.emit("portfolio_update", _dashboard_portfolio_summary())
 
                 # Daily report — emit every 15 s so trade counts stay live
                 now = time.time()
@@ -1612,6 +2264,12 @@ body.theme-light{background:
 .laneStatRow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);}
 .laneMini{font-size:9px;color:var(--muted);}
 .lanePill{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid var(--border);background:rgba(148,163,184,.08);font-size:9px;color:var(--text);}
+.laneActionBtn{background:rgba(56,189,248,.10);border:1px solid rgba(56,189,248,.25);color:var(--text);padding:4px 9px;border-radius:999px;font-size:9px;font-family:var(--mono);cursor:pointer;transition:all .15s ease;}
+.laneActionBtn:hover{border-color:rgba(56,189,248,.45);background:rgba(56,189,248,.18);}
+.laneActionBtn.stop{background:rgba(239,68,68,.10);border-color:rgba(239,68,68,.25);}
+.laneActionBtn.stop:hover{background:rgba(239,68,68,.18);border-color:rgba(239,68,68,.45);}
+.laneActionBtn.resume{background:rgba(34,197,94,.10);border-color:rgba(34,197,94,.25);}
+.laneActionBtn.resume:hover{background:rgba(34,197,94,.18);border-color:rgba(34,197,94,.45);}
 .tvHost iframe{display:block;}
 .returnGrid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;}
 .returnCard{background:var(--bg4);border:1px solid var(--border);border-radius:6px;padding:11px;}
@@ -1647,6 +2305,7 @@ body.theme-light{background:
   <button class="menuLink active" id="menu-overview" type="button" onclick="setPage('overview')">Overview</button>
   <button class="menuLink" id="menu-signals" type="button" onclick="setPage('signals')">Signal Board</button>
   <button class="menuLink" id="menu-portfolio" type="button" onclick="setPage('portfolio')">Portfolio</button>
+  <button class="menuLink" id="menu-trades" type="button" onclick="setPage('trades')">Trades</button>
   <button class="menuLink" id="menu-execution" type="button" onclick="setPage('execution')">Execution</button>
 </div>
 <div class="sbar">
@@ -1821,6 +2480,76 @@ body.theme-light{background:
             <table class="pt"><thead><tr><th>Symbol</th><th>Type</th><th>Qty</th><th>Price</th><th>P&amp;L</th></tr></thead>
             <tbody id="lptb"><tr><td colspan="5" style="color:var(--muted);padding:14px">Live brokerage not configured</td></tr></tbody></table>
           </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">
+          <div class="ct2" style="margin-bottom:0">Crypto trade ledger</div>
+          <div class="pill" id="ctlc">0 shown / 0 total</div>
+        </div>
+        <div class="metrics" style="grid-template-columns:repeat(6,1fr);margin-bottom:10px">
+          <div class="met"><div class="ml">Closed net P&amp;L</div><div class="mv" id="ctlnet">-</div><div class="ms" id="ctlnetmeta">Waiting for crypto trades</div></div>
+          <div class="met"><div class="ml">Open net P&amp;L</div><div class="mv" id="ctlopen">-</div><div class="ms" id="ctlopenmeta">Open crypto positions</div></div>
+          <div class="met"><div class="ml">Win rate</div><div class="mv" id="ctlwin">-</div><div class="ms" id="ctlwinmeta">Closed crypto trades</div></div>
+          <div class="met"><div class="ml">Fees paid</div><div class="mv" id="ctlfees">-</div><div class="ms" id="ctlfeesmeta">Entry + exit commissions</div></div>
+          <div class="met"><div class="ml">Best trade</div><div class="mv" id="ctlbest">-</div><div class="ms" id="ctlbestmeta">Largest closed win</div></div>
+          <div class="met"><div class="ml">Worst trade</div><div class="mv" id="ctlworst">-</div><div class="ms" id="ctlworstmeta">Largest closed loss</div></div>
+        </div>
+        <div class="small" id="ctlmeta" style="margin-bottom:10px">Rebuilding crypto trade history from real paper fills...</div>
+        <div class="ptw" style="max-height:420px">
+          <table class="pt">
+            <thead><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Qty</th><th>Buy</th><th>Sell / Now</th><th>Realized</th><th>Unrealized</th><th>Net</th><th>Fees</th><th>Hold</th><th>Reason</th></tr></thead>
+            <tbody id="ctltb"><tr><td colspan="12" style="color:var(--muted);padding:14px">No crypto trades yet</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="page" id="page-trades">
+      <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap">
+          <div class="ct2" style="margin-bottom:0">Executed trade ledger</div>
+          <div class="pill" id="trdc">0 shown / 0 total</div>
+        </div>
+        <div class="metrics" style="grid-template-columns:repeat(6,1fr);margin-bottom:10px">
+          <div class="met"><div class="ml">Headline win rate</div><div class="mv" id="trdwin">-</div><div class="ms" id="trdwinmeta">Waiting for closed trades</div></div>
+          <div class="met"><div class="ml">Closed net P&amp;L</div><div class="mv" id="trdnet">-</div><div class="ms" id="trdnetmeta">Closed trade result</div></div>
+          <div class="met"><div class="ml">Open net P&amp;L</div><div class="mv" id="trdopen">-</div><div class="ms" id="trdopenmeta">Open trade exposure</div></div>
+          <div class="met"><div class="ml">Fees paid</div><div class="mv" id="trdfees">-</div><div class="ms" id="trdfeesmeta">Total commissions</div></div>
+          <div class="met"><div class="ml">Best trade</div><div class="mv" id="trdbest">-</div><div class="ms" id="trdbestmeta">Largest closed winner</div></div>
+          <div class="met"><div class="ml">Worst trade</div><div class="mv" id="trdworst">-</div><div class="ms" id="trdworstmeta">Largest closed loser</div></div>
+        </div>
+        <div class="lanegrid" id="trdlanes" style="margin-bottom:10px">
+          <div class="laneCard"><div class="lanel">Normal Trading</div><div class="lanev">-</div><div class="laneSub">Waiting for trades</div></div>
+          <div class="laneCard"><div class="lanel">Day Trading</div><div class="lanev">-</div><div class="laneSub">Waiting for trades</div></div>
+          <div class="laneCard"><div class="lanel">Crypto Scalper</div><div class="lanev">-</div><div class="laneSub">Waiting for trades</div></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <select id="trdlane" onchange="renderTradeLedger(tradeLedgerCache)" style="background:#0d121b;border:1px solid var(--border2);color:var(--text);padding:7px 9px;border-radius:5px;font-family:var(--mono);font-size:10px">
+            <option value="all">all lanes</option>
+            <option value="normal">normal</option>
+            <option value="day">day</option>
+            <option value="crypto">crypto</option>
+          </select>
+          <select id="trdstatus" onchange="renderTradeLedger(tradeLedgerCache)" style="background:#0d121b;border:1px solid var(--border2);color:var(--text);padding:7px 9px;border-radius:5px;font-family:var(--mono);font-size:10px">
+            <option value="all">all statuses</option>
+            <option value="closed">closed</option>
+            <option value="open">open</option>
+          </select>
+          <input
+            id="trdsearch"
+            type="text"
+            placeholder="Search symbol, setup, reason, position key..."
+            oninput="renderTradeLedger(tradeLedgerCache)"
+            style="flex:1 1 260px;background:#0d121b;border:1px solid var(--border2);color:var(--text);padding:7px 9px;border-radius:5px;font-family:var(--mono);font-size:10px;outline:none"
+          />
+        </div>
+        <div class="small" id="trdmeta" style="margin-bottom:10px">Rebuilding executed trade history...</div>
+        <div class="ptw" style="max-height:560px">
+          <table class="pt">
+            <thead><tr><th>Last fill</th><th>Symbol</th><th>Lane</th><th>Status</th><th>Qty</th><th>Buy</th><th>Sell / Now</th><th>Realized</th><th>Unrealized</th><th>Net</th><th>Fees</th><th>Hold</th><th>Reason</th></tr></thead>
+            <tbody id="trdtb"><tr><td colspan="13" style="color:var(--muted);padding:14px">No executed trades yet</td></tr></tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -2008,6 +2737,7 @@ const LANE_LABELS = {
 };
 const SIGNAL_LANES = ['normal', 'day', 'crypto'];
 let signals = {}, sel = null, eq = [100000], chart = null, sd = 'conviction', activeLane = 'all', activePage = 'overview', reportData = null, eventIntel = null, livePrices = {};
+let tradeLedgerCache = null;
 let healthSnapshot = {};
 let metaStatusFailures = 0;
 let learningStatusFailures = 0;
@@ -2104,10 +2834,10 @@ function toggleMenu(forceOpen){
 }
 
 function setPage(page){
-  const nextPage = ['overview', 'signals', 'portfolio', 'execution'].includes(page) ? page : 'overview';
+  const nextPage = ['overview', 'signals', 'portfolio', 'trades', 'execution'].includes(page) ? page : 'overview';
   activePage = nextPage;
   document.querySelectorAll('.page').forEach(el => el.classList.toggle('active', el.id === `page-${nextPage}`));
-  ['overview', 'signals', 'portfolio', 'execution'].forEach(name => {
+  ['overview', 'signals', 'portfolio', 'trades', 'execution'].forEach(name => {
     const link = document.getElementById(`menu-${name}`);
     if(link) link.classList.toggle('active', name === nextPage);
   });
@@ -2128,6 +2858,9 @@ function setPage(page){
     refreshPortfolioSummary();
     refreshPos();
     refreshLivePortfolio();
+    refreshCryptoTradeLog();
+  }else if(nextPage === 'trades'){
+    refreshTradeLedger();
   }else if(nextPage === 'execution'){
     refreshExecutionTrace();
     refreshExecutionBacktest();
@@ -2540,6 +3273,39 @@ function laneReportMap(){
   return map;
 }
 
+function manualLaneControl(lane){
+  const controls = healthSnapshot.manual_lane_controls || {};
+  const control = controls[lane] || {};
+  return {
+    enabled: control.enabled !== false,
+    stopped_at: control.stopped_at || '',
+    reason: control.reason || '',
+  };
+}
+
+function laneControlStatusLabel(lane, fallbackStatus){
+  const control = manualLaneControl(lane);
+  if(!control.enabled) return 'manually stopped';
+  return fallbackStatus;
+}
+
+function setLaneControl(lane, enabled, event){
+  if(event){
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const action = enabled ? 'resume' : 'stop';
+  fetch(`/api/lane-control/${encodeURIComponent(lane)}/${action}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({reason: enabled ? '' : 'manual_stop'}),
+  }).then(r => r.json()).then(() => {
+    refreshHealth();
+    refreshSignals();
+    refreshDailyReport();
+  }).catch(() => {});
+}
+
 function renderLaneOverview(){
   const grid = document.getElementById('laneOverviewGrid');
   const pill = document.getElementById('laneSummaryPill');
@@ -2553,16 +3319,27 @@ function renderLaneOverview(){
     const watch = Math.max(0, laneSignals.length - actionable.length);
     const laneReport = reportMap[lane] || {};
     const pnl = Number(laneReport.day_pnl || 0);
-    const status = laneReport.status || (actionable.length ? 'active' : laneSignals.length ? 'warming' : 'standby');
+    const openPnl = Number(laneReport.open_unrealized_pnl || 0);
+    const control = manualLaneControl(lane);
+    const status = laneControlStatusLabel(lane, laneReport.status || (actionable.length ? 'active' : laneSignals.length ? 'warming' : 'standby'));
     const active = activeLane === lane || (activeLane === 'all' && lane === 'normal');
     const accent = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--text)';
+    const buttonLabel = control.enabled ? 'Stop' : 'Resume';
+    const buttonClass = control.enabled ? 'stop' : 'resume';
+    const detailText = control.enabled
+      ? `${laneReport.open_positions || 0} open | ${laneReport.closed_trades_today || 0} closed | realized ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} | open ${openPnl >= 0 ? '+' : '-'}$${Math.abs(openPnl).toFixed(2)}`
+      : `stopped ${control.stopped_at ? new Date(control.stopped_at).toLocaleTimeString() : 'now'} | ${laneReport.open_positions || 0} open`;
     return `<div class="laneCard clickable${active ? ' active' : ''}" onclick="openLaneView('${lane}')">
       <div class="lanel">${LANE_LABELS[lane]}</div>
       <div class="lanev" style="color:${laneSignals.length ? 'var(--blue)' : accent}">${laneSignals.length}</div>
-      <div class="laneSub">${actionable.length} trade-ready • ${laneSignals.length} total signals<br>${buys} buy • ${sells} sell • ${watch} watch</div>
+      <div class="laneSub">${actionable.length} trade-ready | ${laneSignals.length} total signals<br>${buys} buy | ${sells} sell | ${watch} watch</div>
       <div class="laneStatRow">
         <span class="lanePill">${status}</span>
-        <span class="laneMini">${laneReport.open_positions || 0} open • day P&amp;L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}</span>
+        <span class="laneMini">${detailText}</span>
+      </div>
+      <div class="laneStatRow" style="margin-top:6px;padding-top:6px">
+        <span class="laneMini">${control.enabled ? 'new entries allowed' : 'new entries blocked'}</span>
+        <button type="button" class="laneActionBtn ${buttonClass}" onclick="setLaneControl('${lane}', ${control.enabled ? 'false' : 'true'}, event)">${buttonLabel}</button>
       </div>
     </div>`;
   });
@@ -3138,12 +3915,14 @@ function renderDailyReport(data){
   date.textContent = overall.report_date || 'today';
   grid.innerHTML = lanes.map(lane => {
     const isActive = activeLane === lane.lane || (activeLane === 'all' && lane.lane === 'day') || (activeLane === 'reports' && lane.lane === 'day');
+    const openPnl = Number(lane.open_unrealized_pnl || 0);
     return `<div class="laneCard${isActive ? ' active' : ''}">
       <div class="lanel">${lane.lane_label}</div>
       <div class="lanev" style="color:${(lane.day_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">${lane.day_pnl >= 0 ? '+' : ''}$${Math.abs(lane.day_pnl || 0).toFixed(2)}</div>
       <div class="laneSub">
         ${lane.trade_ready || 0} trade-ready • ${lane.open_positions || 0} open positions<br>
-        ${lane.closed_trades_today || 0} closed • ${lane.win_rate_pct || 0}% win • PF ${lane.profit_factor || 0}<br>
+        ${lane.fills_today || 0} fills today • ${lane.closed_trades_today || 0} closed • ${lane.win_rate_pct || 0}% win • PF ${lane.profit_factor || 0}<br>
+        open unrealized ${openPnl >= 0 ? '+' : '-'}$${Math.abs(openPnl).toFixed(2)} • realized day P&amp;L above<br>
         status ${lane.status || 'paper'}
       </div>
     </div>`;
@@ -3275,6 +4054,255 @@ function refreshPos(){
 
 function fmtMoney(v){
   return v == null ? '-' : '$' + Number(v).toLocaleString(undefined, {maximumFractionDigits:2});
+}
+
+function fmtSignedMoney(v){
+  const num = Number(v);
+  if(!Number.isFinite(num)) return '-';
+  return `${num >= 0 ? '+' : '-'}$${Math.abs(num).toLocaleString(undefined, {maximumFractionDigits:2, minimumFractionDigits:2})}`;
+}
+
+function fmtDateTime(v){
+  if(!v) return '-';
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? '-' : d.toLocaleString();
+}
+
+function fmtHoldMinutes(v){
+  const num = Number(v);
+  if(!Number.isFinite(num)) return '-';
+  if(num < 60) return `${num.toFixed(1)}m`;
+  const hours = num / 60;
+  if(hours < 24) return `${hours.toFixed(1)}h`;
+  return `${(hours / 24).toFixed(1)}d`;
+}
+
+function escapeHtml(value){
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function tradeLedgerFilters(){
+  const lane = document.getElementById('trdlane')?.value || 'all';
+  const status = document.getElementById('trdstatus')?.value || 'all';
+  const query = (document.getElementById('trdsearch')?.value || '').trim().toLowerCase();
+  return {lane, status, query};
+}
+
+function renderTradeLedger(data){
+  tradeLedgerCache = data || tradeLedgerCache;
+  const payload = tradeLedgerCache || {};
+  const summary = payload.summary || {};
+  const rows = Array.isArray(payload.trades) ? payload.trades : [];
+  const counter = document.getElementById('trdc');
+  const meta = document.getElementById('trdmeta');
+  const body = document.getElementById('trdtb');
+  const win = document.getElementById('trdwin');
+  const winMeta = document.getElementById('trdwinmeta');
+  const net = document.getElementById('trdnet');
+  const netMeta = document.getElementById('trdnetmeta');
+  const open = document.getElementById('trdopen');
+  const openMeta = document.getElementById('trdopenmeta');
+  const fees = document.getElementById('trdfees');
+  const feesMeta = document.getElementById('trdfeesmeta');
+  const best = document.getElementById('trdbest');
+  const bestMeta = document.getElementById('trdbestmeta');
+  const worst = document.getElementById('trdworst');
+  const worstMeta = document.getElementById('trdworstmeta');
+  const lanes = document.getElementById('trdlanes');
+  if(!counter || !meta || !body || !win || !winMeta || !net || !netMeta || !open || !openMeta || !fees || !feesMeta || !best || !bestMeta || !worst || !worstMeta || !lanes) return;
+
+  const breakdown = summary.lane_breakdown || {};
+  const filters = tradeLedgerFilters();
+  const filteredRows = rows.filter(row => {
+    const laneMatch = filters.lane === 'all' || String(row.lane || '').toLowerCase() === filters.lane;
+    const statusMatch = filters.status === 'all' || String(row.status || '').toLowerCase() === filters.status;
+    if(!laneMatch || !statusMatch) return false;
+    if(!filters.query) return true;
+    const haystack = [
+      row.symbol,
+      row.position_key,
+      row.lane_label,
+      row.setup_id,
+      row.signal_source,
+      row.entry_reason,
+      row.exit_reason,
+      row.time_bucket,
+      row.execution_mode,
+    ].join(' ').toLowerCase();
+    return haystack.includes(filters.query);
+  });
+
+  const closedNet = Number(summary.net_closed_pnl || 0);
+  const openNet = Number(summary.net_open_pnl || 0);
+  const feesPaid = Number(summary.total_commission || 0);
+  const bestValue = Number(summary.best_trade_net_pnl);
+  const worstValue = Number(summary.worst_trade_net_pnl);
+
+  counter.textContent = `${filteredRows.length} shown / ${Number(payload.total_count || rows.length)} total`;
+  win.textContent = `${Number(summary.win_rate_pct || 0).toFixed(1)}%`;
+  win.style.color = Number(summary.win_rate_pct || 0) >= 50 ? 'var(--green)' : 'var(--amber)';
+  winMeta.textContent = summary.win_rate_label || 'waiting for closed paper trades';
+
+  net.textContent = fmtSignedMoney(closedNet);
+  net.style.color = closedNet >= 0 ? 'var(--green)' : 'var(--red)';
+  netMeta.textContent = `${summary.closed_trades || 0} closed | ${summary.winning_trades || 0} winners`;
+
+  open.textContent = fmtSignedMoney(openNet);
+  open.style.color = openNet >= 0 ? 'var(--green)' : 'var(--red)';
+  openMeta.textContent = `${summary.open_trades || 0} open | unrealized ${fmtSignedMoney(summary.gross_unrealized_pnl || 0)}`;
+
+  fees.textContent = fmtMoney(feesPaid);
+  fees.style.color = feesPaid > 0 ? 'var(--amber)' : 'var(--muted)';
+  feesMeta.textContent = summary.avg_hold_minutes != null ? `Avg hold ${fmtHoldMinutes(summary.avg_hold_minutes)}` : 'Hold time builds after exits';
+
+  best.textContent = summary.best_trade_symbol ? `${summary.best_trade_symbol} ${fmtSignedMoney(bestValue)}` : '-';
+  best.style.color = Number.isFinite(bestValue) && bestValue >= 0 ? 'var(--green)' : 'var(--muted)';
+  bestMeta.textContent = summary.best_trade_symbol ? 'Largest closed winner' : 'Waiting for a closed win';
+
+  worst.textContent = summary.worst_trade_symbol ? `${summary.worst_trade_symbol} ${fmtSignedMoney(worstValue)}` : '-';
+  worst.style.color = Number.isFinite(worstValue) && worstValue < 0 ? 'var(--red)' : 'var(--muted)';
+  worstMeta.textContent = summary.worst_trade_symbol ? 'Largest closed loser' : 'Waiting for a closed loss';
+
+  lanes.innerHTML = ['normal', 'day', 'crypto'].map(laneName => {
+    const lane = breakdown[laneName] || {};
+    const laneNet = Number(lane.net_pnl || 0);
+    return `<div class="laneCard">
+      <div class="lanel">${escapeHtml(lane.lane_label || LANE_LABELS[laneName] || laneName)}</div>
+      <div class="lanev" style="color:${laneNet >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtSignedMoney(laneNet)}</div>
+      <div class="laneSub">${lane.trade_count || 0} trades | ${lane.closed_trades || 0} closed | ${lane.open_trades || 0} open<br>${Number(lane.win_rate_pct || 0).toFixed(1)}% win</div>
+    </div>`;
+  }).join('');
+
+  const lastTradeLabel = summary.last_trade_at ? `Last fill ${fmtDateTime(summary.last_trade_at)}` : 'No fills yet';
+  meta.textContent = `${lastTradeLabel} | ${summary.fill_events || 0} fill events | ${summary.closed_trades || 0} closed | ${summary.open_trades || 0} open`;
+
+  if(!filteredRows.length){
+    body.innerHTML = '<tr><td colspan="13" style="color:var(--muted);padding:14px">No trades match the current filters</td></tr>';
+    return;
+  }
+
+  body.innerHTML = filteredRows.map(row => {
+    const isOpen = String(row.status || '').toLowerCase() === 'open';
+    const netPnl = Number(row.net_pnl || 0);
+    const realized = Number(row.gross_realized_pnl || 0);
+    const unrealized = Number(row.gross_unrealized_pnl || 0);
+    const statusColor = isOpen ? 'var(--blue)' : (netPnl >= 0 ? 'var(--green)' : 'var(--red)');
+    const reason = row.exit_reason || row.entry_reason || row.signal_source || '-';
+    const symbolMeta = [row.setup_id, row.time_bucket, row.execution_mode, row.position_key].filter(Boolean).join(' | ');
+    const laneMeta = [row.lane_label || row.lane || '-', row.position_direction || '-'].join(' | ');
+    const edgeBits = [];
+    if(row.entry_expected_edge_pct != null) edgeBits.push(`edge ${Number(row.entry_expected_edge_pct).toFixed(2)}%`);
+    if(row.entry_take_probability != null) edgeBits.push(`take ${Math.round(Number(row.entry_take_probability) * 100)}%`);
+    if(row.avg_fill_ratio_pct != null) edgeBits.push(`fill ${Number(row.avg_fill_ratio_pct).toFixed(1)}%`);
+    return `<tr>
+      <td><div>${escapeHtml(fmtDateTime(row.last_fill_time || row.entry_time))}</div><div style="color:var(--muted);font-size:9px">${row.exit_time ? `out ${escapeHtml(fmtDateTime(row.exit_time))}` : 'still open'}</div></td>
+      <td><div style="font-weight:600">${escapeHtml(row.symbol || '-')}</div><div style="color:var(--muted);font-size:9px">${escapeHtml(symbolMeta || '-')}</div></td>
+      <td><div>${escapeHtml(laneMeta)}</div><div style="color:var(--muted);font-size:9px">${escapeHtml(row.market || '-')}</div></td>
+      <td><span style="color:${statusColor};font-weight:600">${isOpen ? 'OPEN' : 'CLOSED'}</span><div style="color:var(--muted);font-size:9px">${row.fill_count || 0} fills${row.partial_fill_count ? ` | ${row.partial_fill_count} partial` : ''}</div></td>
+      <td>${fmtQty(row.quantity)}</td>
+      <td>${row.avg_buy_price != null ? fmtMoney(row.avg_buy_price) : '-'}</td>
+      <td>${(isOpen ? row.current_price : row.avg_sell_price) != null ? fmtMoney(isOpen ? row.current_price : row.avg_sell_price) : '-'}</td>
+      <td style="color:${realized >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtSignedMoney(realized)}</td>
+      <td style="color:${unrealized >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtSignedMoney(unrealized)}</td>
+      <td style="color:${netPnl >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtSignedMoney(netPnl)}<div style="color:var(--muted);font-size:9px">${row.net_return_pct != null ? `${Number(row.net_return_pct).toFixed(2)}%` : ''}</div></td>
+      <td>${fmtMoney(row.commission || 0)}</td>
+      <td>${fmtHoldMinutes(row.hold_minutes)}</td>
+      <td><div>${escapeHtml(reason)}</div><div style="color:var(--muted);font-size:9px">${escapeHtml(edgeBits.join(' | '))}</div></td>
+    </tr>`;
+  }).join('');
+}
+
+function refreshTradeLedger(){
+  fetch('/api/trades').then(r => r.json()).then(d => renderTradeLedger(d)).catch(() => {});
+}
+
+function refreshCryptoTradeLog(){
+  const counter = document.getElementById('ctlc');
+  const meta = document.getElementById('ctlmeta');
+  const body = document.getElementById('ctltb');
+  const net = document.getElementById('ctlnet');
+  const netMeta = document.getElementById('ctlnetmeta');
+  const open = document.getElementById('ctlopen');
+  const openMeta = document.getElementById('ctlopenmeta');
+  const win = document.getElementById('ctlwin');
+  const winMeta = document.getElementById('ctlwinmeta');
+  const fees = document.getElementById('ctlfees');
+  const feesMeta = document.getElementById('ctlfeesmeta');
+  const best = document.getElementById('ctlbest');
+  const bestMeta = document.getElementById('ctlbestmeta');
+  const worst = document.getElementById('ctlworst');
+  const worstMeta = document.getElementById('ctlworstmeta');
+  if(!counter || !meta || !body || !net || !netMeta || !open || !openMeta || !win || !winMeta || !fees || !feesMeta || !best || !bestMeta || !worst || !worstMeta) return;
+
+  fetch('/api/crypto-trade-log').then(r => r.json()).then(d => {
+    const summary = d.summary || {};
+    const rows = d.trades || [];
+    const closedNet = Number(summary.net_closed_pnl || 0);
+    const openNet = Number(summary.net_open_pnl || 0);
+    const feesPaid = Number(summary.total_commission || 0);
+    const bestValue = Number(summary.best_trade_net_pnl);
+    const worstValue = Number(summary.worst_trade_net_pnl);
+
+    counter.textContent = `${rows.length} shown / ${d.total_count || 0} total`;
+    net.textContent = fmtSignedMoney(closedNet);
+    net.style.color = closedNet >= 0 ? 'var(--green)' : 'var(--red)';
+    netMeta.textContent = `${summary.closed_trades || 0} closed • ${summary.fill_events || 0} fill events`;
+    open.textContent = fmtSignedMoney(openNet);
+    open.style.color = openNet >= 0 ? 'var(--green)' : 'var(--red)';
+    openMeta.textContent = `${summary.open_trades || 0} open • unrealized ${fmtSignedMoney(summary.gross_unrealized_pnl || 0)}`;
+    win.textContent = `${Number(summary.win_rate_pct || 0).toFixed(1)}%`;
+    win.style.color = Number(summary.win_rate_pct || 0) >= 50 ? 'var(--green)' : 'var(--amber)';
+    winMeta.textContent = `${summary.winning_trades || 0} winners • ${summary.losing_trades || 0} losers`;
+    fees.textContent = fmtMoney(feesPaid);
+    fees.style.color = feesPaid > 0 ? 'var(--amber)' : 'var(--muted)';
+    feesMeta.textContent = summary.avg_hold_minutes != null ? `Avg hold ${fmtHoldMinutes(summary.avg_hold_minutes)}` : 'Hold time builds after exits';
+    best.textContent = summary.best_trade_symbol ? `${summary.best_trade_symbol} ${fmtSignedMoney(bestValue)}` : '-';
+    best.style.color = Number.isFinite(bestValue) && bestValue >= 0 ? 'var(--green)' : 'var(--muted)';
+    bestMeta.textContent = summary.best_trade_symbol ? 'Largest closed winner' : 'Waiting for a closed win';
+    worst.textContent = summary.worst_trade_symbol ? `${summary.worst_trade_symbol} ${fmtSignedMoney(worstValue)}` : '-';
+    worst.style.color = Number.isFinite(worstValue) && worstValue < 0 ? 'var(--red)' : 'var(--muted)';
+    worstMeta.textContent = summary.worst_trade_symbol ? 'Largest closed loser' : 'Waiting for a closed loss';
+
+    const lastTradeLabel = summary.last_trade_at ? `Last fill ${fmtDateTime(summary.last_trade_at)}` : 'No crypto fills yet';
+    meta.textContent = `${lastTradeLabel} • closed gross ${fmtSignedMoney(summary.gross_closed_pnl || 0)} • open gross ${fmtSignedMoney(summary.gross_open_pnl || 0)}`;
+
+    if(!rows.length){
+      body.innerHTML = '<tr><td colspan="12" style="color:var(--muted);padding:14px">No crypto trades logged yet</td></tr>';
+      return;
+    }
+
+    body.innerHTML = rows.map(row => {
+      const isOpen = row.status === 'open';
+      const netPnl = Number(row.net_pnl || 0);
+      const realized = Number(row.gross_realized_pnl || 0);
+      const unrealized = Number(row.gross_unrealized_pnl || 0);
+      const statusColor = isOpen ? 'var(--blue)' : (netPnl >= 0 ? 'var(--green)' : 'var(--red)');
+      const reason = row.exit_reason || row.entry_reason || row.signal_source || '-';
+      const symbolMeta = [row.setup_id, row.time_bucket, row.execution_mode].filter(Boolean).join(' • ');
+      const edgeBits = [];
+      if(row.entry_expected_edge_pct != null) edgeBits.push(`edge ${Number(row.entry_expected_edge_pct).toFixed(2)}%`);
+      if(row.entry_take_probability != null) edgeBits.push(`take ${Math.round(Number(row.entry_take_probability) * 100)}%`);
+      return `<tr>
+        <td><div>${fmtDateTime(row.entry_time)}</div><div style="color:var(--muted);font-size:9px">${row.exit_time ? `out ${fmtDateTime(row.exit_time)}` : 'still open'}</div></td>
+        <td><div style="font-weight:600">${row.symbol || '-'}</div><div style="color:var(--muted);font-size:9px">${symbolMeta || (row.position_key || '')}</div></td>
+        <td><span style="color:${statusColor};font-weight:600">${isOpen ? 'OPEN' : 'CLOSED'}</span><div style="color:var(--muted);font-size:9px">${row.fill_count || 0} fills${row.partial_fill_count ? ` • ${row.partial_fill_count} partial` : ''}</div></td>
+        <td>${fmtQty(row.quantity)}</td>
+        <td>${row.avg_buy_price != null ? fmtMoney(row.avg_buy_price) : '-'}</td>
+        <td>${(isOpen ? row.current_price : row.avg_sell_price) != null ? fmtMoney(isOpen ? row.current_price : row.avg_sell_price) : '-'}</td>
+        <td style="color:${realized >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtSignedMoney(realized)}</td>
+        <td style="color:${unrealized >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtSignedMoney(unrealized)}</td>
+        <td style="color:${netPnl >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtSignedMoney(netPnl)}<div style="color:var(--muted);font-size:9px">${row.net_return_pct != null ? `${Number(row.net_return_pct).toFixed(2)}%` : ''}</div></td>
+        <td>${fmtMoney(row.commission || 0)}</td>
+        <td>${fmtHoldMinutes(row.hold_minutes)}</td>
+        <td><div>${reason}</div><div style="color:var(--muted);font-size:9px">${edgeBits.join(' • ')}</div></td>
+      </tr>`;
+    }).join('');
+  }).catch(() => {});
 }
 
 function refreshLivePortfolio(){
@@ -3564,6 +4592,8 @@ refreshPortfolioSummary();
 fetch('/api/stress-test').then(r => r.json()).then(renderStress).catch(() => {});
 refreshPos();
 refreshLivePortfolio();
+refreshCryptoTradeLog();
+refreshTradeLedger();
 refreshExecutionTrace();
 refreshExecutionBacktest();
 refreshExecutionDivergence();
@@ -3577,6 +4607,8 @@ setInterval(refreshPricesSnapshot, 5000);
 setInterval(refreshPortfolioSummary, 10000);
 setInterval(refreshPos, 5000);
 setInterval(refreshLivePortfolio, 15000);
+setInterval(refreshCryptoTradeLog, 10000);
+setInterval(refreshTradeLedger, 10000);
 setInterval(refreshExecutionTrace, 5000);
 setInterval(refreshExecutionBacktest, 30000);
 setInterval(refreshExecutionDivergence, 7000);
@@ -3702,4 +4734,3 @@ if __name__ == "__main__":
             allow_unsafe_werkzeug=os.getenv("ALLOW_UNSAFE_WERKZEUG", "1").strip().lower()
             in {"1", "true", "yes", "on"},
         )
-
