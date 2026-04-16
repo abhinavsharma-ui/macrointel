@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import sys
 import time
@@ -68,7 +69,7 @@ class SolverMesh:
             "maxPriorityFeePerGas": int(os.getenv("SOLVER_MESH_MAX_PRIORITY_FEE_WEI", str(10**9))),
             "type": 2,
         }
-        raw_tx = self.session_key.sign_tx(tx)
+        raw_tx = self._build_submission_payload(tx)
         tx_hash = self._submit_raw_transaction(raw_tx)
         fill_id = tx_hash or hashlib.sha256(raw_tx.encode("utf-8")).hexdigest()
         created_at = time.time()
@@ -84,6 +85,12 @@ class SolverMesh:
         }
         LOGGER.info("fill_submitted", fill_id=fill_id, solver=solver, origin_chain=order.originChainId)
         return fill_id
+
+    def _build_submission_payload(self, tx: dict[str, object]) -> str:
+        if self._dry_run:
+            dry_seed = json.dumps(tx, sort_keys=True, separators=(",", ":"))
+            return "0x" + hashlib.sha256(dry_seed.encode("utf-8")).hexdigest()
+        return self.session_key.sign_tx(tx)
 
     async def watch_fill(self, fill_id: str) -> AsyncGenerator[FillEvent, None]:
         resolved_fill_id = str(fill_id)

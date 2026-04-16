@@ -35,13 +35,25 @@ _RUNTIME_THREAD: threading.Thread | None = None
 
 class DeFiBridge:
     def __init__(self, dry_run: bool = False) -> None:
-        self.dry_run = bool(dry_run)
+        requested_dry_run = bool(dry_run)
+        provider_uri = str(os.getenv("WEB3_PROVIDER_URI", "")).strip()
+        delegate_key = str(os.getenv("DELEGATE_PRIVATE_KEY", "")).strip()
+        explicit_solver_mode = str(os.getenv("SOLVER_MESH_DRY_RUN", "")).strip().lower()
+        explicit_dry_run = explicit_solver_mode in {"1", "true", "yes", "on"}
+        explicit_live_mode = explicit_solver_mode in {"0", "false", "no", "off"}
+        live_execution_ready = bool(provider_uri and delegate_key)
+        self.dry_run = requested_dry_run or explicit_dry_run or not live_execution_ready
+        if explicit_live_mode and not live_execution_ready:
+            LOGGER.warning(
+                "live_execution_unavailable",
+                msg="missing live solver credentials; switching defi bridge to dry-run mode",
+            )
+        os.environ["SOLVER_MESH_DRY_RUN"] = "1" if self.dry_run else "0"
         if self.dry_run:
             os.environ.setdefault(
                 "DELEGATE_PRIVATE_KEY",
                 "0x59c6995e998f97a5a0044976f7d5f9bc6ab4fe71f5b3c3d4fe26c7c0e59101cf",
             )
-            os.environ.setdefault("SOLVER_MESH_DRY_RUN", "1")
 
         self.chain_configs = self._build_chain_configs()
         self.block_intel_feed = BlockIntelFeed(

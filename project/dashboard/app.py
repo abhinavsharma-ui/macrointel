@@ -589,6 +589,9 @@ def create_app(
     def _enrich_signal_row(
         row: Dict[str, Any],
         batch_meta: Optional[Dict[str, Dict[str, Any]]] = None,
+        *,
+        hydrate_meta: bool = True,
+        hydrate_prices: bool = True,
     ) -> Dict[str, Any]:
         payload = dict(row or {})
         symbol = str(payload.get("symbol") or "")
@@ -602,18 +605,19 @@ def create_app(
         payload.setdefault("scenario", payload.get("lane_label"))
 
         meta = payload.get("meta_decision")
-        if isinstance(meta, dict) and "take_trade" in meta:
-            pass
-        elif batch_meta is not None and symbol in batch_meta:
-            _apply_meta_decision(payload, batch_meta[symbol])
-        elif not (isinstance(meta, dict) and "take_trade" in meta):
-            try:
-                evaluated = _get_dashboard_meta_engine().evaluate_universe({symbol: payload}).get(symbol, {})
-            except Exception as exc:
-                logger.debug(f"Dashboard meta hydration failed for {symbol}: {exc}")
-                evaluated = {}
-            if evaluated:
-                _apply_meta_decision(payload, evaluated)
+        if hydrate_meta:
+            if isinstance(meta, dict) and "take_trade" in meta:
+                pass
+            elif batch_meta is not None and symbol in batch_meta:
+                _apply_meta_decision(payload, batch_meta[symbol])
+            elif not (isinstance(meta, dict) and "take_trade" in meta):
+                try:
+                    evaluated = _get_dashboard_meta_engine().evaluate_universe({symbol: payload}).get(symbol, {})
+                except Exception as exc:
+                    logger.debug(f"Dashboard meta hydration failed for {symbol}: {exc}")
+                    evaluated = {}
+                if evaluated:
+                    _apply_meta_decision(payload, evaluated)
 
         allocations = (_portfolio_overlay.get("allocations", {}) or {}) if isinstance(_portfolio_overlay, dict) else {}
         allocation = allocations.get(symbol, {})
@@ -626,9 +630,10 @@ def create_app(
             payload["beta_exposure"] = allocation.get("beta", 0.0)
             payload["portfolio_score"] = allocation.get("portfolio_score", 0.0)
 
-        price_payload = _latest_price_payload(symbol)
-        if price_payload:
-            payload.update({k: v for k, v in price_payload.items() if payload.get(k) in (None, "")})
+        if hydrate_prices:
+            price_payload = _latest_price_payload(symbol)
+            if price_payload:
+                payload.update({k: v for k, v in price_payload.items() if payload.get(k) in (None, "")})
 
         return payload
 
@@ -843,13 +848,22 @@ def create_app(
     def _flatten_signal_store(
         signal_snapshot: Optional[Dict[str, Dict[str, Any]]] = None,
         limit: Optional[int] = None,
+        *,
+        hydrate_meta: bool = True,
+        hydrate_prices: bool = True,
     ) -> List[Dict]:
         rows: List[Dict] = []
         seen_keys: set[str] = set()
         snapshot = signal_snapshot if signal_snapshot is not None else _signal_store_snapshot()
         batch_meta: Dict[str, Dict[str, Any]] = {}
+        enable_batch_meta = bool(
+            hydrate_meta and snapshot and (_dashboard_meta_batch_limit <= 0 or len(snapshot) <= _dashboard_meta_batch_limit)
+        )
+        enable_row_meta = bool(
+            hydrate_meta and (limit == 1 or not snapshot or _dashboard_meta_batch_limit <= 0 or len(snapshot) <= _dashboard_meta_batch_limit)
+        )
         try:
-            if snapshot and (_dashboard_meta_batch_limit <= 0 or len(snapshot) <= _dashboard_meta_batch_limit):
+            if enable_batch_meta:
                 batch_meta = _get_dashboard_meta_engine().evaluate_universe(dict(snapshot))
         except Exception as exc:
             logger.debug(f"Dashboard batch meta evaluation failed: {exc}")
@@ -858,7 +872,12 @@ def create_app(
             symbol = str(raw.get("symbol") or "")
             if not symbol:
                 continue
-            actual = _enrich_signal_row(dict(raw), batch_meta=batch_meta)
+            actual = _enrich_signal_row(
+                dict(raw),
+                batch_meta=batch_meta,
+                hydrate_meta=enable_row_meta,
+                hydrate_prices=hydrate_prices,
+            )
             actual_key = str(actual.get("signal_key") or f"{symbol}::{actual.get('lane', 'normal')}")
             if actual_key not in seen_keys:
                 rows.append(actual)
@@ -873,7 +892,11 @@ def create_app(
                 variant_payload["symbol"] = symbol
                 variant_payload["lane"] = "normal"
                 variant_payload.setdefault("signal_key", f"{symbol}::normal")
-                variant = _enrich_signal_row(variant_payload)
+                variant = _enrich_signal_row(
+                    variant_payload,
+                    hydrate_meta=enable_row_meta,
+                    hydrate_prices=hydrate_prices,
+                )
                 variant["lane"] = "normal"
                 variant["lane_label"] = _lane_label("normal")
                 variant["signal_key"] = variant.get("signal_key") or f"{symbol}::normal"
@@ -1101,7 +1124,12 @@ def create_app(
     def get_signals():
         lane_filter = (request.args.get("lane") or "").strip().lower()
         requested_limit = max(0, int(request.args.get("limit") or _dashboard_signal_limit or 0))
-        sigs = _flatten_signal_store(_signal_store_snapshot(), limit=requested_limit if requested_limit > 0 else None)
+        sigs = _flatten_signal_store(
+            _signal_store_snapshot(),
+            limit=requested_limit if requested_limit > 0 else None,
+            hydrate_meta=False,
+            hydrate_prices=False,
+        )
         if lane_filter in {"normal", "day", "crypto"}:
             sigs = [s for s in sigs if str(s.get("lane", "")).lower() == lane_filter]
         sigs.sort(key=lambda s: (
@@ -1453,7 +1481,20 @@ def create_app(
         signal_snapshot = _signal_store_snapshot()
         emit(
             "signals_update",
-            {"signals": [_dashboard_signal_summary(signal) for signal in _limit_values(_flatten_signal_store(signal_snapshot, limit=_dashboard_signal_limit), _dashboard_signal_limit)]},
+            {
+                "signals": [
+                    _dashboard_signal_summary(signal)
+                    for signal in _limit_values(
+                        _flatten_signal_store(
+                            signal_snapshot,
+                            limit=_dashboard_signal_limit,
+                            hydrate_meta=False,
+                            hydrate_prices=False,
+                        ),
+                        _dashboard_signal_limit,
+                    )
+                ]
+            },
         )
         if paper_broker:
             emit("portfolio_update", _reprice_paper_broker_summary(paper_broker.get_summary()))
@@ -1500,7 +1541,12 @@ def create_app(
                     if sig:
                         lane_router.publish_signal(sig)
                         if _client_count[0] > 0:
-                            socketio.emit("new_signal", _dashboard_signal_summary(_enrich_signal_row(dict(sig))))
+                            socketio.emit(
+                                "new_signal",
+                                _dashboard_signal_summary(
+                                    _enrich_signal_row(dict(sig), hydrate_meta=False, hydrate_prices=False)
+                                ),
+                            )
                 _last_ids.update(new_ids)
 
                 if _client_count[0] == 0:
@@ -1529,7 +1575,18 @@ def create_app(
 
                 # Signals
                 if cur_ids:
-                    limited_signals = [_dashboard_signal_summary(signal) for signal in _limit_values(_flatten_signal_store(signal_snapshot, limit=_dashboard_signal_limit), _dashboard_signal_limit)]
+                    limited_signals = [
+                        _dashboard_signal_summary(signal)
+                        for signal in _limit_values(
+                            _flatten_signal_store(
+                                signal_snapshot,
+                                limit=_dashboard_signal_limit,
+                                hydrate_meta=False,
+                                hydrate_prices=False,
+                            ),
+                            _dashboard_signal_limit,
+                        )
+                    ]
                     fingerprint = "|".join(
                         f"{sig.get('signal_key', sig.get('symbol'))}:{sig.get('signal')}:{round(float(sig.get('confidence', 0.0)), 4)}:{round(float(sig.get('conviction_score', 0.0)), 2)}:{round(float(sig.get('rank_score', 0.0)), 4)}:{sig.get('lane')}:{sig.get('trade_eligible')}"
                         for sig in limited_signals
