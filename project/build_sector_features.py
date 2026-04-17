@@ -127,8 +127,58 @@ SYMBOL_SECTOR = {
     ]},
 }
 
-# Indian NSE → no perfect sector ETFs, use broad index as proxy
+# Indian NSE → no perfect sector ETFs, use broad index as proxy (legacy default)
 NSE_PROXY = "EEM"  # Emerging markets as sector proxy for NSE stocks
+
+# NSE sector indices via yfinance — real sector proxies for Indian stocks.
+# Keys are yfinance tickers, values are logical sector labels.
+NSE_SECTOR_INDICES = {
+    "^NSEI":       "NSE_Market",      # Nifty 50 (market proxy)
+    "^CNXIT":      "IT",
+    "^NSEBANK":    "Bank",             # Nifty Bank
+    "^CNXPHARMA":  "Pharma",
+    "^CNXAUTO":    "Auto",
+    "^CNXFMCG":    "FMCG",
+    "^CNXMETAL":   "Metal",
+    "^CNXENERGY":  "Energy",
+    "^NSMIDCP":    "NSE_MidCap",      # Nifty Midcap 50 (for regime flag)
+}
+
+# NSE symbol -> sector index ticker (subset; unknown symbols fall back to ^NSEI)
+NSE_SYMBOL_SECTOR = {
+    **{s: "^CNXIT" for s in [
+        "TCS", "INFY", "WIPRO", "HCLTECH", "TECHM", "LTIM", "LTM", "PERSISTENT",
+        "MPHASIS", "COFORGE", "LT",
+    ]},
+    **{s: "^NSEBANK" for s in [
+        "HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK", "INDUSINDBK",
+        "BANKBARODA", "PNB", "IDFCFIRSTB", "FEDERALBNK", "RBLBANK", "BANDHANBNK",
+    ]},
+    **{s: "^CNXPHARMA" for s in [
+        "SUNPHARMA", "DRREDDY", "CIPLA", "DIVISLAB", "LUPIN", "BIOCON", "APOLLOHOSP",
+        "TORNTPHARM", "ALKEM", "LALPATHLAB", "AUROBINDO", "GLAND",
+    ]},
+    **{s: "^CNXAUTO" for s in [
+        "MARUTI", "TATAMOTORS", "M&M", "HEROMOTOCO", "BAJAJ-AUTO", "EICHERMOT",
+        "BAJAJHLDNG", "ASHOKLEY", "TVSMOTOR", "BOSCHLTD", "MOTHERSON", "APOLLOTYRE",
+    ]},
+    **{s: "^CNXFMCG" for s in [
+        "HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "DABUR", "MARICO", "GODREJCP",
+        "COLPAL", "TATACONSUM", "EMAMILTD", "VBL",
+    ]},
+    **{s: "^CNXMETAL" for s in [
+        "TATASTEEL", "JSWSTEEL", "HINDALCO", "COALINDIA", "VEDL", "SAIL", "JINDALSTEL",
+        "NATIONALUM", "NMDC",
+    ]},
+    **{s: "^CNXENERGY" for s in [
+        "RELIANCE", "ONGC", "BPCL", "IOC", "GAIL", "POWERGRID", "NTPC", "ADANIGREEN",
+        "ADANIPOWER", "TATAPOWER", "NHPC",
+    ]},
+}
+
+NSE_MARKET_TICKER = "^NSEI"       # Nifty 50
+NSE_MIDCAP_TICKER = "^NSMIDCP"    # Nifty Midcap 50
+GOLDILOCKS_MIDCAP_PREMIUM = 0.01  # 1% 20-bar outperformance flag per spec
 
 
 def fetch_etf_data(force_refresh: bool = False) -> pd.DataFrame:
@@ -146,10 +196,20 @@ def fetch_etf_data(force_refresh: bool = False) -> pd.DataFrame:
         logger.error("yfinance not installed: pip install yfinance")
         return pd.DataFrame()
 
-    tickers = list(SECTOR_ETFS.keys()) + ["EEM"]
-    data = yf.download(tickers, period="15y", auto_adjust=True, progress=False)["Close"]
+    tickers = list(SECTOR_ETFS.keys()) + ["EEM"] + list(NSE_SECTOR_INDICES.keys())
+    try:
+        raw = yf.download(tickers, period="15y", auto_adjust=True, progress=False, group_by="column")
+        if isinstance(raw.columns, pd.MultiIndex) and "Close" in raw.columns.get_level_values(0):
+            data = raw["Close"]
+        else:
+            data = raw
+    except Exception as exc:
+        logger.error("yfinance download failed: %s", exc)
+        return pd.DataFrame()
     data.index = pd.to_datetime(data.index)
     data = data.sort_index().ffill()
+    # Drop fully-empty columns (e.g. NSE indices not resolvable in some yf versions)
+    data = data.dropna(axis=1, how="all")
     data.to_parquet(ETF_CACHE)
     logger.info(f"ETF data: {len(data)} days × {len(data.columns)} ETFs")
     return data
@@ -160,6 +220,79 @@ def compute_rs(stock_returns: pd.Series, etf_returns: pd.Series, window: int) ->
     stock_cum = (1 + stock_returns).rolling(window).apply(np.prod, raw=True) - 1
     etf_cum = (1 + etf_returns).rolling(window).apply(np.prod, raw=True) - 1
     return (stock_cum - etf_cum).clip(-1, 1)
+
+
+def _nse_sector_for(symbol: str) -> str:
+    base = symbol.replace(".NS", "").replace(".BO", "").upper()
+    return NSE_SYMBOL_SECTOR.get(base, NSE_MARKET_TICKER)
+
+
+def _enrich_nse_symbol(df: pd.DataFrame, symbol: str, etf_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    NSE-specific enrichment. Writes:
+      sector_rs_score_5d / _10d / _20d     : rolling RS vs NSE sector index
+      sector_rs_trend                       : 5d - 20d
+      sector_leader / sector_laggard        : percentile flags
+      sector_etf_rs_market                  : sector vs Nifty 50
+      sector_momentum                       : sector 20d cumulative
+      market_regime                         : Nifty 50 above 200d MA
+      regime_flag                           : "goldilocks" if midcap vs largecap
+                                              20-bar cumret premium >1%
+    """
+    sector_ticker = _nse_sector_for(symbol)
+    if sector_ticker not in etf_data.columns or NSE_MARKET_TICKER not in etf_data.columns:
+        logger.warning("NSE sector index missing (%s or %s); writing neutral",
+                       sector_ticker, NSE_MARKET_TICKER)
+        for col in ("sector_rs_score_5d", "sector_rs_score_10d", "sector_rs_score_20d",
+                    "sector_rs_trend", "sector_leader", "sector_laggard",
+                    "sector_etf_rs_market", "sector_momentum", "market_regime"):
+            df[col] = 0.0
+        df["regime_flag"] = "neutral"
+        return df
+
+    aligned = etf_data.reindex(df.index, method="ffill")
+    if "returns_1d" in df.columns:
+        stock_ret = df["returns_1d"].fillna(0)
+    elif "close" in df.columns:
+        stock_ret = df["close"].pct_change().fillna(0)
+    else:
+        return df
+
+    sector_ret = aligned[sector_ticker].pct_change().fillna(0)
+    market_ret = aligned[NSE_MARKET_TICKER].pct_change().fillna(0)
+
+    df["sector_rs_score_5d"] = compute_rs(stock_ret, sector_ret, 5)
+    df["sector_rs_score_10d"] = compute_rs(stock_ret, sector_ret, 10)
+    df["sector_rs_score_20d"] = compute_rs(stock_ret, sector_ret, 20)
+    df["sector_rs_trend"] = df["sector_rs_score_5d"] - df["sector_rs_score_20d"]
+
+    rs_mean = df["sector_rs_score_20d"].rolling(252).mean()
+    rs_std = df["sector_rs_score_20d"].rolling(252).std() + 1e-9
+    rs_z = (df["sector_rs_score_20d"] - rs_mean) / rs_std
+    rank = 1.0 / (1.0 + np.exp(-rs_z))
+    df["sector_rank_20d"] = rank
+    df["sector_leader"] = (rank > 0.8).astype(float)
+    df["sector_laggard"] = (rank < 0.2).astype(float)
+
+    df["sector_etf_rs_market"] = compute_rs(sector_ret, market_ret, 20)
+    sector_cum_20 = (1 + sector_ret).rolling(20).apply(np.prod, raw=True) - 1
+    df["sector_momentum"] = sector_cum_20.clip(-0.5, 0.5)
+
+    nifty_price = aligned[NSE_MARKET_TICKER]
+    ma200 = nifty_price.rolling(200).mean()
+    df["market_regime"] = (nifty_price > ma200).astype(float)
+
+    # Goldilocks regime: Nifty Midcap 50 vs Nifty 50 on 20-bar rolling cumret
+    if NSE_MIDCAP_TICKER in aligned.columns:
+        mid_ret = aligned[NSE_MIDCAP_TICKER].pct_change().fillna(0)
+        mid_cum = (1 + mid_ret).rolling(20).apply(np.prod, raw=True) - 1
+        large_cum = (1 + market_ret).rolling(20).apply(np.prod, raw=True) - 1
+        premium = mid_cum - large_cum
+        df["regime_flag"] = np.where(premium > GOLDILOCKS_MIDCAP_PREMIUM, "goldilocks", "normal")
+    else:
+        df["regime_flag"] = "normal"
+
+    return df
 
 
 def enrich_symbol(symbol: str, etf_data: pd.DataFrame) -> bool:
@@ -174,12 +307,16 @@ def enrich_symbol(symbol: str, etf_data: pd.DataFrame) -> bool:
         logger.warning(f"{symbol}: read error — {e}")
         return False
 
-    # Determine sector ETF
+    # NSE path takes precedence if the symbol is Indian
+    is_nse = ".NS" in symbol or ".BO" in symbol
+    if is_nse:
+        df = _enrich_nse_symbol(df, symbol, etf_data)
+        df.to_parquet(feat_file)
+        return True
+
+    # Determine sector ETF (US path)
     base = symbol.replace(".NS", "").replace(".BO", "")
-    if ".NS" in symbol or ".BO" in symbol:
-        sector_etf = "EEM"
-    else:
-        sector_etf = SYMBOL_SECTOR.get(symbol, SYMBOL_SECTOR.get(base, "SPY"))
+    sector_etf = SYMBOL_SECTOR.get(symbol, SYMBOL_SECTOR.get(base, "SPY"))
 
     if sector_etf not in etf_data.columns or "SPY" not in etf_data.columns:
         return False

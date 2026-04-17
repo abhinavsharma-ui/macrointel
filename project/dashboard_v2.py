@@ -136,7 +136,7 @@ cursor:pointer;transition:transform .15s,box-shadow .15s,border-color .15s;
     <div style="font-size:10px;color:var(--muted);margin-left:8px">live trading intelligence</div>
   </div>
   <div class="status">
-    <span>Portfolio <strong id="hp" class="up">$14,314</strong></span>
+    <span>Portfolio <strong id="hp">-</strong></span>
     <span>Signals <strong id="hsi">35</strong></span>
     <span>ML Model <strong id="hml">ACTIVE</strong></span>
     <span>Positions <strong id="hpos">9</strong></span>
@@ -145,10 +145,10 @@ cursor:pointer;transition:transform .15s,box-shadow .15s,border-color .15s;
 </div>
 
 <div class="metrics">
-  <div class="met"><div class="ml">Portfolio Value</div><div class="mv up" id="mpv">$14,314</div><div class="ms" id="mret">+186.3% all time</div></div>
-  <div class="met"><div class="ml">Open Positions</div><div class="mv" id="mpos">9</div><div class="ms">Active trades</div></div>
-  <div class="met"><div class="ml">Signals</div><div class="mv" style="color:var(--blue)" id="mns">35</div><div class="ms" id="msp">28 buy • 7 sell</div></div>
-  <div class="met"><div class="ml">ML Model</div><div class="mv" style="color:var(--green)" id="mmeta">ACTIVE</div><div class="ms" id="mmetas">76.2% precision</div></div>
+  <div class="met"><div class="ml">Portfolio Value</div><div class="mv" id="mpv">-</div><div class="ms" id="mret">-</div></div>
+  <div class="met"><div class="ml">Open Positions</div><div class="mv" id="mpos">-</div><div class="ms">Active trades</div></div>
+  <div class="met"><div class="ml">Signals</div><div class="mv" style="color:var(--blue)" id="mns">-</div><div class="ms" id="msp">-</div></div>
+  <div class="met"><div class="ml">ML Model</div><div class="mv" id="mmeta">-</div><div class="ms" id="mmetas">-</div></div>
 </div>
 
 <div class="heroGrid">
@@ -186,7 +186,7 @@ cursor:pointer;transition:transform .15s,box-shadow .15s,border-color .15s;
       <div class="returnCard"><div class="returnLabel">7D</div><div class="returnValue" id="ret-7d">-</div><div class="returnMeta">This week</div></div>
       <div class="returnCard"><div class="returnLabel">30D</div><div class="returnValue" id="ret-30d">-</div><div class="returnMeta">This month</div></div>
       <div class="returnCard"><div class="returnLabel">90D</div><div class="returnValue" id="ret-90d">-</div><div class="returnMeta">This quarter</div></div>
-      <div class="returnCard"><div class="returnLabel">All Time</div><div class="returnValue up" id="ret-all">+186.3%</div><div class="returnMeta">Since start</div></div>
+      <div class="returnCard"><div class="returnLabel">All Time</div><div class="returnValue" id="ret-all">-</div><div class="returnMeta">Since start</div></div>
     </div>
   </div>
 </div>
@@ -194,7 +194,7 @@ cursor:pointer;transition:transform .15s,box-shadow .15s,border-color .15s;
 <div class="card">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
     <div class="ct2" style="margin-bottom:0">Live Signals</div>
-    <div class="pill" id="sigcount">35 signals</div>
+    <div class="pill" id="sigcount">- signals</div>
   </div>
   <div class="ptw">
     <table class="pt">
@@ -209,7 +209,7 @@ cursor:pointer;transition:transform .15s,box-shadow .15s,border-color .15s;
 <div class="card">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
     <div class="ct2" style="margin-bottom:0">Open Positions</div>
-    <div class="pill" id="pcc">9 positions</div>
+    <div class="pill" id="pcc">- positions</div>
   </div>
   <div class="ptw">
     <table class="pt">

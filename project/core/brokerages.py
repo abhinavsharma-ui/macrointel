@@ -328,6 +328,168 @@ class UpstoxExecutionBroker:
         }
 
 
+class UpstoxV3ExecutionBroker(UpstoxExecutionBroker):
+    """
+    V3 execution adapter: adds margin tiering, auto-slicing, market
+    protection, SEBI Algo-ID and the 15:20 IST square-off gate on top of the
+    V2 instrument-map plumbing inherited from UpstoxExecutionBroker.
+
+    Interface-compatible with UpstoxExecutionBroker.submit_order so run.py's
+    _execute_lane_entries path routes without modification.
+    """
+
+    def __init__(
+        self,
+        access_token: str,
+        *,
+        analytics_token: str = "",
+        algo_name: str = "",
+        instrument_map_path: Optional[str] = None,
+        enabled: bool = False,
+        dry_run: bool = True,
+        timeout_seconds: int = 8,
+        tracked_symbols: Optional[Iterable[str]] = None,
+        default_product: str = "I",
+    ):
+        super().__init__(
+            access_token=access_token,
+            instrument_map_path=instrument_map_path,
+            enabled=enabled,
+            dry_run=dry_run,
+            timeout_seconds=timeout_seconds,
+            tracked_symbols=tracked_symbols,
+        )
+        # Lazy import to avoid circular references when run.py loads brokerages first.
+        try:
+            from upstox_v3_client import UpstoxTokens, UpstoxV3Client
+        except Exception:
+            from project.upstox_v3_client import UpstoxTokens, UpstoxV3Client  # type: ignore[no-redef]
+        self._v3_client = UpstoxV3Client(
+            tokens=UpstoxTokens(
+                execution_token=self.access_token,
+                analytics_token=(analytics_token or "").strip()
+                or os.getenv("UPSTOX_ANALYTICS_TOKEN", "").strip(),
+            ),
+            algo_name=algo_name or os.getenv("UPSTOX_ALGO_NAME", "").strip(),
+            dry_run=self.dry_run,
+            enabled=self.enabled and not self.dry_run,
+        )
+        self.default_product = str(default_product or "I").strip().upper() or "I"
+        mode = "DRY-RUN" if self.dry_run else "LIVE"
+        logger.info(
+            f"UpstoxV3ExecutionBroker [{mode}] algo={self._v3_client.algo_name or 'ALGO_UNSET'} "
+            f"tracked={len(self.tracked_symbols)} resolved={len(self.instrument_map)}"
+        )
+
+    @staticmethod
+    def _run_async(coro):
+        """Run an async coroutine from a sync context (thread-safe)."""
+        import asyncio
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Schedule on the running loop and wait.
+                import concurrent.futures
+
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+                return future.result(timeout=30)
+        except RuntimeError:
+            pass
+        return asyncio.run(coro)
+
+    def submit_order(self, order: Any, current_price: float) -> Dict[str, Any]:
+        if not self.configured:
+            return {"status": "not_configured", "broker": "upstox_v3", "reason": "UPSTOX_ACCESS_TOKEN missing"}
+
+        # Resolve instrument_key via inherited instrument_map
+        try:
+            instrument_key = self._resolve_instrument_token(order)
+            if not instrument_key:
+                return {
+                    "status": "unsupported",
+                    "broker": "upstox_v3",
+                    "reason": f"missing instrument token for {getattr(order, 'symbol', '?')}",
+                }
+            symbol = str(getattr(order, "symbol", "") or "").strip().upper()
+            market = str((getattr(order, "metadata", {}) or {}).get("market") or "").upper()
+            if not symbol.endswith(".NS") and market not in {"IN", "NSE"}:
+                return {
+                    "status": "unsupported",
+                    "broker": "upstox_v3",
+                    "reason": f"non-NSE symbol {symbol}",
+                }
+        except Exception as exc:
+            return {"status": "unsupported", "broker": "upstox_v3", "reason": str(exc)}
+
+        try:
+            requested_quantity = float(getattr(order, "quantity", 0.0) or 0.0)
+            quantity = int(requested_quantity)
+            if quantity <= 0:
+                return {"status": "unsupported", "broker": "upstox_v3", "reason": "non-positive qty"}
+
+            metadata = dict(getattr(order, "metadata", {}) or {})
+            order_type = str(getattr(order, "order_type", "market") or "market").upper()
+            limit_price = float(getattr(order, "limit_price", 0.0) or 0.0)
+            side_raw = getattr(order, "side", None)
+            side_value = str(getattr(side_raw, "value", side_raw) or "buy").upper()
+
+            try:
+                from upstox_v3_client import OrderRequest
+            except Exception:
+                from project.upstox_v3_client import OrderRequest  # type: ignore[no-redef]
+
+            req = OrderRequest(
+                symbol=symbol,
+                instrument_key=instrument_key,
+                side=side_value,
+                quantity=quantity,
+                order_type=order_type,
+                limit_price=limit_price,
+                product=str(metadata.get("upstox_product") or self.default_product),
+                tag=str(metadata.get("position_key") or metadata.get("signal_key") or symbol)[:40],
+                lot_size=int(metadata.get("lot_size") or 1),
+                freeze_qty=int(metadata.get("freeze_qty") or 0) or None,
+            )
+            result = self._run_async(
+                self._v3_client.submit_order(req, reference_price=float(current_price or 0.0))
+            )
+        except Exception as exc:
+            logger.warning(f"UpstoxV3 submit failed: {exc}")
+            return {"status": "error", "broker": "upstox_v3", "reason": str(exc)}
+
+        return {
+            "status": str(result.status),
+            "broker": "upstox_v3",
+            "reason": str(result.reason or ""),
+            "margin_tier": str(result.margin_tier or ""),
+            "size_multiplier": float(result.size_multiplier or 1.0),
+            "algo_id_used": str(result.algo_id_used or ""),
+            "market_protection_applied": bool(result.market_protection_applied),
+            "child_orders": list(result.child_orders or []),
+            "reference_price": float(current_price or 0.0),
+            "instrument_sync": dict(self.last_sync_status),
+        }
+
+    def square_off_all_intraday(self) -> List[Dict[str, Any]]:
+        """Wrapper around V3 client square-off for callers in sync context."""
+        try:
+            results = self._run_async(self._v3_client.square_off_all_intraday())
+        except Exception as exc:
+            logger.warning(f"UpstoxV3 square-off failed: {exc}")
+            return []
+        return [
+            {
+                "status": r.status,
+                "reason": r.reason,
+                "margin_tier": r.margin_tier,
+                "market_protection_applied": r.market_protection_applied,
+                "child_orders": r.child_orders,
+            }
+            for r in (results or [])
+        ]
+
+
 class ZerodhaExecutionBroker:
     """
     Execution adapter for NSE orders via Zerodha Kite Connect API v3.
