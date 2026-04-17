@@ -197,7 +197,7 @@ DASHBOARD_HTML = """
             <h2>ℹ️ System Info</h2>
             <p style="color: #8b949e; margin-top: 10px;">
                 This dashboard shows the real ML model status from your production model.<br>
-                The model was trained on 10 years of data with 76.2% precision.
+                Precision is loaded from <code>models/production/metadata.json</code> at runtime.
             </p>
         </div>
         

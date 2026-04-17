@@ -57,18 +57,29 @@ def main():
         except: pass
     
     all_X, all_y = [], []
+    holdout_X, holdout_y = [], []
     for df in matrices.values():
         numeric = [c for c in df.columns if df[c].dtype in (float, int, "float64", "int64")]
         X = df[numeric].dropna(how="all")
         y = build_labels(df, 5)
         y = y.reindex(X.index).fillna(1).astype(int)
         n = len(X)
-        all_X.append(X.iloc[:int(n*0.80)])
-        all_y.append(y.iloc[:int(n*0.80)])
-    
+        split = int(n * 0.80)
+        all_X.append(X.iloc[:split])
+        all_y.append(y.iloc[:split])
+        if n - split > 0:
+            holdout_X.append(X.iloc[split:])
+            holdout_y.append(y.iloc[split:])
+
     X = pd.concat(all_X, ignore_index=True).replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
     y = pd.concat(all_y, ignore_index=True)
-    
+
+    X_holdout = (
+        pd.concat(holdout_X, ignore_index=True).replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
+        if holdout_X else pd.DataFrame(columns=X.columns)
+    )
+    y_holdout = pd.concat(holdout_y, ignore_index=True) if holdout_y else pd.Series(dtype=int)
+
     feature_names = list(X.columns)
     
     logger.info(f"Training on {X.shape[0]} samples, {len(feature_names)} features")
@@ -108,13 +119,69 @@ def main():
     # Save models
     with open(MODELS_DIR / "ensemble_models.pkl", "wb") as f:
         pickle.dump(models, f)
-    
+
+    # Evaluate ensemble on held-out tail split (20% per symbol, unseen in training)
+    eval_metrics = {
+        "buy_precision": None,
+        "buy_recall": None,
+        "buy_support": 0,
+        "accuracy": None,
+        "n_eval_samples": 0,
+    }
+    target_precision = float(0.70)
+    actual_precision = None
+    if not X_holdout.empty and len(y_holdout) > 0:
+        try:
+            from sklearn.metrics import precision_score, recall_score, accuracy_score
+
+            # Ensemble = probability average across the 3 models for class 2 (buy)
+            p_xgb = xgb_m.predict_proba(X_holdout)
+            p_lgb = lgb_m.predict_proba(X_holdout)
+            p_cat = cat_m.predict_proba(X_holdout)
+            classes = list(xgb_m.classes_)
+            buy_idx = classes.index(2) if 2 in classes else (len(classes) - 1)
+
+            def _col(prob_matrix, idx):
+                if prob_matrix.shape[1] <= idx:
+                    return np.zeros(prob_matrix.shape[0])
+                return prob_matrix[:, idx]
+
+            ens_buy = (_col(p_xgb, buy_idx) + _col(p_lgb, buy_idx) + _col(p_cat, buy_idx)) / 3.0
+            pred_buy = (ens_buy >= 0.5).astype(int)
+            y_buy_true = (y_holdout.values == 2).astype(int)
+
+            # Majority-vote class for accuracy
+            full_ensemble = (p_xgb + p_lgb + p_cat) / 3.0
+            pred_class = np.argmax(full_ensemble, axis=1)
+
+            actual_precision = float(
+                precision_score(y_buy_true, pred_buy, zero_division=0.0)
+            )
+            eval_metrics = {
+                "buy_precision": round(actual_precision, 4),
+                "buy_recall": round(float(recall_score(y_buy_true, pred_buy, zero_division=0.0)), 4),
+                "buy_support": int(y_buy_true.sum()),
+                "accuracy": round(float(accuracy_score(y_holdout.values, pred_class)), 4),
+                "n_eval_samples": int(len(y_holdout)),
+            }
+            logger.info(
+                f"Holdout eval: buy_precision={eval_metrics['buy_precision']} "
+                f"recall={eval_metrics['buy_recall']} support={eval_metrics['buy_support']} "
+                f"n={eval_metrics['n_eval_samples']}"
+            )
+        except Exception as exc:
+            logger.warning(f"Holdout evaluation failed: {exc}")
+            actual_precision = None
+    else:
+        logger.warning("No holdout split available — skipping evaluation; actual_precision=None")
+
     # Save metadata
     metadata = {
         "version": "1.0.0",
         "created_at": datetime.utcnow().isoformat(),
-        "target_precision": 0.70,
-        "actual_precision": 0.762,
+        "target_precision": target_precision,
+        "actual_precision": actual_precision,
+        "evaluation": eval_metrics,
         "n_samples": int(X.shape[0]),
         "n_features": len(feature_names),
         "n_symbols": len(matrices),
@@ -123,21 +190,27 @@ def main():
         "horizon": 5,
         "ensemble_method": "probability_average",
     }
-    
+
     with open(MODELS_DIR / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
-    
+
     # Save feature list for inference
     pd.Series(feature_names).to_csv(MODELS_DIR / "features.csv", index=False)
-    
+
     logger.info("=" * 60)
     logger.info("PRODUCTION MODEL SAVED")
     logger.info("=" * 60)
     logger.info(f"Location: {MODELS_DIR}")
-    logger.info(f"Precision: 76.2% (exceeds 70% target)")
+    if actual_precision is not None:
+        meets_target = "meets" if actual_precision >= target_precision else "below"
+        logger.info(
+            f"Buy-class precision (holdout): {actual_precision*100:.1f}% "
+            f"({meets_target} {target_precision*100:.0f}% target)"
+        )
+    else:
+        logger.info("Precision: not evaluated (no holdout data)")
     logger.info(f"Models: XGBoost + LightGBM + CatBoost")
-    logger.info(f"Ready for live trading!")
-    
+
     return 0
 
 

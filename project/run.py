@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from core.enhanced_exits import EnhancedExitManager
+from core.trade_gate import evaluate_trade_gate as _evaluate_trade_gate, GateDecision as _GateDecision
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +257,9 @@ class MacroIntelligenceSystem:
         self._sentiment_pause_seconds = max(0.0, float(os.getenv("SENTIMENT_BATCH_PAUSE_SECONDS", "1.0")))
         self._price_refresh_seconds = max(120, int(os.getenv("PRICE_REFRESH_SECONDS", "900")))
         self._sentiment_refresh_seconds = max(900, int(os.getenv("SENTIMENT_REFRESH_SECONDS", "3600")))
+        self._finbert_refresh_seconds = max(600, int(os.getenv("FINBERT_REFRESH_SECONDS", "14400")))
+        self._options_features_refresh_seconds = max(60, int(os.getenv("OPTIONS_FEATURES_REFRESH_SECONDS", "300")))
+        self._residual_momentum_window = max(20, int(os.getenv("RESIDUAL_MOMENTUM_WINDOW", "60")))
         self._earnings_refresh_seconds = max(1800, int(os.getenv("EARNINGS_REFRESH_SECONDS", "21600")))
         self._altdata_refresh_seconds = max(900, int(os.getenv("ALTDATA_REFRESH_SECONDS", "3600")))
         self._inference_refresh_seconds = max(15, int(os.getenv("INFERENCE_REFRESH_SECONDS", "120")))
@@ -657,6 +661,9 @@ class MacroIntelligenceSystem:
         self._components["signal_decay_library"] = {}
         self._components["execution_overfit"] = {}
         self._components["latest_feature_rows"] = {}
+        self._components["finbert_scores"] = {}
+        self._components["options_features"] = {}
+        self._components["residual_momentum"] = {}
         self._components["execution_reconciliation"] = self._execution_reconciliation
         self._components["feature_matrices"] = {}
         self._components["event_feature_map"] = {}
@@ -1612,6 +1619,286 @@ class MacroIntelligenceSystem:
         pipeline = OpenSkyTravelFactorPipeline()
         return pipeline.run(symbols=symbols)
 
+    @staticmethod
+    def _is_india_symbol(symbol: str) -> bool:
+        sym = (symbol or "").upper()
+        return sym.endswith(".NS") or sym.endswith(".BO") or sym.endswith("-NSE") or sym.endswith("-BSE")
+
+    @staticmethod
+    def _is_crypto_symbol(symbol: str) -> bool:
+        sym = (symbol or "").upper()
+        return (
+            sym.endswith("-USD")
+            or sym.endswith("USDT")
+            or sym.endswith("USDC")
+            or sym.endswith("BUSD")
+            or sym.endswith("/USDT")
+            or sym.endswith("/USDC")
+        )
+
+    def _refresh_finbert_sentiment(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Refresh FinBERT per-symbol sentiment scores. Soft-gate: never raises."""
+        try:
+            from pipeline.finbert_sentiment import score_symbol, FINBERT_WINDOW_HOURS  # noqa
+        except Exception as exc:
+            logger.warning(f"FinBERT import failed, skipping refresh: {exc}")
+            return self._components.get("finbert_scores", {}) or {}
+
+        import asyncio as _asyncio
+        finnhub_key = os.getenv("FINNHUB_API_KEY") or (os.getenv("FINNHUB_API_KEYS") or "").split(",")[0]
+        window_hours = float(os.getenv("FINBERT_WINDOW_HOURS", "4"))
+        sem = _asyncio.Semaphore(int(os.getenv("FINBERT_CONCURRENCY", "6")))
+
+        async def _score_one(sym: str) -> Tuple[str, Dict[str, Any]]:
+            try:
+                async with sem:
+                    res = await score_symbol(
+                        sym,
+                        is_india=self._is_india_symbol(sym),
+                        finnhub_api_key=finnhub_key,
+                        window_hours=window_hours,
+                    )
+                return sym, dict(res or {})
+            except Exception as exc:
+                logger.debug(f"FinBERT score failed for {sym}: {exc}")
+                return sym, {"finbert_sentiment": 0.0, "n_headlines": 0, "sentiment_available": False}
+
+        async def _run_all() -> Dict[str, Dict[str, Any]]:
+            tasks = [_score_one(s) for s in symbols if s]
+            results = await _asyncio.gather(*tasks, return_exceptions=False)
+            return {sym: payload for sym, payload in results}
+
+        try:
+            try:
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    # Running loop — submit coroutine and wait
+                    import concurrent.futures as _cf
+                    fut = _asyncio.run_coroutine_threadsafe(_run_all(), loop)
+                    results = fut.result(timeout=60)
+                else:
+                    results = loop.run_until_complete(_run_all())
+            except RuntimeError:
+                results = _asyncio.run(_run_all())
+        except Exception as exc:
+            logger.warning(f"FinBERT batch refresh failed: {exc}")
+            return self._components.get("finbert_scores", {}) or {}
+
+        # Merge into existing store (preserve any entries not in this batch)
+        store = self._components.get("finbert_scores")
+        if not isinstance(store, dict):
+            store = {}
+        store.update(results)
+        self._components["finbert_scores"] = store
+        available = sum(1 for v in results.values() if v.get("sentiment_available"))
+        logger.info(f"FinBERT refreshed {len(results)} symbols ({available} with news)")
+        return store
+
+    def _compute_residual_momentum(
+        self,
+        symbol: str,
+        lane: str,
+        features: Optional[pd.DataFrame],
+        daily_prices: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Compute residual momentum for a symbol vs lane market proxy and cache it.
+        Stores result under self._components["residual_momentum"][symbol] and
+        returns the dict. Safe no-op on any failure (sets used_fallback=True).
+        """
+        fallback = {
+            "residual": 0.0,
+            "used_fallback": True,
+            "alpha": 0.0,
+            "beta": 0.0,
+            "r_squared": 0.0,
+            "n_bars_used": 0,
+            "proxy": "",
+        }
+        store = self._components.get("residual_momentum")
+        if not isinstance(store, dict):
+            store = {}
+            self._components["residual_momentum"] = store
+
+        try:
+            from core.residual_momentum import latest_residual, proxy_for_lane
+        except Exception as exc:
+            logger.debug(f"residual_momentum import failed: {exc}")
+            store[symbol] = fallback
+            return fallback
+
+        if features is None or getattr(features, "empty", True):
+            store[symbol] = fallback
+            return fallback
+
+        proxy = proxy_for_lane(lane or "normal")
+        fallback["proxy"] = proxy
+
+        # Extract symbol daily returns — prefer precomputed `returns_1d`,
+        # otherwise derive from daily OHLCV close.
+        sym_returns = None
+        try:
+            if "returns_1d" in features.columns:
+                sym_returns = features["returns_1d"].dropna()
+            else:
+                ohlcv = daily_prices.get(symbol) if isinstance(daily_prices, dict) else None
+                if isinstance(ohlcv, pd.DataFrame) and not ohlcv.empty and "close" in ohlcv.columns:
+                    sym_returns = ohlcv["close"].astype(float).pct_change().dropna()
+        except Exception as exc:
+            logger.debug(f"residual_momentum returns extract failed for {symbol}: {exc}")
+            store[symbol] = fallback
+            return fallback
+
+        if sym_returns is None or len(sym_returns) < 5:
+            store[symbol] = fallback
+            return fallback
+
+        # Market proxy returns — pull from daily_prices if proxy is in our universe,
+        # otherwise try the proxy cache we maintain.
+        mkt_returns = None
+        try:
+            proxy_frame = None
+            if isinstance(daily_prices, dict):
+                proxy_frame = daily_prices.get(proxy)
+            if proxy_frame is None:
+                proxy_frame = self._get_market_proxy_frame(proxy)
+            if isinstance(proxy_frame, pd.DataFrame) and not proxy_frame.empty and "close" in proxy_frame.columns:
+                mkt_returns = proxy_frame["close"].astype(float).pct_change().dropna()
+        except Exception as exc:
+            logger.debug(f"residual_momentum proxy load failed for {proxy}: {exc}")
+            mkt_returns = None
+
+        if mkt_returns is None or len(mkt_returns) < 5:
+            store[symbol] = fallback
+            return fallback
+
+        try:
+            res = latest_residual(
+                sym_returns,
+                mkt_returns,
+                window=self._residual_momentum_window,
+            )
+            out = {
+                "residual": float(res.residual),
+                "used_fallback": bool(res.used_fallback),
+                "alpha": float(res.alpha),
+                "beta": float(res.beta),
+                "r_squared": float(res.r_squared),
+                "n_bars_used": int(res.n_bars_used),
+                "proxy": proxy,
+            }
+            store[symbol] = out
+            return out
+        except Exception as exc:
+            logger.debug(f"latest_residual failed for {symbol}: {exc}")
+            store[symbol] = fallback
+            return fallback
+
+    def _get_market_proxy_frame(self, proxy: str) -> Optional[pd.DataFrame]:
+        """Fetch (and cache) daily OHLCV for a market proxy. Lightweight
+        best-effort — uses yfinance if available, cached in-memory for 1 hour.
+        """
+        if not proxy:
+            return None
+        cache = getattr(self, "_market_proxy_cache", None)
+        if cache is None:
+            cache = {}
+            self._market_proxy_cache = cache
+        entry = cache.get(proxy)
+        now = time.time()
+        if entry and (now - entry.get("ts", 0)) < 3600:
+            return entry.get("frame")
+
+        frame: Optional[pd.DataFrame] = None
+
+        # Try price_data dict first
+        price_data = self._components.get("price_data", {}) or {}
+        recent = price_data.get("price_daily_recent") if isinstance(price_data, dict) else {}
+        if isinstance(recent, dict) and proxy in recent:
+            frame = recent.get(proxy)
+
+        # yfinance fallback
+        if frame is None or (isinstance(frame, pd.DataFrame) and frame.empty):
+            try:
+                import yfinance as yf
+                yf_symbol = {
+                    "NSE_INDEX|Nifty 50": "^NSEI",
+                    "BTC-USD": "BTC-USD",
+                    "SPY": "SPY",
+                }.get(proxy, proxy)
+                tkr = yf.Ticker(yf_symbol)
+                hist = tkr.history(period="6mo", interval="1d")
+                if hist is not None and not hist.empty:
+                    df = hist.copy()
+                    df.columns = [c.lower() for c in df.columns]
+                    frame = df
+            except Exception as exc:
+                logger.debug(f"yfinance proxy fetch failed for {proxy}: {exc}")
+                frame = None
+
+        cache[proxy] = {"frame": frame, "ts": now}
+        return frame
+
+    def _refresh_options_features(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Refresh options microstructure per symbol. Soft-gate."""
+        try:
+            from options_features import compute_options_features, NEUTRAL_FEATURES  # noqa
+        except Exception as exc:
+            logger.warning(f"options_features import failed: {exc}")
+            return self._components.get("options_features", {}) or {}
+
+        import asyncio as _asyncio
+        upstox_token = os.getenv("UPSTOX_ANALYTICS_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN")
+        finnhub_key = os.getenv("FINNHUB_API_KEY") or (os.getenv("FINNHUB_API_KEYS") or "").split(",")[0]
+        polygon_key = os.getenv("POLYGON_API_KEY") or (os.getenv("POLYGON_API_KEYS") or "").split(",")[0].strip()
+        sem = _asyncio.Semaphore(int(os.getenv("OPTIONS_FEATURES_CONCURRENCY", "4")))
+
+        # Only equities get options features (skip crypto — no listed options flow we ingest)
+        eligible = [s for s in symbols if s and not self._is_crypto_symbol(s)]
+
+        async def _compute_one(sym: str) -> Tuple[str, Dict[str, Any]]:
+            try:
+                async with sem:
+                    res = await compute_options_features(
+                        sym,
+                        is_india=self._is_india_symbol(sym),
+                        upstox_token=upstox_token,
+                        finnhub_api_key=finnhub_key,
+                        polygon_api_key=polygon_key,
+                    )
+                return sym, dict(res or {})
+            except Exception as exc:
+                logger.debug(f"options_features failed for {sym}: {exc}")
+                return sym, dict(NEUTRAL_FEATURES)
+
+        async def _run_all() -> Dict[str, Dict[str, Any]]:
+            tasks = [_compute_one(s) for s in eligible]
+            results = await _asyncio.gather(*tasks, return_exceptions=False)
+            return {sym: payload for sym, payload in results}
+
+        try:
+            try:
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures as _cf
+                    fut = _asyncio.run_coroutine_threadsafe(_run_all(), loop)
+                    results = fut.result(timeout=120)
+                else:
+                    results = loop.run_until_complete(_run_all())
+            except RuntimeError:
+                results = _asyncio.run(_run_all())
+        except Exception as exc:
+            logger.warning(f"options_features batch refresh failed: {exc}")
+            return self._components.get("options_features", {}) or {}
+
+        store = self._components.get("options_features")
+        if not isinstance(store, dict):
+            store = {}
+        store.update(results)
+        self._components["options_features"] = store
+        available = sum(1 for v in results.values() if v.get("options_data_available"))
+        logger.info(f"options_features refreshed {len(results)} symbols ({available} with chain data)")
+        return store
+
     def _refresh_event_intelligence(self) -> Dict:
         if not self._event_intel_enabled:
             return {}
@@ -2105,7 +2392,119 @@ class MacroIntelligenceSystem:
         payload["symbol"] = symbol
         payload.update(self._signal_lane_meta(symbol, payload, lane_override=lane_override))
         payload.setdefault("scenario", payload.get("lane_label"))
+        self._hydrate_signal_external_features(symbol, payload)
+        payload["gate_signals"] = self._build_gate_signals(symbol, payload)
         return payload
+
+    def _hydrate_signal_external_features(self, symbol: str, payload: Dict) -> None:
+        """Attach FinBERT sentiment, options microstructure, and residual-momentum
+        side-channel data to the signal payload so the gate builder + trade_gate
+        can consume them. Safe no-op when stores are missing.
+        """
+        # FinBERT
+        finbert_store = self._components.get("finbert_scores")
+        if isinstance(finbert_store, dict):
+            fb = finbert_store.get(symbol)
+            if isinstance(fb, dict):
+                if "finbert_sentiment" not in payload:
+                    payload["finbert_sentiment"] = float(fb.get("finbert_sentiment", 0.0) or 0.0)
+                if "sentiment_available" not in payload:
+                    payload["sentiment_available"] = bool(fb.get("sentiment_available", False))
+                if "n_headlines" not in payload:
+                    payload["n_headlines"] = int(fb.get("n_headlines", 0) or 0)
+
+        # Options microstructure
+        opts_store = self._components.get("options_features")
+        if isinstance(opts_store, dict):
+            opts = opts_store.get(symbol)
+            if isinstance(opts, dict):
+                # Keep a dedicated nested dict (gate reads from here)
+                if not isinstance(payload.get("options_features"), dict):
+                    payload["options_features"] = dict(opts)
+                else:
+                    for k, v in opts.items():
+                        payload["options_features"].setdefault(k, v)
+
+        # Residual momentum
+        res_store = self._components.get("residual_momentum")
+        if isinstance(res_store, dict):
+            res = res_store.get(symbol)
+            if isinstance(res, dict):
+                if "residual_momentum" not in payload:
+                    payload["residual_momentum"] = float(res.get("residual", 0.0) or 0.0)
+                if "residual_fallback" not in payload:
+                    payload["residual_fallback"] = bool(res.get("used_fallback", False))
+                if "residual_beta" not in payload:
+                    payload["residual_beta"] = float(res.get("beta", 0.0) or 0.0)
+
+    def _build_gate_signals(self, symbol: str, payload: Dict) -> Dict[str, Any]:
+        """
+        Construct the gate_signals dict consumed by core.trade_gate.
+        Computes stale_data from the shared tick buffer and pulls the other
+        flags (residual_fallback, finbert_neutral, options_unavailable,
+        sector_unavailable, net_vanna, iv_falling, distance_to_pin) from
+        the signal payload when present.
+        """
+        prev = payload.get("gate_signals") if isinstance(payload.get("gate_signals"), dict) else {}
+        gate = dict(prev or {})
+        lane = str(payload.get("lane") or "").lower()
+
+        # Tick age → stale_data. Per spec: stale if > 30s without a tick;
+        # still trade with penalty up to 90s, hard-skip beyond.
+        stale_seconds_threshold = float(os.getenv("GATE_STALE_DATA_SECONDS", "30"))
+        tick_age = None
+        try:
+            from core.realtime_engine import PRICE_BUFFER as _BUF
+            last = _BUF.latest(symbol)
+            if last is not None and getattr(last, "timestamp", None) is not None:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                ts = last.timestamp
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                tick_age = max(0.0, (now - ts).total_seconds())
+        except Exception:
+            tick_age = None
+        if tick_age is None:
+            gate.setdefault("stale_data", False)
+        else:
+            gate["tick_age_seconds"] = float(tick_age)
+            gate["stale_data"] = bool(tick_age > stale_seconds_threshold)
+
+        # Residual-momentum fallback: feature builder sets residual_fallback flag
+        if "residual_fallback" not in gate:
+            gate["residual_fallback"] = bool(payload.get("residual_fallback", False))
+
+        # FinBERT neutral if sentiment missing OR score == 0.0
+        if "finbert_neutral" not in gate:
+            sent = payload.get("finbert_sentiment")
+            sent_avail = payload.get("sentiment_available")
+            gate["finbert_neutral"] = bool(
+                sent_avail is False
+                or sent is None
+                or (isinstance(sent, (int, float)) and float(sent) == 0.0)
+            )
+
+        # Options availability from payload (options_features module sets this)
+        if "options_unavailable" not in gate:
+            opts = payload.get("options_features") if isinstance(payload.get("options_features"), dict) else {}
+            gate["options_unavailable"] = bool(
+                not opts or opts.get("options_data_available") in (0, False, None)
+            )
+            # Net vanna / iv_falling / distance_to_pin passthrough
+            gate.setdefault("net_vanna", float(opts.get("net_vanna", 0.0) or 0.0))
+            gate.setdefault("iv_falling", bool(opts.get("iv_falling", False)))
+            gate.setdefault("distance_to_pin", float(opts.get("distance_to_pin", 1.0) or 1.0))
+
+        # Sector unavailable (day lane uses NSE sector RS features)
+        if "sector_unavailable" not in gate:
+            has_sector = any(
+                k in payload and payload.get(k) is not None
+                for k in ("sector_rs_score_5d", "sector_rs_score_10d", "sector_rs_score_20d")
+            )
+            gate["sector_unavailable"] = bool(lane == "day" and not has_sector)
+
+        return gate
 
     def _get_meta_engine(self):
         engine = self._components.get("meta_engine")
@@ -5879,6 +6278,62 @@ class MacroIntelligenceSystem:
                     )
                     continue
 
+                # -------- Trade gate: stacking + confidence score --------
+                # Execute-at-reduced-size > skip. Only zero margin / market-closed
+                # hard block trades (those are handled further downstream).
+                try:
+                    gate_row = self._components.get("latest_feature_rows", {}).get(symbol)
+                    gate_meta = (signal.get("gate_signals", {}) if isinstance(signal, dict) else {}) or {}
+                    gate_decision: _GateDecision = _evaluate_trade_gate(
+                        symbol=symbol,
+                        lane=str(lane or "").lower(),
+                        features_row=gate_row if gate_row is not None else pd.Series(dtype=float),
+                        legacy_base_proba=self._safe_number(
+                            signal.get("xgb_confidence")
+                            or signal.get("confidence")
+                            or signal.get("take_probability"),
+                            0.0,
+                        ),
+                        residual_used_fallback=bool(gate_meta.get("residual_fallback", False)),
+                        finbert_neutral=bool(gate_meta.get("finbert_neutral", False)),
+                        options_unavailable=bool(gate_meta.get("options_unavailable", False)),
+                        stale_data=bool(gate_meta.get("stale_data", False)),
+                        sector_unavailable=bool(gate_meta.get("sector_unavailable", False)),
+                        net_vanna=float(gate_meta.get("net_vanna", 0.0) or 0.0),
+                        iv_falling=bool(gate_meta.get("iv_falling", False)),
+                        distance_to_pin=float(gate_meta.get("distance_to_pin", 1.0) or 1.0),
+                    )
+                except Exception as gate_exc:
+                    logger.debug("trade_gate error for %s: %s", symbol, gate_exc)
+                    gate_decision = None  # type: ignore[assignment]
+
+                if gate_decision is not None:
+                    if not gate_decision.should_execute:
+                        self._record_execution_event(
+                            symbol,
+                            "buy",
+                            "skipped",
+                            "confidence_gate_skip",
+                            signal=signal,
+                            position_key=position_key,
+                            score=score,
+                            details=gate_decision.to_dict(),
+                        )
+                        continue
+                    # Apply size multiplier (lower bound: min_position_size)
+                    size_mult = max(0.0, float(gate_decision.size_multiplier or 0.0))
+                    if size_mult < 1.0 and size_mult > 0.0:
+                        new_size = position_size * size_mult
+                        if lane != "crypto":
+                            new_size = max(min_position_size, int(new_size))
+                        else:
+                            new_size = max(min_position_size, new_size)
+                        position_size = new_size
+                    signal["gate_final_score"] = round(float(gate_decision.final_score), 4)
+                    signal["gate_size_multiplier"] = round(size_mult, 4)
+                    signal["gate_models_used"] = list(gate_decision.models_used)
+                    signal["gate_stacking_used"] = bool(gate_decision.stacking_used)
+
                 lane_meta = self._signal_lane_meta(symbol, signal, lane_override=lane)
                 signal_source = {
                     "normal": "NormalTrading",
@@ -6029,22 +6484,40 @@ class MacroIntelligenceSystem:
         # ── Stock lanes (normal + day): Upstox or Zerodha ────
         stock_broker_name = os.getenv("STOCK_BROKER", "paper").strip().lower()
         try:
-            if stock_broker_name == "upstox":
-                from core.brokerages import UpstoxExecutionBroker
+            if stock_broker_name in ("upstox", "upstox_v3"):
                 upstox_token = os.getenv("UPSTOX_ACCESS_TOKEN", "").strip()
                 if upstox_token:
                     tracked = list(dict.fromkeys(self._get_target_symbols()))
-                    stock_broker = UpstoxExecutionBroker(
-                        access_token=upstox_token,
-                        instrument_map_path=os.getenv("UPSTOX_INSTRUMENT_MAP_PATH", "data/upstox_instruments.json"),
-                        enabled=True,
-                        dry_run=os.getenv("UPSTOX_ORDER_DRY_RUN", "true").strip().lower() in {"1", "true", "yes", "on"},
-                        timeout_seconds=int(os.getenv("UPSTOX_ORDER_TIMEOUT_SECONDS", "8")),
-                        tracked_symbols=tracked,
-                    )
-                    logger.info("Live stock broker: UpstoxExecutionBroker initialized")
+                    dry_run_flag = os.getenv("UPSTOX_ORDER_DRY_RUN", "true").strip().lower() in {"1", "true", "yes", "on"}
+                    timeout_seconds = int(os.getenv("UPSTOX_ORDER_TIMEOUT_SECONDS", "8"))
+                    inst_path = os.getenv("UPSTOX_INSTRUMENT_MAP_PATH", "data/upstox_instruments.json")
+                    if stock_broker_name == "upstox_v3":
+                        from core.brokerages import UpstoxV3ExecutionBroker
+                        stock_broker = UpstoxV3ExecutionBroker(
+                            access_token=upstox_token,
+                            analytics_token=os.getenv("UPSTOX_ANALYTICS_TOKEN", "").strip(),
+                            algo_name=os.getenv("UPSTOX_ALGO_NAME", "").strip(),
+                            instrument_map_path=inst_path,
+                            enabled=True,
+                            dry_run=dry_run_flag,
+                            timeout_seconds=timeout_seconds,
+                            tracked_symbols=tracked,
+                            default_product=os.getenv("UPSTOX_ORDER_PRODUCT", "I").strip().upper() or "I",
+                        )
+                        logger.info("Live stock broker: UpstoxV3ExecutionBroker initialized")
+                    else:
+                        from core.brokerages import UpstoxExecutionBroker
+                        stock_broker = UpstoxExecutionBroker(
+                            access_token=upstox_token,
+                            instrument_map_path=inst_path,
+                            enabled=True,
+                            dry_run=dry_run_flag,
+                            timeout_seconds=timeout_seconds,
+                            tracked_symbols=tracked,
+                        )
+                        logger.info("Live stock broker: UpstoxExecutionBroker initialized")
                 else:
-                    logger.warning("STOCK_BROKER=upstox but UPSTOX_ACCESS_TOKEN missing — stocks stay on paper")
+                    logger.warning(f"STOCK_BROKER={stock_broker_name} but UPSTOX_ACCESS_TOKEN missing — stocks stay on paper")
             elif stock_broker_name == "zerodha":
                 from core.brokerages import ZerodhaExecutionBroker
                 zerodha_key = os.getenv("ZERODHA_API_KEY", "").strip()
@@ -6087,6 +6560,8 @@ class MacroIntelligenceSystem:
         broker = self._components.get("broker")
         if not broker:
             return
+        # Upstox V3 square-off: fire once at first tick >= 15:20 IST per day.
+        self._maybe_intraday_squareoff()
         current_prices = {}
         for position_key, _, symbol, _, _ in self._iter_open_positions(broker):
             current_price = self._get_latest_close(symbol)
@@ -6101,6 +6576,42 @@ class MacroIntelligenceSystem:
         self._manage_open_positions(broker, current_prices)
         self._execute_lane_entries(broker, self._build_lane_candidates())
         self._persist_runtime_state()
+
+    def _maybe_intraday_squareoff(self) -> None:
+        """
+        If configured with Upstox V3 and current IST time is 15:20-15:30, trigger
+        a forced square-off of all intraday (MIS) positions. Runs once per day.
+        """
+        stock_broker = self._components.get("stock_live_broker")
+        if stock_broker is None:
+            return
+        if not hasattr(stock_broker, "square_off_all_intraday"):
+            return
+        try:
+            from datetime import datetime, time as dtime, timedelta, timezone
+            ist = timezone(timedelta(hours=5, minutes=30))
+            now_ist = datetime.now(ist)
+            if now_ist.weekday() >= 5:
+                return
+            if not (dtime(15, 20) <= now_ist.time() < dtime(15, 30)):
+                return
+            today_key = now_ist.strftime("%Y-%m-%d")
+            if getattr(self, "_last_squareoff_date", "") == today_key:
+                return
+            logger.info(
+                "15:20 IST square-off trigger: calling Upstox V3 square_off_all_intraday()"
+            )
+            results = stock_broker.square_off_all_intraday() or []
+            self._last_squareoff_date = today_key
+            for res in results:
+                logger.info(
+                    "square-off result: status=%s reason=%s tier=%s",
+                    res.get("status"),
+                    res.get("reason"),
+                    res.get("margin_tier"),
+                )
+        except Exception as exc:
+            logger.warning(f"intraday square-off trigger failed: {exc}")
 
     def _start_dashboard(self, port: int):
         from core.realtime_engine import PRICE_BUFFER
@@ -6143,6 +6654,8 @@ class MacroIntelligenceSystem:
         last_sentiment_refresh = 0.0
         last_earnings_refresh = 0.0
         last_altdata_refresh = 0.0
+        last_finbert_refresh = 0.0
+        last_options_refresh = 0.0
         self._set_data_pipeline_status(status="starting", source="", selected_symbols=0, total_symbols=0)
         self._refresh_system_health()
 
@@ -6227,6 +6740,39 @@ class MacroIntelligenceSystem:
                     self._data_versions["altdata"] += 1
                     self._record_source_refresh("altdata", self._components["altdata_data"])
                     refreshed.append("altdata")
+
+                if not self._components.get("finbert_scores") or (now - last_finbert_refresh) >= self._finbert_refresh_seconds:
+                    finbert_symbols = self._select_pipeline_symbols("sentiment", target_symbols) or list(target_symbols)
+                    # Cap per-cycle load so the worst case stays bounded
+                    max_finbert = max(1, int(os.getenv("FINBERT_MAX_SYMBOLS_PER_CYCLE", "200")))
+                    if len(finbert_symbols) > max_finbert:
+                        finbert_symbols = finbert_symbols[:max_finbert]
+                    self._set_data_pipeline_status(
+                        status="refreshing",
+                        source="finbert",
+                        selected_symbols=len(finbert_symbols),
+                        total_symbols=len(target_symbols),
+                    )
+                    self._refresh_system_health()
+                    self._refresh_finbert_sentiment(finbert_symbols)
+                    last_finbert_refresh = now
+                    refreshed.append("finbert")
+
+                if not self._components.get("options_features") or (now - last_options_refresh) >= self._options_features_refresh_seconds:
+                    opts_symbols = self._select_pipeline_symbols("prices", target_symbols) or list(target_symbols)
+                    max_opts = max(1, int(os.getenv("OPTIONS_FEATURES_MAX_SYMBOLS_PER_CYCLE", "80")))
+                    if len(opts_symbols) > max_opts:
+                        opts_symbols = opts_symbols[:max_opts]
+                    self._set_data_pipeline_status(
+                        status="refreshing",
+                        source="options_features",
+                        selected_symbols=len(opts_symbols),
+                        total_symbols=len(target_symbols),
+                    )
+                    self._refresh_system_health()
+                    self._refresh_options_features(opts_symbols)
+                    last_options_refresh = now
+                    refreshed.append("options_features")
 
                 if refreshed:
                     if self._event_intel_enabled and self._components.get("sentiment_data") and not self._components.get("event_intel"):
@@ -6547,6 +7093,17 @@ class MacroIntelligenceSystem:
                     if self._last_feature_signature.get(symbol) == signature and isinstance(self._signal_store.get(symbol), dict):
                         return 0
 
+                    # Residual momentum (lane-aware market-neutral momentum factor)
+                    try:
+                        from pipeline.universe import is_day_trade_symbol as _is_day
+                        _lane_rm = (
+                            "crypto" if self._is_crypto_symbol(symbol)
+                            else ("day" if (self._day_trading_mode and _is_day(symbol)) else "normal")
+                        )
+                        self._compute_residual_momentum(symbol, _lane_rm, features, daily_prices)
+                    except Exception as _rm_exc:
+                        logger.debug(f"residual_momentum cache update failed for {symbol}: {_rm_exc}")
+
                     latest_row = features.iloc[-1]
                     scored = scorer.score(latest_row, symbol=symbol)
                     base_scored = {
@@ -6571,10 +7128,44 @@ class MacroIntelligenceSystem:
                                 ohlcv = self._mark_price_frame_live(symbol, ohlcv)
                             X = bridge.prepare_latest(features, ohlcv)
                             if X is not None:
-                                pred_class = int(xgb_model.predict_selected(X)[0])
-                                pred_proba = xgb_model.predict_selected_proba(X)[0]
-                                xgb_direction = class_map.get(pred_class, "neutral")
-                                xgb_confidence = float(max(pred_proba))
+                                # Prefer stacking ensemble; fall back to legacy XGBoost on
+                                # any failure or when no base models are loaded.
+                                pred_class = None
+                                pred_proba = None
+                                stacking_models_used: List[str] = []
+                                stacking_meta_used = False
+                                try:
+                                    from core.stacking_inference import get_engine as _get_stack_engine
+                                    stack_engine = _get_stack_engine()
+                                    stack_result = stack_engine.predict(
+                                        latest_row,
+                                        feature_completeness_ratio=None,
+                                    )
+                                except Exception as stack_exc:
+                                    logger.debug("stacking inference failed for %s: %s", symbol, stack_exc)
+                                    stack_result = None
+
+                                if stack_result is not None:
+                                    pred_class = int(stack_result.pred_class)
+                                    pred_proba = np.asarray(stack_result.pred_proba, dtype=float)
+                                    stacking_models_used = list(stack_result.models_used)
+                                    stacking_meta_used = bool(stack_result.meta_used)
+                                else:
+                                    pred_class = int(xgb_model.predict_selected(X)[0])
+                                    pred_proba = xgb_model.predict_selected_proba(X)[0]
+
+                                # Map class to direction. Stacking is binary (0/1); legacy
+                                # XGBoost is multiclass. Fall back to legacy XGBoost
+                                # for direction when using stacking so we don't lose the
+                                # sell signal — stacking only answers "should we act".
+                                if stack_result is not None:
+                                    legacy_class = int(xgb_model.predict_selected(X)[0])
+                                    xgb_direction = class_map.get(legacy_class, "neutral")
+                                    xgb_confidence = float(stack_result.take_proba)
+                                else:
+                                    xgb_direction = class_map.get(pred_class, "neutral")
+                                    xgb_confidence = float(max(pred_proba))
+
                                 event_edge = max(
                                     abs(scored["factor_scores"].get("earnings_propagation", 0)),
                                     abs(scored["factor_scores"].get("close_reversal", 0)),
@@ -6592,8 +7183,12 @@ class MacroIntelligenceSystem:
                                         scored["xgb_alignment"] = "override_weak_signal"
                                     else:
                                         scored["xgb_alignment"] = "non_blocking_disagreement"
+                                # Always pass through stacking metadata for the gate
+                                scored["xgb_confidence"] = xgb_confidence
+                                scored["stacking_models_used"] = stacking_models_used
+                                scored["stacking_meta_used"] = stacking_meta_used
                         except Exception as exc:
-                            logger.debug(f"XGBoost inference error for {symbol}: {exc}")
+                            logger.debug(f"model inference error for {symbol}: {exc}")
 
                     feature_names = [c for c in features.columns if features[c].dtype != object]
 

@@ -39,6 +39,8 @@ FINNHUB_BASE = "https://finnhub.io/api/v1/stock/candle"
 POLYGON_AGGS_BASE = "https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{from_date}/{to_date}"
 EODHD_EOD_BASE = "https://eodhd.com/api/eod/{ticker}"
 TWELVE_DATA_BASE = "https://api.twelvedata.com/time_series"
+TIINGO_BULK_EOD_BASE = "https://api.tiingo.com/tiingo/daily"
+TIINGO_BULK_BATCH_SIZE = max(100, int(os.getenv("TIINGO_BULK_BATCH_SIZE", "1000")))
 
 DEFAULT_UNIVERSE_MODE = os.getenv("UNIVERSE_MODE", "full").strip().lower() or "full"
 if DEFAULT_UNIVERSE_MODE not in {"core", "full", "us", "nse"}:
@@ -483,6 +485,186 @@ class TwelveDataFetcher:
             return FetchOutcome(self.name, status="error", error=error)
 
 
+class TiingoBulkFetcher:
+    """
+    Tiingo bulk EOD endpoint — fetches ALL US symbols in one call per batch.
+    Far more efficient than per-symbol fetches for large universes (6000+ symbols).
+
+    Free tier: 500 req/day. One batch of 1000 symbols = 1 request, so
+    6000 symbols = 6 requests per refresh cycle. Very efficient.
+
+    Env vars:
+        TIINGO_API_KEY or TIINGO_API_KEYS   — comma-separated keys
+        TIINGO_BULK_BATCH_SIZE              — symbols per HTTP call (default 1000)
+        TIINGO_RECENT_DAYS                  — how many days to return (default matches PRICE_RECENT_DAYS)
+    """
+    name = "tiingo_bulk"
+
+    def __init__(self):
+        self.keys = APIKeyPool(
+            parse_api_keys("TIINGO_API_KEYS", "TIINGO_API_KEY"),
+            default_cooldown=float(os.getenv("TIINGO_COOLDOWN_SECONDS", "60")),
+        )
+        self._recent_days = max(30, int(os.getenv("TIINGO_RECENT_DAYS", str(PRICE_RECENT_DAYS))))
+        self._bulk_cache: Dict[str, pd.DataFrame] = {}
+        self._bulk_fetched_at: float = 0.0
+
+    def supports(self, symbol: str) -> bool:
+        # Tiingo covers US equities and ETFs only — not NSE or crypto
+        return (
+            not symbol.endswith(".NS")
+            and not symbol.endswith(".BO")
+            and not symbol.startswith("^")
+            and "/" not in symbol
+            and "USDT" not in symbol.upper()
+        )
+
+    def bulk_fetch(self, symbols: List[str]) -> Dict[str, pd.DataFrame]:
+        """
+        Pre-fetch all US symbols in batches and populate the internal cache.
+        Called once per pipeline run before per-symbol fetch_daily calls.
+        """
+        api_key = self.keys.acquire()
+        if not api_key:
+            logger.warning("TiingoBulkFetcher: no API key available")
+            return {}
+
+        us_symbols = [s for s in symbols if self.supports(s)]
+        if not us_symbols:
+            return {}
+
+        start_date = (date.today() - timedelta(days=self._recent_days)).isoformat()
+        fetched: Dict[str, pd.DataFrame] = {}
+        batch_size = TIINGO_BULK_BATCH_SIZE
+
+        for batch_start in range(0, len(us_symbols), batch_size):
+            batch = us_symbols[batch_start : batch_start + batch_size]
+            tickers_str = ",".join(batch)
+            params = {
+                "tickers": tickers_str,
+                "startDate": start_date,
+                "token": api_key,
+                "format": "json",
+                "resampleFreq": "daily",
+                "columns": "open,high,low,close,adjClose,adjOpen,adjHigh,adjLow,volume",
+            }
+            try:
+                resp = requests.get(TIINGO_BULK_EOD_BASE, params=params, timeout=30)
+                if resp.status_code == 429 or "too many" in resp.text.lower():
+                    self.keys.cool_down(api_key)
+                    logger.warning("Tiingo bulk rate limited; cooling down key")
+                    api_key = self.keys.acquire()
+                    if not api_key:
+                        break
+                    continue
+                resp.raise_for_status()
+                rows = resp.json()
+            except Exception as exc:
+                logger.warning(f"Tiingo bulk fetch batch {batch_start//batch_size + 1} failed: {exc}")
+                continue
+
+            # Response is a flat list: [{ticker, date, open, high, low, close, adjClose, volume}, ...]
+            sym_rows: Dict[str, list] = {}
+            for item in rows:
+                ticker = (item.get("ticker") or "").upper()
+                if not ticker:
+                    continue
+                sym_rows.setdefault(ticker, []).append(item)
+
+            for ticker, items in sym_rows.items():
+                try:
+                    records = []
+                    for item in items:
+                        dt_raw = item.get("date") or ""
+                        try:
+                            dt = pd.Timestamp(dt_raw[:10])  # trim to YYYY-MM-DD
+                        except Exception:
+                            continue
+                        records.append({
+                            "date": dt,
+                            "open": _as_float(item.get("adjOpen") or item.get("open")),
+                            "high": _as_float(item.get("adjHigh") or item.get("high")),
+                            "low": _as_float(item.get("adjLow") or item.get("low")),
+                            "close": _as_float(item.get("adjClose") or item.get("close")),
+                            "adj_close": _as_float(item.get("adjClose") or item.get("close")),
+                            "volume": _as_int(item.get("volume")),
+                        })
+                    if not records:
+                        continue
+                    frame = pd.DataFrame(records).set_index("date")
+                    frame = _normalize_price_frame(frame)
+                    if frame is not None:
+                        fetched[ticker] = frame
+                except Exception as exc:
+                    logger.debug(f"Tiingo bulk parse failed for {ticker}: {exc}")
+
+            logger.info(
+                f"Tiingo bulk batch {batch_start//batch_size + 1}: "
+                f"fetched {len(sym_rows)} symbols, parsed {len(fetched)} ok so far"
+            )
+
+        self._bulk_cache = fetched
+        self._bulk_fetched_at = time.time()
+        logger.info(f"TiingoBulkFetcher: loaded {len(fetched)}/{len(us_symbols)} US symbols")
+        return fetched
+
+    def fetch_daily(self, symbol: str, full: bool = False) -> FetchOutcome:
+        """Per-symbol fetch served from in-memory bulk cache. Falls through to
+        a single-symbol Tiingo call if the symbol wasn't in the last bulk pull."""
+        if symbol in self._bulk_cache:
+            frame = self._bulk_cache[symbol]
+            return FetchOutcome(self.name, data=frame)
+
+        # Single-symbol fallback via Tiingo EOD endpoint
+        api_key = self.keys.acquire()
+        if not api_key:
+            return FetchOutcome(self.name, status="unavailable", error="No Tiingo key")
+        start_date = (date.today() - timedelta(days=365 * 3 if full else self._recent_days)).isoformat()
+        params = {
+            "startDate": start_date,
+            "token": api_key,
+            "format": "json",
+            "resampleFreq": "daily",
+            "columns": "open,high,low,close,adjClose,adjOpen,adjHigh,adjLow,volume",
+        }
+        try:
+            url = f"{TIINGO_BULK_EOD_BASE}/{symbol}/prices"
+            resp = requests.get(url, params=params, timeout=15)
+            if resp.status_code == 429:
+                self.keys.cool_down(api_key)
+                return FetchOutcome(self.name, status="rate_limited", error="Tiingo 429")
+            resp.raise_for_status()
+            rows = resp.json()
+            if not rows:
+                return FetchOutcome(self.name, status="empty", error="Tiingo returned no rows")
+            records = []
+            for item in rows:
+                dt_raw = item.get("date") or ""
+                try:
+                    dt = pd.Timestamp(dt_raw[:10])
+                except Exception:
+                    continue
+                records.append({
+                    "date": dt,
+                    "open": _as_float(item.get("adjOpen") or item.get("open")),
+                    "high": _as_float(item.get("adjHigh") or item.get("high")),
+                    "low": _as_float(item.get("adjLow") or item.get("low")),
+                    "close": _as_float(item.get("adjClose") or item.get("close")),
+                    "adj_close": _as_float(item.get("adjClose") or item.get("close")),
+                    "volume": _as_int(item.get("volume")),
+                })
+            frame = _normalize_price_frame(pd.DataFrame(records).set_index("date"))
+            if frame is None:
+                return FetchOutcome(self.name, status="empty", error="Tiingo returned malformed data")
+            return FetchOutcome(self.name, data=frame)
+        except Exception as exc:
+            error = str(exc)
+            if looks_rate_limited(error):
+                self.keys.cool_down(api_key)
+                return FetchOutcome(self.name, status="rate_limited", error=error)
+            return FetchOutcome(self.name, status="error", error=error)
+
+
 class YFinanceFetcher:
     name = "yfinance"
 
@@ -530,18 +712,28 @@ class YFinanceFetcher:
 
 class MultiSourcePriceFetcher:
     def __init__(self):
+        self.tiingo_bulk = TiingoBulkFetcher()
         registry = {
             "alpha_vantage": AlphaVantageFetcher(),
             "eodhd": EODHDPriceFetcher(),
             "finnhub": FinnhubPriceFetcher(),
             "polygon": PolygonPriceFetcher(),
+            "tiingo_bulk": self.tiingo_bulk,
             "twelve_data": TwelveDataFetcher(),
             "yfinance": YFinanceFetcher(),
         }
-        ordered_names = [name for name in PRICE_PROVIDER_ORDER if name in registry]
+        # Default provider order: tiingo_bulk first (one call covers all US),
+        # then per-symbol providers as fallback chain.
+        default_order = "tiingo_bulk,yfinance,finnhub,alpha_vantage,polygon,eodhd"
+        ordered_names = [
+            name.strip().lower()
+            for name in os.getenv("PRICE_PROVIDER_ORDER", default_order).split(",")
+            if name.strip()
+        ]
+        # Always ensure yfinance is in the list as last-resort fallback
         if "yfinance" not in ordered_names:
             ordered_names.append("yfinance")
-        self.providers = [registry[name] for name in ordered_names]
+        self.providers = [registry[name] for name in ordered_names if name in registry]
         self._preferred_provider_by_symbol: Dict[str, str] = {}
 
     def fetch_daily(self, symbol: str, full: bool = False) -> FetchOutcome:
@@ -615,7 +807,7 @@ class PriceDataPipeline:
         return FetchOutcome(provider=provider, data=cached)
 
     def run_incremental_update(self) -> Dict:
-        logger.info(f"PriceDataPipeline: fetching {len(self.symbols)} symbols using {', '.join(PRICE_PROVIDER_ORDER)}")
+        logger.info(f"PriceDataPipeline: fetching {len(self.symbols)} symbols")
         errors = []
         no_data_symbols = []
         missing_column_symbols = []
@@ -624,6 +816,18 @@ class PriceDataPipeline:
         provider_by_symbol = {}
         reused = 0
         fetched = 0
+
+        # Tiingo bulk pre-warm: one HTTP call per 1000 symbols loads all US
+        # prices into memory before the per-symbol loop, eliminating thousands
+        # of individual API calls.
+        tiingo_fetcher = self.fetcher.tiingo_bulk
+        if tiingo_fetcher.keys.configured:
+            us_syms = [s for s in self.symbols if tiingo_fetcher.supports(s)]
+            if us_syms:
+                logger.info(f"TiingoBulk: pre-fetching {len(us_syms)} US symbols in {max(1, (len(us_syms) + TIINGO_BULK_BATCH_SIZE - 1) // TIINGO_BULK_BATCH_SIZE)} batch(es)")
+                tiingo_fetcher.bulk_fetch(us_syms)
+        else:
+            logger.info("TiingoBulk: no API key set — skipping bulk pre-fetch (set TIINGO_API_KEY)")
 
         for i, symbol in enumerate(self.symbols, start=1):
             try:

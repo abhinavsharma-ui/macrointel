@@ -223,18 +223,54 @@ def _env_symbols(*env_names: str) -> List[str]:
     return _dedupe_symbols(values)
 
 
+_DEFAULT_US_OFFICIAL_PATH = "data/universe_us_official.txt"
+_DEFAULT_NSE_OFFICIAL_PATH = "data/universe_nse_official.txt"
+
+
+def _official_file_enabled() -> bool:
+    raw = os.getenv("OFFICIAL_UNIVERSE_LOAD", "1")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_project_path(rel: str) -> str:
+    """Resolve a project-relative path without requiring cwd to be project root."""
+    if not rel:
+        return rel
+    p = Path(rel)
+    if p.is_absolute() and p.exists():
+        return str(p)
+    if p.exists():
+        return str(p)
+    # Fallback: look relative to this file (pipeline/universe.py -> project/)
+    project_root = Path(__file__).resolve().parent.parent
+    candidate = project_root / rel
+    if candidate.exists():
+        return str(candidate)
+    return rel
+
+
 def _extra_universe_symbols(mode: str) -> List[str]:
     mode_key = str(mode or "").lower()
     extras: List[str] = []
     extras.extend(_env_symbols("UNIVERSE_EXTRA_SYMBOLS"))
     extras.extend(_read_symbol_file(os.getenv("UNIVERSE_EXTRA_FILE", "")))
 
+    load_official = _official_file_enabled()
+
     if mode_key in {"full", "us", "daytrade", "daytrade_us", "throughput", "throughput_us"}:
         extras.extend(_env_symbols("US_UNIVERSE_EXTRA_SYMBOLS"))
         extras.extend(_read_symbol_file(os.getenv("US_UNIVERSE_EXTRA_FILE", "")))
+        if load_official:
+            extras.extend(_read_symbol_file(_resolve_project_path(
+                os.getenv("US_UNIVERSE_OFFICIAL_FILE", _DEFAULT_US_OFFICIAL_PATH)
+            )))
     if mode_key in {"full", "nse", "daytrade", "daytrade_nse", "throughput", "throughput_nse"}:
         extras.extend(_env_symbols("NSE_UNIVERSE_EXTRA_SYMBOLS"))
         extras.extend(_read_symbol_file(os.getenv("NSE_UNIVERSE_EXTRA_FILE", "")))
+        if load_official:
+            extras.extend(_read_symbol_file(_resolve_project_path(
+                os.getenv("NSE_UNIVERSE_OFFICIAL_FILE", _DEFAULT_NSE_OFFICIAL_PATH)
+            )))
     if mode_key in {"daytrade", "daytrade_us", "daytrade_nse", "throughput", "throughput_us", "throughput_nse"}:
         extras.extend(_env_symbols("DAY_TRADE_EXTRA_SYMBOLS"))
         extras.extend(_read_symbol_file(os.getenv("DAY_TRADE_EXTRA_FILE", "")))

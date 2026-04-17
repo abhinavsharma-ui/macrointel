@@ -702,8 +702,8 @@ body::before {
         </div>
         <div class="stat-card">
             <div class="stat-label">ML Model</div>
-            <div class="stat-value positive" id="mlStatus">ACTIVE</div>
-            <div class="stat-sub" id="mlPrecision">76.2% precision</div>
+            <div class="stat-value" id="mlStatus">-</div>
+            <div class="stat-sub" id="mlPrecision">- precision</div>
         </div>
     </div>
 
@@ -815,15 +815,15 @@ body::before {
             </div>
             <div class="ml-stats">
                 <div class="ml-stat">
-                    <div class="ml-stat-value" id="mlPrecision2">76.2%</div>
+                    <div class="ml-stat-value" id="mlPrecision2">-</div>
                     <div class="ml-stat-label">Precision</div>
                 </div>
                 <div class="ml-stat">
-                    <div class="ml-stat-value" id="mlHitRate">76.2%</div>
+                    <div class="ml-stat-value" id="mlHitRate">-</div>
                     <div class="ml-stat-label">Hit Rate</div>
                 </div>
                 <div class="ml-stat">
-                    <div class="ml-stat-value" id="mlEdge">1.46%</div>
+                    <div class="ml-stat-value" id="mlEdge">-</div>
                     <div class="ml-stat-label">Edge</div>
                 </div>
             </div>

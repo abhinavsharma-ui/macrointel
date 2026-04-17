@@ -631,6 +631,11 @@ class BybitPublicDepthWebSocket:
         self._bybit_ping_interval = max(0.0, float(os.getenv("BYBIT_WS_PING_INTERVAL_SECONDS", "45") or 45))
         self._bybit_ping_timeout = max(0.0, float(os.getenv("BYBIT_WS_PING_TIMEOUT_SECONDS", "90") or 90))
         self._bybit_app_ping_seconds = max(10.0, float(os.getenv("BYBIT_WS_APP_PING_SECONDS", "20") or 20))
+        self._reconnect_base_delay_seconds = float(os.getenv("BYBIT_WS_RECONNECT_BASE_DELAY_SECONDS", "3"))
+        self._reconnect_max_delay_seconds = float(os.getenv("BYBIT_WS_RECONNECT_MAX_DELAY_SECONDS", "60"))
+        self._stale_seconds = float(os.getenv("BYBIT_WS_STALE_SECONDS", "30"))
+        self._last_message_ts = 0.0
+        self._watchdog_thread: Optional[threading.Thread] = None
 
     def _ws_url(self) -> str:
         return self.TESTNET_WS_BASE if self.testnet else self.WS_BASE
@@ -646,6 +651,11 @@ class BybitPublicDepthWebSocket:
         self._running = True
         thread = threading.Thread(target=self._run_forever, daemon=daemon)
         thread.start()
+        if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_loop, daemon=True, name="bybit-ws-watchdog"
+            )
+            self._watchdog_thread.start()
         logger.info(f"Bybit public depth WebSocket started for {len(self.symbols)} crypto symbols")
 
     def stop(self):
@@ -653,8 +663,29 @@ class BybitPublicDepthWebSocket:
         if self.ws:
             self.ws.close()
 
-    def _run_forever(self):
+    def _watchdog_loop(self):
         while self._running:
+            time.sleep(5)
+            if not self._running or self._stale_seconds <= 0:
+                continue
+            last_ts = float(self._last_message_ts or 0.0)
+            if last_ts <= 0:
+                continue
+            if time.time() - last_ts > float(self._stale_seconds):
+                logger.warning(
+                    f"Bybit WebSocket stale for >{int(self._stale_seconds)}s; forcing reconnect"
+                )
+                try:
+                    if self.ws:
+                        self.ws.close()
+                except Exception:
+                    pass
+
+    def _run_forever(self):
+        delay = max(0.5, float(self._reconnect_base_delay_seconds))
+        max_delay = max(delay, float(self._reconnect_max_delay_seconds))
+        while self._running:
+            start_ts = time.time()
             try:
                 self.ws = websocket.WebSocketApp(
                     self._ws_url(),
@@ -663,6 +694,8 @@ class BybitPublicDepthWebSocket:
                     on_error=self._on_error,
                     on_close=self._on_close,
                 )
+                # Spec: Bybit must use ping_interval=0 explicitly (not None) —
+                # app-level {"op":"ping"} in _ping_loop handles heartbeat.
                 if self._bybit_lib_ping and self._bybit_ping_interval > 0:
                     self.ws.run_forever(
                         ping_interval=self._bybit_ping_interval,
@@ -673,7 +706,12 @@ class BybitPublicDepthWebSocket:
             except Exception as exc:
                 logger.warning(f"Bybit public depth WebSocket error: {exc}")
             if self._running:
-                time.sleep(3)
+                runtime = time.time() - start_ts
+                if runtime < 15:
+                    delay = min(max_delay, delay * 2.0)
+                else:
+                    delay = max(0.5, float(self._reconnect_base_delay_seconds))
+                time.sleep(min(max_delay, delay) + random.random())
 
     def _ping_loop(self):
         while self._running and self.ws is not None:
@@ -799,6 +837,7 @@ class BybitPublicDepthWebSocket:
             )
 
     def _on_message(self, ws, message):
+        self._last_message_ts = time.time()
         try:
             payload = json.loads(message)
         except Exception:
@@ -964,14 +1003,25 @@ class FinnhubWebSocket:
         self.on_signal = on_signal_callback
         self.ws: Optional[websocket.WebSocketApp] = None
         self._running = False
-        self._reconnect_delay = 5
         self._latency_tracker: deque = deque(maxlen=100)
+        self._reconnect_base_delay_seconds = float(os.getenv("FINNHUB_WS_RECONNECT_BASE_DELAY_SECONDS", "3"))
+        self._reconnect_max_delay_seconds = float(os.getenv("FINNHUB_WS_RECONNECT_MAX_DELAY_SECONDS", "60"))
+        self._ping_interval_seconds = float(os.getenv("FINNHUB_WS_PING_INTERVAL_SECONDS", "20"))
+        self._ping_timeout_seconds = float(os.getenv("FINNHUB_WS_PING_TIMEOUT_SECONDS", "10"))
+        self._stale_seconds = float(os.getenv("FINNHUB_WS_STALE_SECONDS", "30"))
+        self._last_message_ts = 0.0
+        self._watchdog_thread: Optional[threading.Thread] = None
 
     def start(self, daemon: bool = True):
         """Start the WebSocket connection in a background thread."""
         self._running = True
         thread = threading.Thread(target=self._run_forever, daemon=daemon)
         thread.start()
+        if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_loop, daemon=True, name="finnhub-ws-watchdog"
+            )
+            self._watchdog_thread.start()
         logger.info(f"Finnhub WebSocket started for {len(self.symbols)} symbols")
 
     def stop(self):
@@ -979,9 +1029,32 @@ class FinnhubWebSocket:
         if self.ws:
             self.ws.close()
 
+    def _watchdog_loop(self):
+        while self._running:
+            time.sleep(5)
+            if not self._running or self._stale_seconds <= 0:
+                continue
+            last_ts = float(self._last_message_ts or 0.0)
+            if last_ts <= 0:
+                continue
+            if time.time() - last_ts > float(self._stale_seconds):
+                logger.warning(
+                    f"Finnhub WebSocket stale for >{int(self._stale_seconds)}s; forcing reconnect"
+                )
+                try:
+                    if self.ws:
+                        self.ws.close()
+                except Exception:
+                    pass
+
     def _run_forever(self):
         """Keep reconnecting if the WebSocket drops."""
+        delay = max(0.5, float(self._reconnect_base_delay_seconds))
+        max_delay = max(delay, float(self._reconnect_max_delay_seconds))
+        ping_interval = self._ping_interval_seconds if self._ping_interval_seconds > 0 else None
+        ping_timeout = self._ping_timeout_seconds if self._ping_timeout_seconds > 0 else None
         while self._running:
+            start_ts = time.time()
             try:
                 url = self.WS_URL.format(api_key=self.api_key)
                 self.ws = websocket.WebSocketApp(
@@ -991,16 +1064,23 @@ class FinnhubWebSocket:
                     on_error=self._on_error,
                     on_close=self._on_close,
                 )
-                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+                self.ws.run_forever(ping_interval=ping_interval, ping_timeout=ping_timeout)
             except Exception as e:
                 logger.error(f"Finnhub WebSocket error: {e}")
 
             if self._running:
-                logger.info(f"Reconnecting in {self._reconnect_delay}s...")
-                time.sleep(self._reconnect_delay)
+                runtime = time.time() - start_ts
+                if runtime < 15:
+                    delay = min(max_delay, delay * 2.0)
+                else:
+                    delay = max(0.5, float(self._reconnect_base_delay_seconds))
+                sleep_for = min(max_delay, delay) + random.random()
+                logger.info(f"Finnhub reconnect in {sleep_for:.1f}s (backoff)...")
+                time.sleep(sleep_for)
 
     def _on_open(self, ws):
         """Subscribe to all symbols on connection."""
+        self._last_message_ts = time.time()
         logger.info("Finnhub WebSocket connected")
         for symbol in self.symbols:
             ws.send(json.dumps({"type": "subscribe", "symbol": symbol}))
@@ -1008,6 +1088,7 @@ class FinnhubWebSocket:
 
     def _on_message(self, ws, message):
         """Parse incoming tick data."""
+        self._last_message_ts = time.time()
         recv_time = datetime.now(timezone.utc)
         try:
             data = json.loads(message)
@@ -1090,11 +1171,24 @@ class UpstoxWebSocket:
         self.buffer = buffer or PRICE_BUFFER
         self.ws: Optional[websocket.WebSocketApp] = None
         self._running = False
+        self._reconnect_base_delay_seconds = float(os.getenv("UPSTOX_WS_RECONNECT_BASE_DELAY_SECONDS", "3"))
+        self._reconnect_max_delay_seconds = float(os.getenv("UPSTOX_WS_RECONNECT_MAX_DELAY_SECONDS", "60"))
+        self._ping_interval_seconds = float(os.getenv("UPSTOX_WS_PING_INTERVAL_SECONDS", "20"))
+        self._ping_timeout_seconds = float(os.getenv("UPSTOX_WS_PING_TIMEOUT_SECONDS", "10"))
+        self._stale_seconds = float(os.getenv("UPSTOX_WS_STALE_SECONDS", "30"))
+        self._last_message_ts = 0.0
+        self._auth_failed = False
+        self._watchdog_thread: Optional[threading.Thread] = None
 
     def start(self, daemon: bool = True):
         self._running = True
         thread = threading.Thread(target=self._run_forever, daemon=daemon)
         thread.start()
+        if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_loop, daemon=True, name="upstox-ws-watchdog"
+            )
+            self._watchdog_thread.start()
         logger.info(f"Upstox WebSocket started for {len(self.nse_symbols)} NSE symbols")
 
     def stop(self):
@@ -1102,8 +1196,35 @@ class UpstoxWebSocket:
         if self.ws:
             self.ws.close()
 
-    def _run_forever(self):
+    def _watchdog_loop(self):
         while self._running:
+            time.sleep(5)
+            if not self._running or self._stale_seconds <= 0:
+                continue
+            last_ts = float(self._last_message_ts or 0.0)
+            if last_ts <= 0:
+                continue
+            if time.time() - last_ts > float(self._stale_seconds):
+                logger.warning(
+                    f"Upstox WebSocket stale for >{int(self._stale_seconds)}s; forcing reconnect"
+                )
+                try:
+                    if self.ws:
+                        self.ws.close()
+                except Exception:
+                    pass
+
+    def _run_forever(self):
+        if not self.access_token or not str(self.access_token).strip():
+            logger.warning("Upstox WebSocket: no access token set — skipping connection")
+            return
+
+        delay = max(0.5, float(self._reconnect_base_delay_seconds))
+        max_delay = max(delay, float(self._reconnect_max_delay_seconds))
+        ping_interval = self._ping_interval_seconds if self._ping_interval_seconds > 0 else None
+        ping_timeout = self._ping_timeout_seconds if self._ping_timeout_seconds > 0 else None
+        while self._running:
+            start_ts = time.time()
             try:
                 self.ws = websocket.WebSocketApp(
                     self.WS_URL,
@@ -1113,14 +1234,32 @@ class UpstoxWebSocket:
                     on_error=self._on_error,
                     on_close=self._on_close,
                 )
-                self.ws.run_forever()
+                self.ws.run_forever(ping_interval=ping_interval, ping_timeout=ping_timeout)
             except Exception as e:
                 logger.error(f"Upstox WebSocket error: {e}")
 
+            # Stop retrying on auth failures — token is invalid or missing
+            if getattr(self, "_auth_failed", False):
+                logger.error(
+                    "Upstox WebSocket: auth failed (401) — stopping reconnect loop. "
+                    "Set a valid UPSTOX_ACCESS_TOKEN or leave it unset to disable."
+                )
+                self._running = False
+                return
+
             if self._running:
-                time.sleep(5)
+                runtime = time.time() - start_ts
+                if runtime < 15:
+                    delay = min(max_delay, delay * 2.0)
+                else:
+                    delay = max(0.5, float(self._reconnect_base_delay_seconds))
+                sleep_for = min(max_delay, delay) + random.random()
+                logger.info(f"Upstox reconnect in {sleep_for:.1f}s (backoff)...")
+                time.sleep(sleep_for)
 
     def _on_open(self, ws):
+        self._auth_failed = False
+        self._last_message_ts = time.time()
         # Subscribe to instruments
         instrument_keys = [
             self.SYMBOL_MAP.get(s) for s in self.nse_symbols
@@ -1139,6 +1278,7 @@ class UpstoxWebSocket:
 
     def _on_message(self, ws, message):
         """Parse Upstox feed message (JSON mode)."""
+        self._last_message_ts = time.time()
         try:
             data = json.loads(message) if isinstance(message, str) else {}
             # Upstox v2 JSON message format
@@ -1167,7 +1307,15 @@ class UpstoxWebSocket:
             logger.debug(f"Upstox parse error: {e}")
 
     def _on_error(self, ws, error):
-        logger.warning(f"Upstox WebSocket error: {error}")
+        error_str = str(error)
+        if "401" in error_str or "Unauthorized" in error_str.lower():
+            self._auth_failed = True
+            logger.error(
+                "Upstox WebSocket: 401 Unauthorized — invalid or expired token. "
+                "Unset UPSTOX_ACCESS_TOKEN to disable Upstox feed."
+            )
+        else:
+            logger.warning(f"Upstox WebSocket error: {error}")
 
     def _on_close(self, ws, *args):
         logger.info("Upstox WebSocket closed")
