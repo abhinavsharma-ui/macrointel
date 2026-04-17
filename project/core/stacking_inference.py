@@ -64,6 +64,9 @@ class PredictionResult:
 
 
 class StackingInferenceEngine:
+    # When no model files exist, re-check the filesystem at most every N seconds.
+    _MISSING_RECHECK_INTERVAL = 60.0
+
     def __init__(self, checkpoints_dir: Optional[Path] = None) -> None:
         self.checkpoints_dir = Path(
             checkpoints_dir or Path(__file__).resolve().parent.parent / "models" / "checkpoints"
@@ -73,6 +76,8 @@ class StackingInferenceEngine:
         self._meta: Optional[Dict[str, Any]] = None
         self._mtimes: Dict[str, float] = {}
         self._available = False
+        self._last_missing_check: float = 0.0   # throttle re-checks when unavailable
+        self._logged_missing: set = set()        # only log each missing file once
 
     # ---------------------------------------------------------------- loading
 
@@ -90,7 +95,13 @@ class StackingInferenceEngine:
 
     def load(self, *, force: bool = False) -> bool:
         """Returns True if at least one base model is available."""
-        if not force and not self._needs_reload() and self._available:
+        if not force and not self._available:
+            # Throttle: don't hammer the filesystem every inference call.
+            now = time.time()
+            if now - self._last_missing_check < self._MISSING_RECHECK_INTERVAL:
+                return False
+            self._last_missing_check = now
+        if not force and self._available and not self._needs_reload():
             return True
 
         try:
@@ -104,8 +115,17 @@ class StackingInferenceEngine:
             for key, fname in _BASE_FILES.items():
                 path = self.checkpoints_dir / fname
                 if not path.exists():
-                    logger.info("stacking base %s missing: %s", key, path)
+                    if fname not in self._logged_missing:
+                        logger.info(
+                            "stacking base %s missing: %s — will retry in %ds; "
+                            "run train_stacking.py to generate models",
+                            key, path, int(self._MISSING_RECHECK_INTERVAL),
+                        )
+                        self._logged_missing.add(fname)
                     continue
+                # File appeared — remove from missing set so we log again if it
+                # later disappears.
+                self._logged_missing.discard(fname)
                 try:
                     payload = joblib.load(path)
                     model = payload.get("model") if isinstance(payload, dict) else payload

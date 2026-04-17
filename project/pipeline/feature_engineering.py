@@ -339,19 +339,31 @@ class FeaturePipeline:
                 if sym_sent is not None and not sym_sent.empty:
                     available_cols = [col for col in SENTIMENT_FEATURE_COLUMNS if col in sym_sent.columns]
                     feat = feat.join(sym_sent[available_cols], how="left")
-                    for col in SENTIMENT_FEATURE_COLUMNS:
-                        if col not in feat.columns:
-                            feat[col] = 0.0
+                    missing_sent = [col for col in SENTIMENT_FEATURE_COLUMNS if col not in feat.columns]
+                    if missing_sent:
+                        feat = pd.concat(
+                            [feat, pd.DataFrame({c: 0.0 for c in missing_sent}, index=feat.index)],
+                            axis=1,
+                        )
                     feat[SENTIMENT_FEATURE_COLUMNS] = feat[SENTIMENT_FEATURE_COLUMNS].fillna(0.0)
                 else:
-                    for col in SENTIMENT_FEATURE_COLUMNS:
-                        feat[col] = 0.0
+                    sent_zero = pd.DataFrame(
+                        {col: 0.0 for col in SENTIMENT_FEATURE_COLUMNS}, index=feat.index
+                    )
+                    feat = feat.drop(columns=[c for c in SENTIMENT_FEATURE_COLUMNS if c in feat.columns], errors="ignore")
+                    feat = pd.concat([feat, sent_zero], axis=1)
             except Exception:
-                for col in SENTIMENT_FEATURE_COLUMNS:
-                    feat[col] = 0.0
+                sent_zero = pd.DataFrame(
+                    {col: 0.0 for col in SENTIMENT_FEATURE_COLUMNS}, index=feat.index
+                )
+                feat = feat.drop(columns=[c for c in SENTIMENT_FEATURE_COLUMNS if c in feat.columns], errors="ignore")
+                feat = pd.concat([feat, sent_zero], axis=1)
         else:
-            for col in SENTIMENT_FEATURE_COLUMNS:
-                feat[col] = 0.0
+            sent_zero = pd.DataFrame(
+                {col: 0.0 for col in SENTIMENT_FEATURE_COLUMNS}, index=feat.index
+            )
+            feat = feat.drop(columns=[c for c in SENTIMENT_FEATURE_COLUMNS if c in feat.columns], errors="ignore")
+            feat = pd.concat([feat, sent_zero], axis=1)
 
         sent_mean = feat["compound_score"].rolling(20, min_periods=5).mean()
         sent_std = feat["compound_score"].rolling(20, min_periods=5).std().replace(0, np.nan)
@@ -398,14 +410,23 @@ class FeaturePipeline:
             + 0.15 * feat["news_volume_spike"].clip(-2, 2) / 2
         ).clip(-1, 1)
 
+        # --- event features (batch assign to avoid DataFrame fragmentation) ---
         if event_data is not None and not event_data.empty:
             aligned_events = event_data.reindex(feat.index).fillna(0.0)
-            for col in EVENT_FEATURE_COLUMNS:
-                feat[col] = aligned_events.get(col, 0.0)
+            event_cols_df = pd.DataFrame(
+                {col: aligned_events.get(col, 0.0) for col in EVENT_FEATURE_COLUMNS},
+                index=feat.index,
+            )
         else:
-            for col in EVENT_FEATURE_COLUMNS:
-                feat[col] = 0.0
+            event_cols_df = pd.DataFrame(
+                {col: 0.0 for col in EVENT_FEATURE_COLUMNS},
+                index=feat.index,
+            )
+        # Drop any already-present event columns before concat to avoid dupes
+        feat = feat.drop(columns=[c for c in EVENT_FEATURE_COLUMNS if c in feat.columns], errors="ignore")
+        feat = pd.concat([feat, event_cols_df], axis=1)
 
+        # --- alt-data features (batch assign) ---
         if altdata_data is not None:
             try:
                 sym_alt = (
@@ -416,19 +437,32 @@ class FeaturePipeline:
                 if sym_alt is not None and not sym_alt.empty:
                     available_cols = [col for col in ALT_DATA_FEATURE_COLUMNS if col in sym_alt.columns]
                     feat = feat.join(sym_alt[available_cols], how="left")
-                    for col in ALT_DATA_FEATURE_COLUMNS:
-                        if col not in feat.columns:
-                            feat[col] = 0.0
+                    # Fill any missing alt columns with 0.0 in one shot
+                    missing_alt = [col for col in ALT_DATA_FEATURE_COLUMNS if col not in feat.columns]
+                    if missing_alt:
+                        feat = pd.concat(
+                            [feat, pd.DataFrame({c: 0.0 for c in missing_alt}, index=feat.index)],
+                            axis=1,
+                        )
                     feat[ALT_DATA_FEATURE_COLUMNS] = feat[ALT_DATA_FEATURE_COLUMNS].fillna(0.0)
                 else:
-                    for col in ALT_DATA_FEATURE_COLUMNS:
-                        feat[col] = 0.0
+                    alt_zero_df = pd.DataFrame(
+                        {col: 0.0 for col in ALT_DATA_FEATURE_COLUMNS}, index=feat.index
+                    )
+                    feat = feat.drop(columns=[c for c in ALT_DATA_FEATURE_COLUMNS if c in feat.columns], errors="ignore")
+                    feat = pd.concat([feat, alt_zero_df], axis=1)
             except Exception:
-                for col in ALT_DATA_FEATURE_COLUMNS:
-                    feat[col] = 0.0
+                alt_zero_df = pd.DataFrame(
+                    {col: 0.0 for col in ALT_DATA_FEATURE_COLUMNS}, index=feat.index
+                )
+                feat = feat.drop(columns=[c for c in ALT_DATA_FEATURE_COLUMNS if c in feat.columns], errors="ignore")
+                feat = pd.concat([feat, alt_zero_df], axis=1)
         else:
-            for col in ALT_DATA_FEATURE_COLUMNS:
-                feat[col] = 0.0
+            alt_zero_df = pd.DataFrame(
+                {col: 0.0 for col in ALT_DATA_FEATURE_COLUMNS}, index=feat.index
+            )
+            feat = feat.drop(columns=[c for c in ALT_DATA_FEATURE_COLUMNS if c in feat.columns], errors="ignore")
+            feat = pd.concat([feat, alt_zero_df], axis=1)
 
         sent_norm = feat["weighted_compound_score"].clip(-1, 1)
         feat["event_alpha_signal"] = (
