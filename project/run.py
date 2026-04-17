@@ -93,6 +93,7 @@ class MacroIntelligenceSystem:
             "alpha_vantage": _get_primary_env_value("ALPHA_VANTAGE_API_KEYS", "ALPHA_VANTAGE_API_KEY"),
             "news_api": _get_primary_env_value("NEWS_API_KEYS", "NEWS_API_KEY"),
             "finnhub": _get_primary_env_value("FINNHUB_API_KEYS", "FINNHUB_API_KEY"),
+            "polygon": os.getenv("POLYGON_API_KEY", "").strip(),
             "upstox": os.getenv("UPSTOX_ACCESS_TOKEN", ""),
             "fred": os.getenv("FRED_API_KEY", ""),
         }
@@ -182,22 +183,36 @@ class MacroIntelligenceSystem:
                 + _load_symbol_file(os.getenv("BYBIT_CRYPTO_SYMBOLS_FILE", ""))
             )
         )
+        # CCXT Pro feed — exchange configurable via CCXT_EXCHANGE (default: binance)
+        self._ccxt_crypto_symbols = list(
+            dict.fromkeys(
+                _parse_symbol_blob(os.getenv("CCXT_CRYPTO_SYMBOLS", ""))
+                + _load_symbol_file(os.getenv("CCXT_CRYPTO_SYMBOLS_FILE", ""))
+            )
+        )
+        self._ccxt_exchange_id = os.getenv("CCXT_EXCHANGE", "binance").strip().lower() or "binance"
         if not self._binance_crypto_symbols:
             self._binance_crypto_symbols = list(self._crypto_symbols)
         if not self._bybit_crypto_symbols:
             self._bybit_crypto_symbols = list(self._crypto_symbols)
+        if not self._ccxt_crypto_symbols:
+            self._ccxt_crypto_symbols = list(self._crypto_symbols)
         if self._throughput_mode and len(self._crypto_symbols) < 24:
             self._crypto_symbols = list(dict.fromkeys(self._crypto_symbols + _parse_symbol_blob(crypto_default)))
         if self._throughput_mode and len(self._binance_crypto_symbols) < 24:
             self._binance_crypto_symbols = list(dict.fromkeys(self._binance_crypto_symbols + self._crypto_symbols))
         if self._throughput_mode and len(self._bybit_crypto_symbols) < 24:
             self._bybit_crypto_symbols = list(dict.fromkeys(self._bybit_crypto_symbols + self._crypto_symbols))
+        if self._throughput_mode and len(self._ccxt_crypto_symbols) < 24:
+            self._ccxt_crypto_symbols = list(dict.fromkeys(self._ccxt_crypto_symbols + self._crypto_symbols))
         if self._crypto_primary_feed_only_symbols and not self._crypto_use_all_feeds:
             primary_feed = self._crypto_feed_order[0] if self._crypto_feed_order else "bybit"
             if primary_feed == "bybit" and self._bybit_crypto_symbols:
                 self._crypto_symbols = list(self._bybit_crypto_symbols)
             elif primary_feed == "binance" and self._binance_crypto_symbols:
                 self._crypto_symbols = list(self._binance_crypto_symbols)
+            elif primary_feed == "ccxt" and self._ccxt_crypto_symbols:
+                self._crypto_symbols = list(self._ccxt_crypto_symbols)
         self._crypto_signal_stale_seconds = max(15, int(os.getenv("CRYPTO_SIGNAL_STALE_SECONDS", "45")))
         self._crypto_signal_hold_grace_seconds = max(
             30,
@@ -213,6 +228,9 @@ class MacroIntelligenceSystem:
             ),
         )
         self._crypto_signal_refresh_seconds = max(2.0, float(os.getenv("CRYPTO_SIGNAL_REFRESH_SECONDS", "5")))
+        self._crypto_rest_quote_cache: Dict[str, Dict[str, Any]] = {}
+        self._crypto_rest_quote_ttl_seconds = max(2.0, float(os.getenv("CRYPTO_REST_QUOTE_TTL_SECONDS", "8")))
+        self._crypto_rest_quote_timeout_seconds = max(1.0, float(os.getenv("CRYPTO_REST_QUOTE_TIMEOUT_SECONDS", "6")))
         self._allow_dual_lane_variants = os.getenv("DUAL_LANE_VARIANTS_ENABLED", "0").strip().lower() in {
             "1",
             "true",
@@ -2132,9 +2150,12 @@ class MacroIntelligenceSystem:
             BinancePublicDepthWebSocket,
             BybitPublicDepthWebSocket,
             BybitTickerPollingFeed,
+            CCXTPublicWebSocket,
             FinnhubWebSocket,
             MetaTrader5PollingFeed,
+            NSEPythonPollingFeed,
             PollingFallback,
+            PolygonIEXWebSocket,
             UpstoxWebSocket,
             PRICE_BUFFER,
         )
@@ -2149,19 +2170,53 @@ class MacroIntelligenceSystem:
         polling_enabled = os.getenv("POLLING_FALLBACK_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
         covered_by_ws = set()
 
-        if self._api_keys.get("finnhub") and us:
+        # ── US stocks: prefer Polygon IEX (free, no symbol limit) over Finnhub ──
+        polygon_key = self._api_keys.get("polygon") or os.getenv("POLYGON_API_KEY", "").strip()
+        if polygon_key and us:
+            ws = PolygonIEXWebSocket(
+                api_key=polygon_key,
+                symbols=us,
+                buffer=PRICE_BUFFER,
+            )
+            ws.start()
+            self._components["polygon_iex_ws"] = ws
+            covered_by_ws.update(us)
+            logger.info(
+                f"Polygon IEX WebSocket started for {len(us)} US symbols "
+                "(no symbol-count limit, free IEX feed)"
+            )
+        elif self._api_keys.get("finnhub") and us:
+            # Finnhub fallback — free tier capped at 50 symbols
             ws_symbols = us[:50]
             if len(us) > len(ws_symbols):
-                logger.warning(f"Finnhub free-tier limit reached: streaming {len(ws_symbols)} of {len(us)} US symbols")
+                logger.warning(
+                    f"Finnhub free-tier limit: streaming {len(ws_symbols)} of {len(us)} US symbols. "
+                    "Set POLYGON_API_KEY to remove this cap."
+                )
             ws = FinnhubWebSocket(api_key=self._api_keys["finnhub"], symbols=ws_symbols, buffer=PRICE_BUFFER)
             ws.start()
             self._components["finnhub_ws"] = ws
             covered_by_ws.update(ws_symbols)
 
+        upstox_started = False
         if self._api_keys.get("upstox") and nse:
             ws = UpstoxWebSocket(access_token=self._api_keys["upstox"], symbols=nse, buffer=PRICE_BUFFER)
             ws.start()
             self._components["upstox_ws"] = ws
+            covered_by_ws.update(nse)
+            upstox_started = True
+
+        # ── NSE fallback: free nsepython polling feed (no account required) ──
+        nse_native_enabled = os.getenv("NSE_NATIVE_FEED_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+        if not upstox_started and nse and nse_native_enabled:
+            nse_feed = NSEPythonPollingFeed(
+                symbols=nse,
+                buffer=PRICE_BUFFER,
+                interval_seconds=float(os.getenv("NSE_POLL_INTERVAL_SECONDS", "3.0")),
+                batch_delay_seconds=float(os.getenv("NSE_POLL_BATCH_DELAY_SECONDS", "0.1")),
+            )
+            nse_feed.start()
+            self._components["nsepython_feed"] = nse_feed
             covered_by_ws.update(nse)
 
         if os.getenv("MT5_FEED_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"} and target_symbols:
@@ -2181,7 +2236,21 @@ class MacroIntelligenceSystem:
         if self._crypto_depth_enabled and self._crypto_symbols:
             started_crypto_feeds = []
             for feed_name in self._crypto_feed_order:
-                if feed_name == "binance":
+                if feed_name == "ccxt":
+                    # ── CCXT Pro: unified library, 100+ exchanges, no rate limits ──
+                    ccxt_symbols = self._ccxt_crypto_symbols or self._crypto_symbols
+                    if ccxt_symbols:
+                        ccxt_ws = CCXTPublicWebSocket(
+                            symbols=ccxt_symbols,
+                            buffer=PRICE_BUFFER,
+                            exchange_id=self._ccxt_exchange_id,
+                        )
+                        ccxt_ws.start()
+                        self._components["ccxt_ws"] = ccxt_ws
+                        started_crypto_feeds.append(
+                            f"ccxt/{self._ccxt_exchange_id} ({len(ccxt_symbols)} symbols)"
+                        )
+                elif feed_name == "binance":
                     connection_count = self._start_chunked_component(
                         "binance_public_depth_ws",
                         BinancePublicDepthWebSocket,
@@ -3761,24 +3830,179 @@ class MacroIntelligenceSystem:
 
     def _build_crypto_intraday_signal(self, symbol: str) -> Optional[Dict]:
         try:
-            from core.realtime_engine import DEPTH_BUFFER, PRICE_BUFFER
+            from core.realtime_engine import DEPTH_BUFFER, PRICE_BUFFER, Tick
         except Exception:
             return None
 
+        latest_tick = PRICE_BUFFER.latest(symbol)
+        raw_depth_snapshot = DEPTH_BUFFER.latest(symbol) or {}
+
+        def _fetch_rest_quote() -> Optional[Dict[str, Any]]:
+            cache_key = str(symbol or "").upper()
+            now_ts = time.time()
+            cached = self._crypto_rest_quote_cache.get(cache_key)
+            if cached and (now_ts - float(cached.get("cached_at_ts", 0.0) or 0.0)) <= self._crypto_rest_quote_ttl_seconds:
+                return dict(cached)
+
+            providers = []
+            for provider in list(self._crypto_feed_order) + ["bybit", "binance"]:
+                name = str(provider or "").strip().lower()
+                if name and name not in providers:
+                    providers.append(name)
+
+            for provider in providers:
+                try:
+                    if provider == "bybit":
+                        response = requests.get(
+                            "https://api.bybit.com/v5/market/tickers",
+                            params={"category": "spot", "symbol": cache_key},
+                            timeout=self._crypto_rest_quote_timeout_seconds,
+                        )
+                        response.raise_for_status()
+                        item = ((((response.json() or {}).get("result") or {}).get("list") or [None])[0]) or {}
+                        if item:
+                            last_price = float(item.get("lastPrice", 0.0) or 0.0)
+                            best_bid = float(item.get("bid1Price", 0.0) or 0.0)
+                            best_ask = float(item.get("ask1Price", 0.0) or 0.0)
+                            quote = {
+                                "symbol": cache_key,
+                                "last_price": last_price if last_price > 0 else (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0,
+                                "best_bid": best_bid,
+                                "best_ask": best_ask,
+                                "best_bid_qty": float(item.get("bid1Size", 0.0) or 0.0),
+                                "best_ask_qty": float(item.get("ask1Size", 0.0) or 0.0),
+                                "volume": float(item.get("volume24h", 0.0) or 0.0),
+                                "source": "bybit_rest_direct",
+                                "timestamp": datetime.now(timezone.utc),
+                            }
+                            if quote["last_price"] > 0:
+                                quote["cached_at_ts"] = now_ts
+                                self._crypto_rest_quote_cache[cache_key] = dict(quote)
+                                return quote
+                    elif provider == "binance":
+                        book_response = requests.get(
+                            "https://api.binance.com/api/v3/ticker/bookTicker",
+                            params={"symbol": cache_key},
+                            timeout=self._crypto_rest_quote_timeout_seconds,
+                        )
+                        book_response.raise_for_status()
+                        book = book_response.json() or {}
+                        best_bid = float(book.get("bidPrice", 0.0) or 0.0)
+                        best_ask = float(book.get("askPrice", 0.0) or 0.0)
+                        quote = {
+                            "symbol": cache_key,
+                            "last_price": (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0,
+                            "best_bid": best_bid,
+                            "best_ask": best_ask,
+                            "best_bid_qty": float(book.get("bidQty", 0.0) or 0.0),
+                            "best_ask_qty": float(book.get("askQty", 0.0) or 0.0),
+                            "volume": 0.0,
+                            "source": "binance_rest_direct",
+                            "timestamp": datetime.now(timezone.utc),
+                        }
+                        if quote["last_price"] > 0:
+                            quote["cached_at_ts"] = now_ts
+                            self._crypto_rest_quote_cache[cache_key] = dict(quote)
+                            return quote
+                except Exception:
+                    continue
+            return dict(cached) if cached else None
+
+        def _seed_from_rest_quote(rest_quote: Optional[Dict[str, Any]]) -> None:
+            nonlocal latest_tick, raw_depth_snapshot
+            if not isinstance(rest_quote, dict):
+                return
+            price = float(rest_quote.get("last_price", 0.0) or 0.0)
+            best_bid = float(rest_quote.get("best_bid", 0.0) or 0.0)
+            best_ask = float(rest_quote.get("best_ask", 0.0) or 0.0)
+            if price <= 0 and best_bid > 0 and best_ask > 0:
+                price = (best_bid + best_ask) / 2.0
+            if price <= 0:
+                return
+            quote_ts = rest_quote.get("timestamp")
+            if not isinstance(quote_ts, datetime):
+                quote_ts = datetime.now(timezone.utc)
+            latest_tick = Tick(
+                symbol=symbol,
+                price=price,
+                volume=int(float(rest_quote.get("volume", 0.0) or 0.0)),
+                timestamp=quote_ts,
+                bid=best_bid if best_bid > 0 else None,
+                ask=best_ask if best_ask > 0 else None,
+                market="CRYPTO",
+                source=str(rest_quote.get("source") or "crypto_rest_direct"),
+            )
+            if best_bid > 0 and best_ask > 0:
+                raw_depth_snapshot = {
+                    **dict(raw_depth_snapshot or {}),
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "best_bid_qty": float(rest_quote.get("best_bid_qty", 0.0) or 0.0),
+                    "best_ask_qty": float(rest_quote.get("best_ask_qty", 0.0) or 0.0),
+                    "updated_at": quote_ts.isoformat(),
+                    "source": str(rest_quote.get("source") or "crypto_rest_direct"),
+                }
+            try:
+                PRICE_BUFFER.push(latest_tick)
+            except Exception:
+                pass
+            if best_bid > 0 and best_ask > 0:
+                try:
+                    DEPTH_BUFFER.update(
+                        symbol,
+                        {
+                            "best_bid": best_bid,
+                            "best_ask": best_ask,
+                            "best_bid_qty": float(rest_quote.get("best_bid_qty", 0.0) or 0.0),
+                            "best_ask_qty": float(rest_quote.get("best_ask_qty", 0.0) or 0.0),
+                            "updated_at": quote_ts.isoformat(),
+                            "source": str(rest_quote.get("source") or "crypto_rest_direct"),
+                        },
+                    )
+                except Exception:
+                    pass
+
+        if latest_tick is None or float(getattr(latest_tick, "price", 0.0) or 0.0) <= 0:
+            _seed_from_rest_quote(_fetch_rest_quote())
+
         def _build_quote_only_fallback(depth_snapshot: Optional[Dict], note: str) -> Optional[Dict]:
-            if not self._crypto_quote_fallback_enabled or latest_tick is None:
+            if not self._crypto_quote_fallback_enabled:
                 return None
             last_price = float(getattr(latest_tick, "price", 0.0) or 0.0)
+            if last_price <= 0:
+                best_bid_from_depth = float((depth_snapshot or {}).get("best_bid", 0.0) or 0.0)
+                best_ask_from_depth = float((depth_snapshot or {}).get("best_ask", 0.0) or 0.0)
+                if best_bid_from_depth > 0 and best_ask_from_depth > 0 and best_ask_from_depth >= best_bid_from_depth:
+                    last_price = (best_bid_from_depth + best_ask_from_depth) / 2.0
+            if last_price <= 0:
+                try:
+                    last_price = float(self._get_latest_close(symbol) or 0.0)
+                except Exception:
+                    last_price = 0.0
             if last_price <= 0:
                 return None
             best_bid = float(getattr(latest_tick, "bid", 0.0) or 0.0)
             best_ask = float(getattr(latest_tick, "ask", 0.0) or 0.0)
+            if best_bid <= 0:
+                best_bid = float((depth_snapshot or {}).get("best_bid", 0.0) or 0.0)
+            if best_ask <= 0:
+                best_ask = float((depth_snapshot or {}).get("best_ask", 0.0) or 0.0)
             if best_bid <= 0 or best_ask <= 0 or best_ask < best_bid:
                 half_spread = last_price * (self._crypto_quote_fallback_spread_pct / 100.0) / 2.0
                 best_bid = max(last_price - half_spread, last_price * 0.999)
                 best_ask = max(last_price + half_spread, best_bid)
             spread_pct = ((best_ask - best_bid) / max((best_bid + best_ask) / 2.0, 1e-9)) * 100.0
-            tick_age = max(0.0, (datetime.now(timezone.utc) - latest_tick.timestamp).total_seconds())
+            tick_timestamp = getattr(latest_tick, "timestamp", None)
+            if isinstance(tick_timestamp, datetime):
+                tick_age = max(0.0, (datetime.now(timezone.utc) - tick_timestamp).total_seconds())
+            else:
+                depth_updated_at = (depth_snapshot or {}).get("updated_at")
+                tick_age = 0.0
+                if depth_updated_at:
+                    try:
+                        tick_age = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(str(depth_updated_at))).total_seconds())
+                    except Exception:
+                        tick_age = 0.0
             fallback_overlay = {
                 "direction": "neutral",
                 "confidence": 0.18,
@@ -3866,12 +4090,16 @@ class MacroIntelligenceSystem:
                 lane_override="crypto",
             )
 
-        latest_tick = PRICE_BUFFER.latest(symbol)
         if latest_tick is None or float(getattr(latest_tick, "price", 0.0) or 0.0) <= 0:
-            return None
+            return _build_quote_only_fallback(raw_depth_snapshot, "Depth snapshot fallback (no live tick)")
 
         tick_age_seconds = max(0.0, (datetime.now(timezone.utc) - latest_tick.timestamp).total_seconds())
         if tick_age_seconds > self._crypto_signal_stale_seconds:
+            _seed_from_rest_quote(_fetch_rest_quote())
+            tick_age_seconds = max(0.0, (datetime.now(timezone.utc) - latest_tick.timestamp).total_seconds()) if latest_tick is not None else tick_age_seconds
+            fallback_signal = _build_quote_only_fallback(raw_depth_snapshot, "Depth snapshot fallback (stale live tick)")
+            if fallback_signal is not None:
+                return fallback_signal
             return None
 
         depth_snapshot = DEPTH_BUFFER.filtered_snapshot(
@@ -4121,6 +4349,38 @@ class MacroIntelligenceSystem:
                             existing["trade_eligible"] = False
                         existing["stale_reason"] = "crypto_refresh_gap_soft" if within_hold_grace else "crypto_refresh_gap"
                         existing["stale_seconds"] = round(max(signal_age_seconds, 0.0), 2)
+                        continue
+                if symbol in held_symbols:
+                    held_price = self._safe_number(self._get_latest_close(symbol), 0.0)
+                    if held_price > 0:
+                        placeholder = self._mark_signal_warmup_only(
+                            symbol,
+                            {
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "signal": "neutral",
+                                "confidence": 0.0,
+                                "conviction_score": 0.0,
+                                "ensemble_score": 0.0,
+                                "regime": "feed_gap",
+                                "regime_multiplier": 1.0,
+                                "market": "CRYPTO",
+                                "signal_style": "crypto_depth_intraday",
+                                "intraday_overlay": {
+                                    "market": "CRYPTO",
+                                    "note": "Holding retained while crypto feed refreshes",
+                                    "signal_age_seconds": round(max(signal_age_seconds, 0.0), 2),
+                                },
+                                "risk_parameters": {
+                                    "entry_note": "Holding retained while crypto feed refreshes",
+                                },
+                                "last_price": held_price,
+                            },
+                            reason="crypto_refresh_gap_holding",
+                            lane_override="crypto",
+                        )
+                        placeholder["trade_eligible"] = False
+                        placeholder["stale_seconds"] = round(max(signal_age_seconds, 0.0), 2)
+                        self._signal_store[symbol] = placeholder
                         continue
                 if symbol not in held_symbols and symbol not in latest_feature_rows:
                     self._signal_store.pop(symbol, None)
