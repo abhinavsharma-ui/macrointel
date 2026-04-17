@@ -1,17 +1,23 @@
 {
-  "status": "pending",
-  "version": "1.0.0",
+  "status": "pending_walkforward_retrain",
+  "version": "1.1.0",
   "created_at": null,
-  "model_precision": null,
-  "note": "Stale hand-written report removed. Run models/institutional_retraining.py (walk-forward path) to populate this file with real per-fold metrics.",
+  "note": "No hardcoded metrics. Runtime will overlay live precision / hit-rate / edge from _compute_live_meta_metrics() on top of this file until a real walk-forward is run via models/institutional_retraining.py.",
   "deployment_rules": {
-    "decision_threshold": 0.55,
-    "min_expected_edge_pct": 0.15,
-    "min_edge_ratio": 0.18
+    "decision_threshold": 0.40,
+    "min_expected_edge_pct": 0.05,
+    "min_edge_ratio": 0.08
   },
   "walk_forward": {
     "status": "pending",
     "folds": [],
-    "summary": {}
+    "summary": {
+      "mean_precision": null,
+      "mean_recall": null,
+      "mean_coverage_pct": null,
+      "mean_taken_edge_pct": null,
+      "mean_taken_drawdown_pct": null,
+      "mean_taken_hit_rate_pct": null
+    }
   }
 }

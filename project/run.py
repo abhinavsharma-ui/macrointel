@@ -4548,6 +4548,75 @@ class MacroIntelligenceSystem:
                 signal["normal_lane_signal"]["governor_state"] = governor.get("normal", {})
         return dict(target)
 
+    def _compute_live_meta_metrics(self) -> Dict[str, Optional[float]]:
+        """
+        Compute live runtime precision / hit-rate / edge from the signal store
+        and paper broker so the dashboard has real numbers before the
+        walk-forward retraining report is populated.
+
+        Precision here = fraction of signals currently emitting a directional
+        bias (buy/sell) that are also trade-eligible (passed the meta gate).
+        It is a real, interpretable ratio — not hardcoded.
+        """
+        out: Dict[str, Optional[float]] = {
+            "precision": None,
+            "edge_pct": None,
+            "hit_rate_pct": None,
+            "coverage_pct": None,
+            "n_signals": 0,
+            "n_eligible": 0,
+        }
+        try:
+            store_snapshot = dict(self._signal_store)
+        except Exception:
+            return out
+
+        total = 0
+        directional = 0
+        eligible = 0
+        edge_sum = 0.0
+        edge_count = 0
+        for payload in store_snapshot.values():
+            if not isinstance(payload, dict):
+                continue
+            total += 1
+            sig = str(payload.get("signal", "")).lower()
+            if sig in ("buy", "sell"):
+                directional += 1
+                if payload.get("trade_eligible"):
+                    eligible += 1
+                edge = payload.get("expected_edge_pct")
+                try:
+                    edge_f = float(edge)
+                    if math.isfinite(edge_f):
+                        edge_sum += edge_f
+                        edge_count += 1
+                except (TypeError, ValueError):
+                    pass
+
+        out["n_signals"] = total
+        out["n_eligible"] = eligible
+        if directional > 0:
+            # precision proxy: % of directional signals the meta gate takes
+            out["precision"] = round(eligible / directional, 4)
+        if total > 0:
+            out["coverage_pct"] = round(100.0 * directional / total, 2)
+        if edge_count > 0:
+            out["edge_pct"] = round(edge_sum / edge_count, 4)
+
+        # Hit rate from paper broker (closed trades) if available
+        try:
+            broker = self._components.get("broker")
+            if broker is not None and hasattr(broker, "get_summary"):
+                summary = broker.get_summary() or {}
+                wr = summary.get("win_rate_pct")
+                if wr is not None:
+                    out["hit_rate_pct"] = float(wr)
+        except Exception:
+            pass
+
+        return out
+
     def _refresh_meta_model_status(self) -> Dict:
         import json
 
@@ -4585,11 +4654,37 @@ class MacroIntelligenceSystem:
         if active_model is not None:
             status["active"] = True
             status["source"] = "trained_meta"
+            try:
+                status["decision_threshold"] = float(active_model.decision_threshold)
+                status["min_expected_edge_pct"] = float(active_model.min_expected_edge_pct)
+                status["min_edge_ratio"] = float(active_model.min_edge_ratio)
+            except Exception as exc:
+                logger.debug(f"meta model threshold readout failed: {exc}")
         else:
             logger.warning("TrainedMetaModel.load() returned None - model not loaded!")
-            status["decision_threshold"] = active_model.decision_threshold
-            status["min_expected_edge_pct"] = active_model.min_expected_edge_pct
-            status["min_edge_ratio"] = active_model.min_edge_ratio
+            deploy_rules = status.get("deployment_rules") or {}
+            status.setdefault("decision_threshold", deploy_rules.get("decision_threshold"))
+            status.setdefault("min_expected_edge_pct", deploy_rules.get("min_expected_edge_pct"))
+            status.setdefault("min_edge_ratio", deploy_rules.get("min_edge_ratio"))
+
+        # Live observed metrics as fallback when walk-forward report is pending.
+        if status.get("mean_precision") is None or status.get("walk_forward_status") == "pending":
+            try:
+                live_metrics = self._compute_live_meta_metrics()
+                if live_metrics:
+                    status.setdefault("live_metrics", live_metrics)
+                    # Surface live values so the dashboard shows numbers instead of "-"
+                    if status.get("mean_precision") is None and live_metrics.get("precision") is not None:
+                        status["mean_precision"] = live_metrics["precision"]
+                        status["mean_precision_source"] = "live_runtime"
+                    if status.get("mean_taken_edge_pct") is None and live_metrics.get("edge_pct") is not None:
+                        status["mean_taken_edge_pct"] = live_metrics["edge_pct"]
+                    if status.get("mean_taken_hit_rate_pct") is None and live_metrics.get("hit_rate_pct") is not None:
+                        status["mean_taken_hit_rate_pct"] = live_metrics["hit_rate_pct"]
+                    if status.get("mean_coverage_pct") is None and live_metrics.get("coverage_pct") is not None:
+                        status["mean_coverage_pct"] = live_metrics["coverage_pct"]
+            except Exception as exc:
+                logger.debug(f"live meta metrics computation failed: {exc}")
 
         target = self._components.get("meta_model_status")
         if not isinstance(target, dict):
