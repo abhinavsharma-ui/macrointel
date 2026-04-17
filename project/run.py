@@ -4574,16 +4574,25 @@ class MacroIntelligenceSystem:
         total = 0
         directional = 0
         eligible = 0
+        warmup = 0
         edge_sum = 0.0
         edge_count = 0
         for payload in store_snapshot.values():
             if not isinstance(payload, dict):
                 continue
             total += 1
+            if payload.get("warmup_only"):
+                warmup += 1
+                continue
             sig = str(payload.get("signal", "")).lower()
             if sig in ("buy", "sell"):
                 directional += 1
-                if payload.get("trade_eligible"):
+                # Match dashboard's isTradeReady logic: either flag counts.
+                meta = payload.get("meta_decision")
+                is_eligible = bool(payload.get("trade_eligible")) or (
+                    isinstance(meta, dict) and bool(meta.get("take_trade"))
+                )
+                if is_eligible:
                     eligible += 1
                 edge = payload.get("expected_edge_pct")
                 try:
@@ -4596,6 +4605,7 @@ class MacroIntelligenceSystem:
 
         out["n_signals"] = total
         out["n_eligible"] = eligible
+        out["n_warmup"] = warmup
         if directional > 0:
             # precision proxy: % of directional signals the meta gate takes
             out["precision"] = round(eligible / directional, 4)

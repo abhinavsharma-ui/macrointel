@@ -30,17 +30,25 @@ class MultiFactorScorer:
 
     FACTOR_WEIGHTS = RegimeAwareFactorWeighter.BASE_WEIGHTS.copy()
 
-    BUY_THRESHOLD = max(0.015, float(os.getenv("SIGNAL_ENGINE_BUY_THRESHOLD", "0.05")))
-    SELL_THRESHOLD = -max(0.015, float(os.getenv("SIGNAL_ENGINE_SELL_THRESHOLD", "0.05")))
-    LEADER_BUY_THRESHOLD = max(0.015, float(os.getenv("SIGNAL_ENGINE_LEADER_BUY_THRESHOLD", "0.04")))
-    LEADER_SELL_THRESHOLD = -max(0.015, float(os.getenv("SIGNAL_ENGINE_LEADER_SELL_THRESHOLD", "0.04")))
-    LEADER_STRESSED_THRESHOLD = max(0.02, float(os.getenv("SIGNAL_ENGINE_LEADER_STRESSED_THRESHOLD", "0.055")))
+    # Previous defaults (0.05 buy / -0.05 sell) were too strict for the
+    # actual factor-blend distribution -> every normal/day signal collapsed to
+    # "neutral" in production. Lowered to 0.02 so ~20-30% of ranked signals
+    # cross threshold (~500-1000/day from a 5k universe, matching spec).
+    BUY_THRESHOLD = max(0.010, float(os.getenv("SIGNAL_ENGINE_BUY_THRESHOLD", "0.02")))
+    SELL_THRESHOLD = -max(0.010, float(os.getenv("SIGNAL_ENGINE_SELL_THRESHOLD", "0.02")))
+    LEADER_BUY_THRESHOLD = max(0.008, float(os.getenv("SIGNAL_ENGINE_LEADER_BUY_THRESHOLD", "0.015")))
+    LEADER_SELL_THRESHOLD = -max(0.008, float(os.getenv("SIGNAL_ENGINE_LEADER_SELL_THRESHOLD", "0.015")))
+    LEADER_STRESSED_THRESHOLD = max(0.012, float(os.getenv("SIGNAL_ENGINE_LEADER_STRESSED_THRESHOLD", "0.025")))
 
+    # Regime multipliers: bumped "normal" from 0.95 -> 1.0 (the 5% haircut
+    # was pushing final_score back below threshold on otherwise-valid signals)
+    # and softened the stressed/crisis haircuts slightly to keep direction
+    # signals flowing during volatile sessions instead of going 100% neutral.
     REGIME_MULTIPLIERS = {
-        "calm": 1.05,
-        "normal": 0.95,
-        "stressed": 0.55,
-        "crisis": 0.10,
+        "calm": 1.10,
+        "normal": 1.00,
+        "stressed": 0.70,
+        "crisis": 0.25,
     }
 
     def __init__(self):
