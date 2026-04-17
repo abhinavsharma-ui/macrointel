@@ -702,6 +702,9 @@ class BybitPublicDepthWebSocket:
                         ping_timeout=self._bybit_ping_timeout if self._bybit_ping_timeout > 0 else None,
                     )
                 else:
+                    # Keep websocket-client's "disabled" ping behavior explicit.
+                    # Passing None here can leave the primary crypto feed in a bad
+                    # state under this app's threading/load profile.
                     self.ws.run_forever(ping_interval=0, ping_timeout=None)
             except Exception as exc:
                 logger.warning(f"Bybit public depth WebSocket error: {exc}")
@@ -722,6 +725,8 @@ class BybitPublicDepthWebSocket:
             time.sleep(self._bybit_app_ping_seconds)
 
     def _on_open(self, ws):
+        # Reset reconnect backoff on successful connect
+        self._reconnect_delay = 3.0
         topics = self._subscribe_topics()
         for idx in range(0, len(topics), self._topics_per_subscribe):
             chunk = topics[idx : idx + self._topics_per_subscribe]
@@ -973,6 +978,264 @@ class BybitTickerPollingFeed:
             time.sleep(max(0.0, self.interval_seconds - elapsed))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CCXT Pro WebSocket (Crypto — any exchange, no rate limits)
+# ─────────────────────────────────────────────────────────────────────────────
+class CCXTPublicWebSocket:
+    """
+    Public crypto market data via CCXT Pro (unified WebSocket library).
+
+    Connects directly to 100+ exchanges (Binance, OKX, KuCoin, Gate.io, MEXC,
+    Bybit, etc.) with no middleman — no Tardis, no per-exchange boilerplate,
+    completely free public WebSocket access.
+
+    This is a drop-in addition alongside BybitPublicDepthWebSocket.
+    Prefer this feed because:
+      - One library handles 100+ exchanges (failover = change CCXT_EXCHANGE)
+      - CCXT Pro manages reconnections and pings internally
+      - No custom ping/pong dance needed
+
+    Requirements:
+        pip install "ccxt[pro]"
+
+    Symbols: accepts BTCUSDT format — auto-converts to BTC/USDT internally.
+
+    Key env vars:
+        CCXT_EXCHANGE          Exchange to stream from (default: binance)
+        CRYPTO_FEED_ORDER      e.g. "ccxt,binance" to prefer this feed
+    """
+
+    # Ordered longest-first so "USDT" isn't confused with "USD"
+    _QUOTE_CURRENCIES = ["USDT", "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "USD", "BTC", "ETH", "BNB"]
+
+    def __init__(
+        self,
+        symbols: List[str],
+        buffer: RealTimePriceBuffer = None,
+        depth_buffer: PublicDepthBuffer = None,
+        *,
+        exchange_id: str = "binance",
+        watch_depth: bool = True,
+        watch_trades: bool = True,
+        reconnect_delay: float = 5.0,
+    ):
+        self.symbols = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        self.buffer = buffer or PRICE_BUFFER
+        self.depth_buffer = depth_buffer or DEPTH_BUFFER
+        self.exchange_id = (
+            exchange_id or os.getenv("CCXT_EXCHANGE", "binance")
+        ).lower().strip()
+        self.watch_depth = bool(watch_depth)
+        self.watch_trades = bool(watch_trades)
+        self.source = f"ccxt_{self.exchange_id}"
+        self._reconnect_delay = max(1.0, float(reconnect_delay))
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._loop = None  # asyncio.AbstractEventLoop, set in worker thread
+
+    # ── symbol helpers ───────────────────────────────────────────────────────
+
+    @classmethod
+    def _to_ccxt_symbol(cls, symbol: str) -> str:
+        """BTCUSDT → BTC/USDT"""
+        s = symbol.upper()
+        for quote in cls._QUOTE_CURRENCIES:
+            if s.endswith(quote) and len(s) > len(quote):
+                return f"{s[:-len(quote)]}/{quote}"
+        return s
+
+    @staticmethod
+    def _from_ccxt_symbol(ccxt_symbol: str) -> str:
+        """BTC/USDT → BTCUSDT"""
+        return ccxt_symbol.replace("/", "").upper()
+
+    # ── lifecycle ────────────────────────────────────────────────────────────
+
+    def start(self, daemon: bool = True):
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._run_event_loop,
+            daemon=daemon,
+            name=f"ccxt-{self.exchange_id}-ws",
+        )
+        self._thread.start()
+        logger.info(
+            f"CCXT {self.exchange_id} WebSocket started for {len(self.symbols)} crypto symbols"
+        )
+
+    def stop(self):
+        self._running = False
+        loop = self._loop
+        if loop and not loop.is_closed():
+            loop.call_soon_threadsafe(loop.stop)
+
+    # ── event loop (runs in background thread) ───────────────────────────────
+
+    def _run_event_loop(self):
+        import asyncio as _asyncio
+        self._loop = _asyncio.new_event_loop()
+        _asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._async_main())
+        except Exception as exc:
+            logger.warning(f"CCXT {self.exchange_id} event loop exited: {exc}")
+        finally:
+            try:
+                self._loop.close()
+            except Exception:
+                pass
+
+    async def _async_main(self):
+        """Outer retry loop — reconnects the whole exchange on any fatal error."""
+        import asyncio as _asyncio
+        while self._running:
+            exchange = None
+            try:
+                try:
+                    import ccxt.pro as ccxtpro  # type: ignore
+                except ImportError:
+                    logger.error(
+                        "ccxt[pro] is not installed. "
+                        "Run: pip install \'ccxt[pro]\' --break-system-packages"
+                    )
+                    return
+
+                exchange_class = getattr(ccxtpro, self.exchange_id, None)
+                if exchange_class is None:
+                    logger.error(
+                        f"CCXT exchange \'{self.exchange_id}\' not found. "
+                        "Try: binance, bybit, okx, kucoin, gate, mexc, coinbase"
+                    )
+                    return
+
+                exchange = exchange_class({"newUpdates": True})
+                await exchange.load_markets()
+
+                # Filter symbols to those actually listed on this exchange
+                ccxt_symbols = []
+                for raw in self.symbols:
+                    csym = self._to_ccxt_symbol(raw)
+                    if csym in exchange.markets:
+                        ccxt_symbols.append(csym)
+                    else:
+                        logger.debug(
+                            f"CCXT {self.exchange_id}: {raw} → {csym} not listed, skipping"
+                        )
+
+                if not ccxt_symbols:
+                    logger.warning(
+                        f"CCXT {self.exchange_id}: none of the {len(self.symbols)} symbols "
+                        f"found on this exchange — retrying in {self._reconnect_delay}s"
+                    )
+                    await _asyncio.sleep(self._reconnect_delay)
+                    continue
+
+                logger.info(
+                    f"CCXT {self.exchange_id}: streaming "
+                    f"{len(ccxt_symbols)}/{len(self.symbols)} symbols"
+                )
+
+                tasks = []
+                for csym in ccxt_symbols:
+                    if self.watch_trades:
+                        tasks.append(self._watch_trades_loop(exchange, csym))
+                    if self.watch_depth:
+                        tasks.append(self._watch_orderbook_loop(exchange, csym))
+
+                if tasks:
+                    await _asyncio.gather(*tasks, return_exceptions=True)
+
+            except Exception as exc:
+                logger.warning(f"CCXT {self.exchange_id} stream error: {exc}")
+            finally:
+                if exchange is not None:
+                    try:
+                        await exchange.close()
+                    except Exception:
+                        pass
+
+            if self._running:
+                await _asyncio.sleep(self._reconnect_delay + random.random())
+
+    async def _watch_trades_loop(self, exchange, ccxt_symbol: str):
+        """Per-symbol trade watcher — never propagates exceptions."""
+        import asyncio as _asyncio
+        raw_symbol = self._from_ccxt_symbol(ccxt_symbol)
+        while self._running:
+            try:
+                trades = await exchange.watch_trades(ccxt_symbol)
+                for trade in trades:
+                    price = float(trade.get("price") or 0.0)
+                    if price <= 0:
+                        continue
+                    amount = float(trade.get("amount") or 0.0)
+                    ts_ms = trade.get("timestamp") or int(time.time() * 1000)
+                    self.buffer.push(
+                        Tick(
+                            symbol=raw_symbol,
+                            price=price,
+                            volume=int(max(0.0, price * amount)),
+                            timestamp=datetime.fromtimestamp(
+                                ts_ms / 1000.0, tz=timezone.utc
+                            ),
+                            market="CRYPTO",
+                            source=self.source,
+                        )
+                    )
+            except _asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.debug(
+                    f"CCXT {self.exchange_id} trade [{ccxt_symbol}]: {exc}"
+                )
+                await _asyncio.sleep(2.0)
+
+    async def _watch_orderbook_loop(self, exchange, ccxt_symbol: str):
+        """Per-symbol orderbook watcher — never propagates exceptions."""
+        import asyncio as _asyncio
+        raw_symbol = self._from_ccxt_symbol(ccxt_symbol)
+        while self._running:
+            try:
+                ob = await exchange.watch_order_book(ccxt_symbol, limit=20)
+                bids = [[float(b[0]), float(b[1])] for b in (ob.get("bids") or [])[:20]]
+                asks = [[float(a[0]), float(a[1])] for a in (ob.get("asks") or [])[:20]]
+                best_bid = bids[0][0] if bids else 0.0
+                best_ask = asks[0][0] if asks else 0.0
+                self.depth_buffer.update(
+                    raw_symbol,
+                    {
+                        "bids": bids,
+                        "asks": asks,
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "best_bid_qty": bids[0][1] if bids else 0.0,
+                        "best_ask_qty": asks[0][1] if asks else 0.0,
+                        "source": self.source,
+                    },
+                )
+                if best_bid > 0 and best_ask > 0:
+                    self.buffer.push(
+                        Tick(
+                            symbol=raw_symbol,
+                            price=(best_bid + best_ask) / 2.0,
+                            volume=0,
+                            timestamp=datetime.now(timezone.utc),
+                            bid=best_bid,
+                            ask=best_ask,
+                            market="CRYPTO",
+                            source=self.source,
+                        )
+                    )
+            except _asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.debug(
+                    f"CCXT {self.exchange_id} orderbook [{ccxt_symbol}]: {exc}"
+                )
+                await _asyncio.sleep(2.0)
+
+
+
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Finnhub WebSocket (US Markets)
@@ -1126,6 +1389,220 @@ class FinnhubWebSocket:
         if not self._latency_tracker:
             return 0.0
         return sum(self._latency_tracker) / len(self._latency_tracker)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Polygon.io IEX WebSocket (US Stocks — free real-time feed)
+# ─────────────────────────────────────────────────────────────────────────────
+class PolygonIEXWebSocket:
+    """
+    Real-time US stock tick data via Polygon.io's free IEX WebSocket.
+
+    Why better than Finnhub:
+      - No 50-symbol limit — subscribe to the entire US equity universe
+      - IEX is a real exchange (~3-5% of total US volume)
+      - Price tracks the overall market almost perfectly for signal generation
+      - Free API key — no credit card required
+
+    Sign up: https://polygon.io (free Starter plan)
+    Set POLYGON_API_KEY in your .env file.
+
+    Protocol:
+        1. Connect → receive {"ev":"status","status":"connected"}
+        2. Send    → {"action":"auth","params":"<key>"}
+        3. Receive → {"ev":"status","status":"auth_success"}
+        4. Send    → {"action":"subscribe","params":"T.AAPL,T.MSFT,..."}
+        5. Receive → [{"ev":"T","sym":"AAPL","p":150.25,"s":100,"t":1640000000000}]
+
+    Env vars:
+        POLYGON_API_KEY              Required — your free Polygon API key
+        POLYGON_SUBSCRIBE_QUOTES     Set "1" to also subscribe to Q.* bid/ask quotes
+    """
+
+    WS_URL = "wss://socket.polygon.io/stocks"
+
+    def __init__(
+        self,
+        api_key: str,
+        symbols: List[str],
+        buffer: RealTimePriceBuffer = None,
+        *,
+        subscribe_quotes: bool = False,
+    ):
+        self.api_key = api_key
+        self.symbols = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        self.buffer = buffer or PRICE_BUFFER
+        self.subscribe_quotes = bool(subscribe_quotes) or os.getenv(
+            "POLYGON_SUBSCRIBE_QUOTES", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.ws: Optional[websocket.WebSocketApp] = None
+        self._running = False
+        self._authenticated = False
+        self._reconnect_delay = 5.0
+        self._latency_tracker: deque = deque(maxlen=100)
+
+    def start(self, daemon: bool = True):
+        self._running = True
+        thread = threading.Thread(
+            target=self._run_forever, daemon=daemon, name="polygon-iex-ws"
+        )
+        thread.start()
+        logger.info(
+            f"Polygon IEX WebSocket started for {len(self.symbols)} US symbols"
+        )
+
+    def stop(self):
+        self._running = False
+        if self.ws:
+            self.ws.close()
+
+    def _run_forever(self):
+        while self._running:
+            start_ts = time.time()
+            try:
+                self._authenticated = False
+                self.ws = websocket.WebSocketApp(
+                    self.WS_URL,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self.ws.run_forever(ping_interval=30, ping_timeout=10)
+            except Exception as exc:
+                logger.warning(f"Polygon IEX WebSocket error: {exc}")
+            if self._running:
+                runtime = time.time() - start_ts
+                # Exponential backoff if connection is flapping
+                if runtime < 15:
+                    self._reconnect_delay = min(60.0, self._reconnect_delay * 1.5)
+                else:
+                    self._reconnect_delay = 5.0
+                logger.info(
+                    f"Polygon IEX reconnecting in {self._reconnect_delay:.1f}s..."
+                )
+                time.sleep(self._reconnect_delay + random.uniform(0, 1))
+
+    def _on_open(self, ws):
+        # Polygon sends the "connected" status event first; auth happens there
+        logger.info("Polygon IEX WebSocket connection established — awaiting server hello")
+
+    def _on_message(self, ws, message):
+        recv_time = datetime.now(timezone.utc)
+        try:
+            events = json.loads(message)
+            if not isinstance(events, list):
+                return
+
+            for event in events:
+                ev = event.get("ev", "")
+
+                # ── Connection / auth handshake ──────────────────────────────
+                if ev == "status":
+                    status = str(event.get("status", ""))
+                    msg = str(event.get("message", ""))
+
+                    if status == "connected":
+                        ws.send(json.dumps({"action": "auth", "params": self.api_key}))
+
+                    elif status == "auth_success":
+                        self._authenticated = True
+                        self._reconnect_delay = 5.0  # reset backoff on good auth
+                        # Build subscription string: T.AAPL,T.MSFT,...
+                        subs = [f"T.{sym}" for sym in self.symbols]
+                        if self.subscribe_quotes:
+                            subs += [f"Q.{sym}" for sym in self.symbols]
+                        ws.send(
+                            json.dumps(
+                                {"action": "subscribe", "params": ",".join(subs)}
+                            )
+                        )
+                        logger.info(
+                            f"Polygon IEX: authenticated — subscribed to "
+                            f"{len(self.symbols)} symbols"
+                            + (" + quotes" if self.subscribe_quotes else "")
+                        )
+
+                    elif status == "auth_failed":
+                        logger.error(
+                            f"Polygon IEX auth failed: {msg}. "
+                            "Check POLYGON_API_KEY in your .env"
+                        )
+                        ws.close()
+
+                    elif status == "max_connections":
+                        logger.warning(
+                            "Polygon IEX: max connections reached — "
+                            "close another session or upgrade plan"
+                        )
+                        ws.close()
+                    continue
+
+                if not self._authenticated:
+                    continue
+
+                # ── Trade event ──────────────────────────────────────────────
+                if ev == "T":
+                    price = float(event.get("p", 0.0) or 0.0)
+                    if price <= 0:
+                        continue
+                    ts_ms = event.get("t") or int(recv_time.timestamp() * 1000)
+                    tick_time = datetime.fromtimestamp(
+                        ts_ms / 1000.0, tz=timezone.utc
+                    )
+                    latency_ms = (recv_time.timestamp() - ts_ms / 1000.0) * 1000
+                    self._latency_tracker.append(latency_ms)
+                    symbol = str(event.get("sym", "") or "")
+                    if not symbol:
+                        continue
+                    self.buffer.push(
+                        Tick(
+                            symbol=symbol,
+                            price=price,
+                            volume=int(event.get("s", 0) or 0),  # trade size in shares
+                            timestamp=tick_time,
+                            market="US",
+                            source="polygon_iex",
+                        )
+                    )
+
+                # ── Quote event (bid/ask) ────────────────────────────────────
+                elif ev == "Q":
+                    bid = float(event.get("bp", 0.0) or 0.0)
+                    ask = float(event.get("ap", 0.0) or 0.0)
+                    symbol = str(event.get("sym", "") or "")
+                    if not symbol or bid <= 0 or ask <= 0:
+                        continue
+                    self.buffer.push(
+                        Tick(
+                            symbol=symbol,
+                            price=(bid + ask) / 2.0,
+                            volume=0,
+                            timestamp=recv_time,
+                            bid=bid,
+                            ask=ask,
+                            market="US",
+                            source="polygon_iex",
+                        )
+                    )
+
+        except Exception as exc:
+            logger.debug(f"Polygon IEX message parse error: {exc}")
+
+    def _on_error(self, ws, error):
+        logger.warning(f"Polygon IEX WebSocket error: {error}")
+
+    def _on_close(self, ws, close_status_code, close_msg):
+        logger.info(
+            f"Polygon IEX WebSocket closed: {close_status_code} {close_msg or ''}".strip()
+        )
+
+    @property
+    def avg_latency_ms(self) -> float:
+        if not self._latency_tracker:
+            return 0.0
+        return sum(self._latency_tracker) / len(self._latency_tracker)
+
+
 
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1319,6 +1796,155 @@ class UpstoxWebSocket:
 
     def _on_close(self, ws, *args):
         logger.info("Upstox WebSocket closed")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NSEPython Polling Feed (India NSE — free, no account required)
+# ─────────────────────────────────────────────────────────────────────────────
+class NSEPythonPollingFeed:
+    """
+    Free NSE equity feed via the nsepython library.
+
+    nsepython scrapes NSE's own public quote endpoints, so no API key, OAuth
+    token, or KYC is required. This is the zero-cost alternative to
+    UpstoxWebSocket for users who don't have an Upstox trading account.
+
+    Poll interval defaults to 3s (env NSE_POLL_INTERVAL_SECONDS).
+    Index symbols (prefixed with '^') are skipped — nse_eq is equities-only.
+    """
+
+    def __init__(
+        self,
+        symbols: List[str],
+        buffer: RealTimePriceBuffer = None,
+        *,
+        interval_seconds: float = 3.0,
+        batch_delay_seconds: float = 0.1,
+    ):
+        cleaned: List[str] = []
+        for raw in symbols or []:
+            sym = str(raw).strip()
+            if not sym or sym.startswith("^"):
+                continue
+            cleaned.append(sym)
+        self.symbols = cleaned
+        self.buffer = buffer or PRICE_BUFFER
+        self.interval_seconds = max(1.0, float(interval_seconds))
+        self.batch_delay_seconds = max(0.0, float(batch_delay_seconds))
+        self.source = "nsepython"
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
+    @staticmethod
+    def _strip_ns(symbol: str) -> str:
+        return symbol[:-3] if symbol.endswith(".NS") else symbol
+
+    def start(self, daemon: bool = True):
+        if not self.symbols:
+            logger.info("NSEPython polling feed has no equity symbols to poll; not starting")
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=daemon, name="nsepython-poll")
+        self._thread.start()
+        logger.info(
+            f"NSEPython polling feed started for {len(self.symbols)} NSE equity symbols "
+            f"(interval={self.interval_seconds}s)"
+        )
+
+    def stop(self):
+        self._running = False
+
+    def _poll_loop(self):
+        try:
+            from nsepython import nse_eq
+        except Exception as exc:
+            logger.warning(
+                f"nsepython not available ({exc}); NSE free feed disabled. "
+                "Install with: pip install nsepython"
+            )
+            self._running = False
+            return
+
+        while self._running:
+            started = time.time()
+            pushed = 0
+            for symbol in self.symbols:
+                if not self._running:
+                    break
+                nse_code = self._strip_ns(symbol)
+                try:
+                    quote = nse_eq(nse_code)
+                except Exception as exc:
+                    logger.debug(f"nsepython fetch error for {symbol}: {exc}")
+                    if self.batch_delay_seconds:
+                        time.sleep(self.batch_delay_seconds)
+                    continue
+
+                try:
+                    price_info = (quote or {}).get("priceInfo") or {}
+                    last_price = float(price_info.get("lastPrice") or 0.0)
+                    if last_price <= 0:
+                        if self.batch_delay_seconds:
+                            time.sleep(self.batch_delay_seconds)
+                        continue
+
+                    intraday = price_info.get("intraDayHighLow") or {}
+                    open_price = price_info.get("open")
+                    high_price = intraday.get("max") if intraday else price_info.get("intraDayHighLow", {}).get("max")
+                    low_price = intraday.get("min") if intraday else price_info.get("intraDayHighLow", {}).get("min")
+
+                    preopen = (quote or {}).get("preOpenMarket") or {}
+                    security_wise = (quote or {}).get("securityWiseDP") or {}
+                    volume_raw = (
+                        price_info.get("totalTradedVolume")
+                        or security_wise.get("quantityTraded")
+                        or preopen.get("totalTradedVolume")
+                        or 0
+                    )
+                    try:
+                        volume = int(float(volume_raw or 0))
+                    except (TypeError, ValueError):
+                        volume = 0
+
+                    tick = Tick(
+                        symbol=symbol,
+                        price=last_price,
+                        volume=volume,
+                        timestamp=datetime.now(timezone.utc),
+                        market="IN",
+                        source=self.source,
+                    )
+                    # Attach intraday OHLC as ad-hoc attributes for downstream consumers
+                    # that introspect them; Tick dataclass itself is untouched.
+                    if open_price is not None:
+                        try:
+                            setattr(tick, "open", float(open_price))
+                        except (TypeError, ValueError):
+                            pass
+                    if high_price is not None:
+                        try:
+                            setattr(tick, "high", float(high_price))
+                        except (TypeError, ValueError):
+                            pass
+                    if low_price is not None:
+                        try:
+                            setattr(tick, "low", float(low_price))
+                        except (TypeError, ValueError):
+                            pass
+
+                    self.buffer.push(tick)
+                    pushed += 1
+                except Exception as exc:
+                    logger.debug(f"nsepython parse error for {symbol}: {exc}")
+
+                if self.batch_delay_seconds:
+                    time.sleep(self.batch_delay_seconds)
+
+            if pushed == 0:
+                logger.debug("NSEPython polling feed produced no ticks this cycle")
+
+            elapsed = time.time() - started
+            time.sleep(max(0.0, self.interval_seconds - elapsed))
 
 
 class MetaTrader5PollingFeed:
