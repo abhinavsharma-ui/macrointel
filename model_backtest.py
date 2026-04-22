@@ -123,32 +123,54 @@ def backtest_symbol(
     if not path.exists():
         return []
 
-    df = pd.read_parquet(path)
-    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    df = df[numeric_cols].replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
+    df_raw = pd.read_parquet(path)
+    numeric_cols = [c for c in df_raw.columns if pd.api.types.is_numeric_dtype(df_raw[c])]
+    if "close" not in df_raw.columns or "close" not in numeric_cols:
+        return []
 
-    if len(df) < 200:
+    # Keep prices sane: never fill prices with zeros. Skip rows with invalid/zero close.
+    close_series = (
+        pd.to_numeric(df_raw["close"], errors="coerce")
+        .replace([np.inf, -np.inf], np.nan)
+        .ffill()
+    )
+    valid_price_mask = close_series.notna() & np.isfinite(close_series) & (close_series > 0)
+    if valid_price_mask.sum() < 200:
+        return []
+
+    df_feat = df_raw.loc[valid_price_mask, numeric_cols].copy()
+    df_feat = df_feat.replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
+    close_series = close_series.loc[valid_price_mask].reset_index(drop=True)
+
+    if len(df_feat) < 200:
         return []
 
     # Align features to training order
-    missing = [c for c in feature_order if c not in df.columns]
+    missing = [c for c in feature_order if c not in df_feat.columns]
     for c in missing:
-        df[c] = 0.0
-    X_all = df[feature_order].copy()
+        df_feat[c] = 0.0
+    X_all = df_feat[feature_order].copy()
 
     # ATR for exit sizing
-    if "high" in df.columns and "low" in df.columns and "close" in df.columns:
-        atr = compute_atr(df)
+    if "high" in df_raw.columns and "low" in df_raw.columns and "close" in df_raw.columns:
+        # ATR uses raw OHLC, but align to the valid price mask and keep NaNs (no zero-fill)
+        price_block = df_raw.loc[valid_price_mask, ["high", "low", "close"]].copy()
+        for col in ("high", "low", "close"):
+            price_block[col] = (
+                pd.to_numeric(price_block[col], errors="coerce")
+                .replace([np.inf, -np.inf], np.nan)
+                .ffill()
+            )
+        atr = compute_atr(price_block).reset_index(drop=True)
     else:
-        atr = pd.Series(df["close"].pct_change().rolling(14).std() * df["close"]
-                        if "close" in df.columns else 0.01, index=df.index)
+        atr = (close_series.pct_change().rolling(14).std() * close_series).fillna(0.0)
 
     # Use last 20% as test set (same as training holdout)
-    n = len(df)
+    n = len(df_feat)
     test_start = int(n * 0.80)
     X_test = X_all.iloc[test_start:].reset_index(drop=True)
-    df_test = df.iloc[test_start:].reset_index(drop=True)
-    atr_test = atr.iloc[test_start:].reset_index(drop=True)
+    close_test = close_series.iloc[test_start:].reset_index(drop=True)
+    atr_test = atr.iloc[test_start:].reset_index(drop=True) if isinstance(atr, pd.Series) else pd.Series(atr)[test_start:].reset_index(drop=True)
 
     if len(X_test) < horizon + MAX_HOLD_BARS + 1:
         return []
@@ -165,16 +187,18 @@ def backtest_symbol(
     preds, proba = meta_predict(meta, X_meta, meta_kind)
 
     trades = []
-    close = df_test["close"].values if "close" in df_test.columns else None
-    if close is None:
-        return []
+    close = close_test.values.astype(float)
 
     for i in range(len(X_test) - MAX_HOLD_BARS - 1):
         if proba[i] < confidence_threshold:
             continue
 
         entry_price = close[i]
+        if not np.isfinite(entry_price) or entry_price <= 0:
+            continue
         atr_val     = atr_test.iloc[i] if not np.isnan(atr_test.iloc[i]) else entry_price * 0.01
+        if (not np.isfinite(atr_val)) or atr_val <= 0:
+            atr_val = entry_price * 0.01
 
         # Determine direction from forward return
         fwd_idx = min(i + horizon, len(close) - 1)
@@ -213,7 +237,13 @@ def backtest_symbol(
         else:
             gross_pnl = (entry_price - exit_price) / entry_price
 
+        if (not np.isfinite(gross_pnl)) or abs(float(gross_pnl)) > 5.0:
+            # Guard against zero/near-zero prices or corrupted bars causing nonsense PnL.
+            continue
+
         net_pnl = gross_pnl - 2 * fee  # entry + exit fee
+        if not np.isfinite(net_pnl) or net_pnl <= -0.99:
+            continue
 
         trades.append({
             "symbol":      symbol,
@@ -264,11 +294,20 @@ def run_backtest(horizon: int, confidence: float, fee: float, max_symbols: int):
     total_pnl  = df["net_pnl"].sum() * 100
     pf         = abs(winners["net_pnl"].sum() / losers["net_pnl"].sum()) if len(losers) else 999
 
-    # Equity curve & drawdown
-    equity = np.cumprod(1 + df["net_pnl"].values)
-    peak   = np.maximum.accumulate(equity)
-    dd     = (peak - equity) / peak * 100
-    max_dd = dd.max()
+    # Equity curve & drawdown: compute per-symbol to avoid mixing trade order across symbols.
+    max_dd = 0.0
+    for sym, sdf in df.groupby("symbol"):
+        sdf = sdf.sort_values("bar")
+        rets = sdf["net_pnl"].to_numpy(dtype=float)
+        rets = rets[np.isfinite(rets)]
+        if rets.size == 0:
+            continue
+        equity = np.cumprod(1.0 + rets)
+        peak = np.maximum.accumulate(equity)
+        dd = np.where(peak > 0, (peak - equity) / peak * 100.0, 0.0)
+        sym_max = float(np.nanmax(dd)) if dd.size else 0.0
+        if np.isfinite(sym_max):
+            max_dd = max(max_dd, sym_max)
 
     # Exit reason breakdown
     exit_counts = df["exit_reason"].value_counts().to_dict()
