@@ -36,6 +36,8 @@ ATR_PERIOD    = 14
 ATR_STOP_MULT = 1.5       # stop loss = 1.5 × ATR
 ATR_TP_MULT   = 2.5       # take profit = 2.5 × ATR
 MAX_HOLD_BARS = 10        # max bars to hold if neither SL nor TP hit
+INITIAL_CAPITAL = 10_000.0
+POSITION_SIZE_PCT = 0.02
 
 
 def load_models():
@@ -248,6 +250,7 @@ def backtest_symbol(
         trades.append({
             "symbol":      symbol,
             "bar":         i,
+            "exit_bar":    min(i + MAX_HOLD_BARS, len(close) - 1) if exit_reason == "timeout" else j,
             "direction":   direction,
             "confidence":  round(float(proba[i]), 4),
             "entry_price": round(float(entry_price), 6),
@@ -258,6 +261,35 @@ def backtest_symbol(
         })
 
     return trades
+
+
+def simulate_portfolio(
+    trades_df: pd.DataFrame,
+    *,
+    initial_capital: float,
+    position_size_pct: float,
+) -> tuple[float, float]:
+    equity = float(initial_capital)
+    peak_equity = float(initial_capital)
+    max_drawdown_pct = 0.0
+
+    ordered = trades_df.sort_values(["exit_bar", "bar", "symbol"]).reset_index(drop=True)
+    for _, trade in ordered.iterrows():
+        trade_return = float(trade["net_pnl"])
+        if not np.isfinite(trade_return):
+            continue
+        position_notional = equity * position_size_pct
+        pnl_cash = position_notional * trade_return
+        equity += pnl_cash
+        if equity > peak_equity:
+            peak_equity = equity
+        if peak_equity > 0:
+            drawdown_pct = (peak_equity - equity) / peak_equity * 100.0
+            if np.isfinite(drawdown_pct):
+                max_drawdown_pct = max(max_drawdown_pct, float(drawdown_pct))
+
+    total_pnl_pct = ((equity / initial_capital) - 1.0) * 100.0 if initial_capital > 0 else 0.0
+    return total_pnl_pct, max_drawdown_pct
 
 
 def run_backtest(horizon: int, confidence: float, fee: float, max_symbols: int):
@@ -291,23 +323,13 @@ def run_backtest(horizon: int, confidence: float, fee: float, max_symbols: int):
     win_rate   = len(winners) / total * 100
     avg_win    = winners["net_pnl"].mean() * 100 if len(winners) else 0
     avg_loss   = losers["net_pnl"].mean()  * 100 if len(losers)  else 0
-    total_pnl  = df["net_pnl"].sum() * 100
     pf         = abs(winners["net_pnl"].sum() / losers["net_pnl"].sum()) if len(losers) else 999
 
-    # Equity curve & drawdown: compute per-symbol to avoid mixing trade order across symbols.
-    max_dd = 0.0
-    for sym, sdf in df.groupby("symbol"):
-        sdf = sdf.sort_values("bar")
-        rets = sdf["net_pnl"].to_numpy(dtype=float)
-        rets = rets[np.isfinite(rets)]
-        if rets.size == 0:
-            continue
-        equity = np.cumprod(1.0 + rets)
-        peak = np.maximum.accumulate(equity)
-        dd = np.where(peak > 0, (peak - equity) / peak * 100.0, 0.0)
-        sym_max = float(np.nanmax(dd)) if dd.size else 0.0
-        if np.isfinite(sym_max):
-            max_dd = max(max_dd, sym_max)
+    total_pnl, max_dd = simulate_portfolio(
+        df,
+        initial_capital=INITIAL_CAPITAL,
+        position_size_pct=POSITION_SIZE_PCT,
+    )
 
     # Exit reason breakdown
     exit_counts = df["exit_reason"].value_counts().to_dict()
@@ -325,7 +347,9 @@ def run_backtest(horizon: int, confidence: float, fee: float, max_symbols: int):
     print(f"  Avg win          : +{avg_win:.3f}%")
     print(f"  Avg loss         : {avg_loss:.3f}%")
     print(f"  Profit factor    : {pf:.2f}")
-    print(f"  Total P&L        : {total_pnl:+.2f}%  (sum across all symbols)")
+    print(f"  Starting capital : ${INITIAL_CAPITAL:,.2f}")
+    print(f"  Position size    : {POSITION_SIZE_PCT*100:.2f}% of equity per trade")
+    print(f"  Total P&L        : {total_pnl:+.2f}%  (account-based)")
     print(f"  Max drawdown     : {max_dd:.2f}%")
     print()
     print(f"  Exit reasons     : {exit_counts}")
@@ -342,6 +366,8 @@ def run_backtest(horizon: int, confidence: float, fee: float, max_symbols: int):
         "avg_win_pct": round(avg_win, 4),
         "avg_loss_pct": round(avg_loss, 4),
         "profit_factor": round(pf, 3),
+        "initial_capital": INITIAL_CAPITAL,
+        "position_size_pct": POSITION_SIZE_PCT,
         "total_pnl_pct": round(total_pnl, 4),
         "max_drawdown_pct": round(max_dd, 2),
         "exit_reasons": exit_counts,
