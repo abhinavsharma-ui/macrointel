@@ -47,7 +47,9 @@ def load_models():
     meta = joblib.load(CHECKPOINTS / "stacking_meta.joblib")
 
     meta_json = json.loads((CHECKPOINTS / "stacking_meta.json").read_text())
-    feature_order = meta_json["feature_order"]
+    feature_order = meta_json.get("feature_order") or meta_json.get("features")
+    if not feature_order:
+        raise KeyError("stacking_meta.json missing feature_order/features")
     meta_kind     = meta_json.get("meta_kind", "rf")
 
     logger.info(f"Models loaded. Meta: {meta_kind}, Features: {len(feature_order)}")
