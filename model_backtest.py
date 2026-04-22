@@ -41,16 +41,25 @@ MAX_HOLD_BARS = 10        # max bars to hold if neither SL nor TP hit
 def load_models():
     """Load all stacking artifacts from checkpoints."""
     logger.info("Loading stacking models...")
-    xgb  = joblib.load(CHECKPOINTS / "stacking_xgb.joblib")
-    lgb  = joblib.load(CHECKPOINTS / "stacking_lgb.joblib")
-    cat  = joblib.load(CHECKPOINTS / "stacking_cat.joblib")
-    meta = joblib.load(CHECKPOINTS / "stacking_meta.joblib")
+    xgb_blob  = joblib.load(CHECKPOINTS / "stacking_xgb.joblib")
+    lgb_blob  = joblib.load(CHECKPOINTS / "stacking_lgb.joblib")
+    cat_blob  = joblib.load(CHECKPOINTS / "stacking_cat.joblib")
+    meta_blob = joblib.load(CHECKPOINTS / "stacking_meta.joblib")
+
+    xgb = xgb_blob.get("model", xgb_blob) if isinstance(xgb_blob, dict) else xgb_blob
+    lgb = lgb_blob.get("model", lgb_blob) if isinstance(lgb_blob, dict) else lgb_blob
+    cat = cat_blob.get("model", cat_blob) if isinstance(cat_blob, dict) else cat_blob
+    meta = meta_blob.get("model", meta_blob) if isinstance(meta_blob, dict) else meta_blob
 
     meta_json = json.loads((CHECKPOINTS / "stacking_meta.json").read_text())
-    feature_order = meta_json.get("feature_order") or meta_json.get("features")
+    feature_order = (
+        meta_json.get("feature_order")
+        or meta_json.get("features")
+        or (xgb_blob.get("features") if isinstance(xgb_blob, dict) else None)
+    )
     if not feature_order:
         raise KeyError("stacking_meta.json missing feature_order/features")
-    meta_kind     = meta_json.get("meta_kind", "rf")
+    meta_kind = meta_json.get("meta_kind") or (meta_blob.get("kind") if isinstance(meta_blob, dict) else None) or "rf"
 
     logger.info(f"Models loaded. Meta: {meta_kind}, Features: {len(feature_order)}")
     return xgb, lgb, cat, meta, feature_order, meta_kind
