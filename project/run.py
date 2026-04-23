@@ -736,9 +736,25 @@ class MacroIntelligenceSystem:
             logger.warning(f"{log_label} save failed: {exc}")
 
     def _runtime_artifact_status(self) -> Dict[str, Any]:
-        from core.runtime_artifacts import inspect_runtime_artifacts
+        try:
+            from core.runtime_artifacts import inspect_runtime_artifacts
+        except Exception as exc:
+            logger.warning("Runtime artifact inspector unavailable: %s", exc)
+            return {
+                "status": "unavailable",
+                "blocking_issues": [],
+                "warnings": [f"runtime_artifacts_unavailable: {exc}"],
+            }
 
-        return inspect_runtime_artifacts()
+        try:
+            return inspect_runtime_artifacts()
+        except Exception as exc:
+            logger.warning("Runtime artifact inspection failed: %s", exc)
+            return {
+                "status": "error",
+                "blocking_issues": [],
+                "warnings": [f"runtime_artifacts_error: {exc}"],
+            }
 
     @staticmethod
     def _normalize_execution_reason(reason: str, details: Optional[Dict[str, Any]] = None) -> str:
