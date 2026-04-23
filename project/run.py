@@ -5,13 +5,16 @@ Master system orchestrator for the Macro Intelligence project.
 from pathlib import Path
 
 from dotenv import load_dotenv
+import os
+import json
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 load_dotenv(ROOT / ".env.example", override=False)
-
-import os
-import json
+if not os.getenv("UNIVERSE_FILE_PATH", "").strip():
+    _default_live_universe = ROOT / "data" / "live_universe.json"
+    if _default_live_universe.exists():
+        os.environ["UNIVERSE_FILE_PATH"] = "data/live_universe.json"
 
 # Apply performance caps *before* importing NumPy/Pandas/XGBoost/etc.
 from core.performance import apply_performance_profile
@@ -20,6 +23,7 @@ _PERF_SETTINGS = apply_performance_profile()
 
 import logging
 import math
+import random
 import subprocess
 import sys
 import threading
@@ -34,6 +38,7 @@ import pandas as pd
 
 from core.enhanced_exits import EnhancedExitManager
 from core.trade_gate import evaluate_trade_gate as _evaluate_trade_gate, GateDecision as _GateDecision
+from pipeline.universe import is_leader_symbol  # noqa: E402 – needed by _build_lane_candidates & _simulate_overlay_backtest
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +142,7 @@ class MacroIntelligenceSystem:
         )
         self._bybit_ws_symbols_per_connection = max(
             1,
-            int(os.getenv("BYBIT_WS_SYMBOLS_PER_CONNECTION", "60") or 60),
+            int(os.getenv("BYBIT_WS_SYMBOLS_PER_CONNECTION", "20") or 20),
         )
         if self._throughput_mode or os.getenv("OFFICIAL_UNIVERSE_AUTO_SYNC", "1").strip().lower() in {"1", "true", "yes", "on"}:
             self._universe_sync_summary = self._sync_official_universes()
@@ -730,6 +735,72 @@ class MacroIntelligenceSystem:
         except Exception as exc:
             logger.warning(f"{log_label} save failed: {exc}")
 
+    def _runtime_artifact_status(self) -> Dict[str, Any]:
+        from core.runtime_artifacts import inspect_runtime_artifacts
+
+        return inspect_runtime_artifacts()
+
+    @staticmethod
+    def _normalize_execution_reason(reason: str, details: Optional[Dict[str, Any]] = None) -> str:
+        normalized = str(reason or "unknown").strip().lower().replace(" ", "_")
+        details = details if isinstance(details, dict) else {}
+        gate_reason = str(details.get("reason") or "").strip().lower()
+        stacking_reason = str(details.get("stacking_fallback_reason") or "").strip().lower()
+
+        direct_map = {
+            "confidence_gate_skip": "confidence_gate_skip",
+            "position_size_too_small": "position_size_too_small",
+            "low_take_probability": "low_take_probability",
+            "weak_conviction": "weak_conviction",
+            "market_closed": "market_closed",
+            "broker_rejected": "broker_rejected",
+            "margin_blocked": "margin_blocked",
+            "portfolio_constraint": "portfolio_constraint",
+        }
+        if normalized in direct_map:
+            return direct_map[normalized]
+        if "trade_window" in normalized:
+            return "trade_window_blocked"
+        if "stale" in normalized or "stale" in gate_reason:
+            return "stale_data"
+        if "feature" in normalized:
+            return "missing_features"
+        if "correlation" in normalized or "portfolio" in normalized:
+            return "portfolio_constraint"
+        if "broker" in normalized or "rejected" in normalized:
+            return "broker_rejected"
+        if "margin" in normalized:
+            return "margin_blocked"
+        if "market_closed" in gate_reason:
+            return "market_closed"
+        if stacking_reason == "stacking_unavailable":
+            return "stacking_unavailable"
+        return normalized or "unknown"
+
+    def _execution_skip_summary(self, limit: int = 12) -> Dict[str, Any]:
+        counts: Dict[str, int] = {}
+        latest_examples: Dict[str, Dict[str, Any]] = {}
+        for event in reversed(self._execution_trace):
+            if str(event.get("status") or "").lower() != "skipped":
+                continue
+            reason_code = str(event.get("reason_code") or event.get("reason") or "unknown")
+            counts[reason_code] = counts.get(reason_code, 0) + 1
+            latest_examples.setdefault(
+                reason_code,
+                {
+                    "symbol": event.get("symbol"),
+                    "timestamp": event.get("timestamp"),
+                    "lane": event.get("lane"),
+                    "reason": event.get("reason"),
+                },
+            )
+        ordered = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+        return {
+            "total_skips": int(sum(counts.values())),
+            "by_reason": [{ "reason_code": reason, "count": count } for reason, count in ordered[:limit]],
+            "latest_examples": latest_examples,
+        }
+
     def _serialize_runtime_state(self) -> Dict[str, Any]:
         return {
             "saved_at": datetime.now(timezone.utc).isoformat(),
@@ -1048,6 +1119,8 @@ class MacroIntelligenceSystem:
     def _refresh_system_health(self) -> None:
         price_buffer_stats: Dict[str, Any] = {}
         active_symbols = 0
+        artifact_status = self._runtime_artifact_status()
+        meta_status = self._components.get("meta_model_status")
         try:
             from core.realtime_engine import PRICE_BUFFER
 
@@ -1078,6 +1151,8 @@ class MacroIntelligenceSystem:
             )
             if source_snapshots[source].get("status") != "ok"
         ]
+        blocking_reasons.extend(list(artifact_status.get("blocking_issues") or []))
+        meta_state = str((meta_status or {}).get("state") or "")
         self._system_health.clear()
         self._system_health.update(
             {
@@ -1099,6 +1174,9 @@ class MacroIntelligenceSystem:
                     "execution_reconciliation_count": len(self._execution_reconciliation),
                     "tick_count": int(price_buffer_stats.get("total_ticks", 0) or 0),
                     "active_symbols": active_symbols,
+                    "artifact_status": artifact_status,
+                    "skip_summary": self._execution_skip_summary(),
+                    "meta_state": meta_state,
                     "universe_sync": dict(self._components.get("universe_sync", {}) or {}),
                     "pipeline_selection": dict(self._source_selection_summary),
                     "data_pipeline": dict(self._data_pipeline_status),
@@ -1570,15 +1648,28 @@ class MacroIntelligenceSystem:
             }
         )
 
-    def _start_chunked_component(self, component_key: str, factory, symbols: List[str], chunk_size: int, **kwargs) -> int:
+    def _start_chunked_component(
+        self,
+        component_key: str,
+        factory,
+        symbols: List[str],
+        chunk_size: int,
+        *,
+        start_delay_seconds: float = 0.0,
+        **kwargs,
+    ) -> int:
         ordered = list(dict.fromkeys(str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()))
         if not ordered:
             return 0
         instances = []
-        for chunk in self._chunk_symbols(ordered, max(1, chunk_size)):
+        chunks = self._chunk_symbols(ordered, max(1, chunk_size))
+        start_delay_seconds = max(0.0, float(start_delay_seconds or 0.0))
+        for index, chunk in enumerate(chunks, start=1):
             instance = factory(symbols=chunk, **kwargs)
             instance.start()
             instances.append(instance)
+            if start_delay_seconds > 0 and index < len(chunks):
+                time.sleep(start_delay_seconds + random.uniform(0.0, min(start_delay_seconds, 0.5)))
         self._components[component_key] = instances[0] if len(instances) == 1 else instances
         return len(instances)
 
@@ -2235,6 +2326,10 @@ class MacroIntelligenceSystem:
 
         if self._crypto_depth_enabled and self._crypto_symbols:
             started_crypto_feeds = []
+            chunk_start_delay_seconds = max(
+                0.0,
+                float(os.getenv("CRYPTO_WS_CHUNK_START_DELAY_SECONDS", "0.5") or 0.5),
+            )
             for feed_name in self._crypto_feed_order:
                 if feed_name == "ccxt":
                     # ── CCXT Pro: unified library, 100+ exchanges, no rate limits ──
@@ -2256,6 +2351,7 @@ class MacroIntelligenceSystem:
                         BinancePublicDepthWebSocket,
                         self._binance_crypto_symbols,
                         self._binance_ws_symbols_per_connection,
+                        start_delay_seconds=chunk_start_delay_seconds,
                         buffer=PRICE_BUFFER,
                         testnet=os.getenv("BINANCE_WS_TESTNET", "0").strip().lower() in {"1", "true", "yes", "on"},
                     )
@@ -2267,6 +2363,7 @@ class MacroIntelligenceSystem:
                         BybitPublicDepthWebSocket,
                         self._bybit_crypto_symbols,
                         self._bybit_ws_symbols_per_connection,
+                        start_delay_seconds=chunk_start_delay_seconds,
                         buffer=PRICE_BUFFER,
                         testnet=os.getenv("BYBIT_WS_TESTNET", "0").strip().lower() in {"1", "true", "yes", "on"},
                     )
@@ -4323,13 +4420,21 @@ class MacroIntelligenceSystem:
         latest_feature_rows = latest_feature_rows or {}
         updated = 0
         now_ts = time.time()
+        _bread = os.getenv("CRYPTO_BREAD", "0").strip().lower() in {"1", "true", "yes", "on"}
+        _bread_thread = threading.current_thread().name if _bread else ""
 
         for symbol in self._crypto_symbols:
+            if _bread:
+                logger.warning("[CRYPTO-BREAD %s] about to build signal for %s", _bread_thread, symbol)
+            _sym_t = time.time()
             try:
                 signal = self._build_crypto_intraday_signal(symbol)
             except Exception as exc:
                 logger.warning(f"Crypto signal build failed for {symbol}: {exc}")
                 continue
+            if _bread:
+                logger.warning("[CRYPTO-BREAD %s] built signal for %s in %.2fs (signal=%s)",
+                               _bread_thread, symbol, time.time() - _sym_t, "None" if signal is None else "ok")
             if signal is None:
                 last_live_ts = self._crypto_last_signal_ts.get(symbol, 0.0)
                 signal_age_seconds = now_ts - last_live_ts
@@ -4583,6 +4688,7 @@ class MacroIntelligenceSystem:
                 if value in (None, "", [], {}):
                     continue
                 event[key] = value
+        event["reason_code"] = self._normalize_execution_reason(reason, details=details)
         self._execution_trace.append(event)
         if len(self._execution_trace) > self._execution_trace_limit:
             del self._execution_trace[: len(self._execution_trace) - self._execution_trace_limit]
@@ -4896,6 +5002,10 @@ class MacroIntelligenceSystem:
             "active": False,
             "source": "heuristic_only",
         }
+        runtime_meta = TrainedMetaModel.inspect_runtime_status()
+        status["state"] = runtime_meta.get("state", "missing_artifacts")
+        status["loadable"] = bool(runtime_meta.get("loadable", False))
+        status["rejection_reasons"] = list(runtime_meta.get("rejection_reasons") or [])
 
         if META_REPORT_PATH.exists():
             try:
@@ -4924,6 +5034,10 @@ class MacroIntelligenceSystem:
         if active_model is not None:
             status["active"] = True
             status["source"] = "trained_meta"
+            if status.get("state") == "fallback_previous_validated":
+                status["source"] = "previous_validated_meta"
+            elif status.get("state") == "legacy_meta_only":
+                status["source"] = "legacy_meta"
             try:
                 status["decision_threshold"] = float(active_model.decision_threshold)
                 status["min_expected_edge_pct"] = float(active_model.min_expected_edge_pct)
@@ -4936,6 +5050,12 @@ class MacroIntelligenceSystem:
             status.setdefault("decision_threshold", deploy_rules.get("decision_threshold"))
             status.setdefault("min_expected_edge_pct", deploy_rules.get("min_expected_edge_pct"))
             status.setdefault("min_edge_ratio", deploy_rules.get("min_edge_ratio"))
+            if status.get("state") == "missing_artifacts":
+                status["note"] = "No validated trained meta bundle is available; paper runtime is using heuristic mode."
+            elif status.get("state") == "pending_walkforward":
+                status["note"] = "Current meta report is pending walk-forward validation; runtime remains in paper-safe fallback mode."
+            elif status.get("state") == "rejected_by_gate":
+                status["note"] = "Current meta bundle failed validation gates; runtime is using fallback heuristics."
 
         # Live observed metrics as fallback when walk-forward report is pending.
         if status.get("mean_precision") is None or status.get("walk_forward_status") == "pending":
@@ -4970,12 +5090,14 @@ class MacroIntelligenceSystem:
         from models.institutional_retraining import META_DIRECTIONAL_PATH, META_REPORT_PATH, XGB_REPORT_PATH, XGB_SHAP_REPORT_PATH
 
         feature_files = sorted(self._feature_store_dir.glob("*.parquet")) if self._feature_store_dir.exists() else []
+        artifact_status = self._runtime_artifact_status()
         status = {
             "enabled": self._model_learning_enabled,
             "learning_refresh_seconds": self._model_learning_refresh_seconds,
             "feature_store_files": len(feature_files),
             "feature_store_path": str(self._feature_store_dir),
             "retrain_in_progress": self._model_learning_in_progress,
+            "artifact_status": artifact_status,
             "last_check_at": datetime.fromtimestamp(self._last_model_learning_ts, tz=timezone.utc).isoformat()
             if self._last_model_learning_ts
             else None,
@@ -5005,11 +5127,24 @@ class MacroIntelligenceSystem:
             except Exception as exc:
                 status["meta_error"] = str(exc)
         status["meta_directional_ready"] = META_DIRECTIONAL_PATH.exists()
+        meta_state = str((self._components.get("meta_model_status") or {}).get("state") or "")
+        if artifact_status.get("blocking_issues"):
+            status["runtime_mode"] = "paper_blocked"
+        elif meta_state in {"validated", "fallback_previous_validated"}:
+            status["runtime_mode"] = "paper_validated"
+        else:
+            status["runtime_mode"] = "paper_degraded"
         if XGB_SHAP_REPORT_PATH.exists():
             try:
                 status["xgb_shap_baseline"] = json.loads(XGB_SHAP_REPORT_PATH.read_text(encoding="utf-8"))
             except Exception as exc:
                 status["xgb_shap_error"] = str(exc)
+        try:
+            from core.stacking_inference import get_engine as _get_stack_engine
+
+            status["stacking_runtime"] = _get_stack_engine().describe_status()
+        except Exception as exc:
+            status["stacking_runtime_error"] = str(exc)
         drift_status = self._components.get("drift_status")
         if isinstance(drift_status, dict) and drift_status:
             status["drift_status"] = drift_status
@@ -5224,7 +5359,7 @@ class MacroIntelligenceSystem:
     ) -> Dict:
         import pandas as pd
 
-        from pipeline.universe import get_sector, is_leader_symbol
+        from pipeline.universe import get_sector  # is_leader_symbol imported at module level
 
         trade_cost_pct = self._execution_backtest_tx_cost_bps / 10_000.0
         entry_score = self._execution_backtest_entry_score if entry_score_override is None else float(entry_score_override)
@@ -5823,7 +5958,8 @@ class MacroIntelligenceSystem:
             return {"multiplier": 1.0, "fill_quality_score": 0.0}
         symbol = str(signal.get("symbol", "") or "")
         latest_row = self._latest_feature_row(symbol)
-        atr_pct = self._safe_number((latest_row or {}).get("atr_pct"), 0.01)
+        _lr = latest_row if latest_row is not None and not (hasattr(latest_row, 'empty') and latest_row.empty) else {}
+        atr_pct = self._safe_number(_lr.get("atr_pct"), 0.01)
         atr_pct_points = max(atr_pct * 100.0, 0.10)
         scores: List[float] = []
         for trade in reversed(list(getattr(broker, "trade_log", []) or [])):
@@ -6296,8 +6432,7 @@ class MacroIntelligenceSystem:
                 self._close_position(symbol, "signal decay", position_key=position_key)
 
     def _build_lane_candidates(self) -> Dict[str, List[Tuple[float, str, Dict, float]]]:
-        from pipeline.universe import is_leader_symbol
-
+        # is_leader_symbol is imported at module level (run.py top-level imports)
         candidates_by_lane: Dict[str, List[Tuple[float, str, Dict, float]]] = defaultdict(list)
         for lane, symbol, signal in self._iter_lane_signal_items():
             if not isinstance(signal, dict):
@@ -6682,7 +6817,10 @@ class MacroIntelligenceSystem:
                             signal=signal,
                             position_key=position_key,
                             score=score,
-                            details=gate_decision.to_dict(),
+                            details={
+                                **gate_decision.to_dict(),
+                                "gate_reason": gate_decision.confidence.reason,
+                            },
                         )
                         continue
                     # Apply size multiplier (lower bound: min_position_size)
@@ -7362,7 +7500,65 @@ class MacroIntelligenceSystem:
         from models.institutional_retraining import InstitutionalTrainingPipeline
         from pipeline.feature_engineering import FeaturePipeline
 
-        if feature_matrices is None:
+        def _load_retraining_feature_store() -> Dict[str, object]:
+            candidate_dirs = []
+            explicit = str(os.getenv("XGB_RETRAIN_FEATURE_DIR", "")).strip()
+            if explicit:
+                candidate_dirs.append(Path(explicit))
+            else:
+                ten_year_dir = _resolve_root_path("data/features_10yr")
+                if ten_year_dir.exists():
+                    candidate_dirs.append(ten_year_dir)
+                if self._feature_store_dir.exists():
+                    candidate_dirs.append(self._feature_store_dir)
+
+            merged: Dict[str, object] = {}
+            ten_year_dir = next((path for path in candidate_dirs if path.name == "features_10yr"), None)
+            fallback_dir = next((path for path in candidate_dirs if path == self._feature_store_dir), None)
+
+            if ten_year_dir is not None:
+                source_files = 0
+                source_rows = 0
+                for path in sorted(ten_year_dir.glob("*USDT*.parquet")):
+                    try:
+                        loaded = pd.read_parquet(path)
+                    except Exception as exc:
+                        logger.warning("Skipping retrain feature file %s: %s", path, exc)
+                        continue
+                    source_files += 1
+                    source_rows += len(loaded)
+                    merged.setdefault(path.stem, loaded)
+                logger.info(
+                    "Retrain feature source %s: %s parquet files, %s rows",
+                    ten_year_dir,
+                    source_files,
+                    source_rows,
+                )
+
+            if fallback_dir is not None:
+                source_files = 0
+                source_rows = 0
+                for path in sorted(fallback_dir.glob("*.parquet")):
+                    try:
+                        loaded = pd.read_parquet(path)
+                    except Exception as exc:
+                        logger.warning("Skipping retrain feature file %s: %s", path, exc)
+                        continue
+                    source_files += 1
+                    source_rows += len(loaded)
+                    merged.setdefault(path.stem, loaded)
+                logger.info(
+                    "Retrain feature source %s: %s parquet files, %s rows",
+                    fallback_dir,
+                    source_files,
+                    source_rows,
+                )
+            return merged
+
+        disk_feature_matrices = _load_retraining_feature_store()
+        if disk_feature_matrices:
+            feature_matrices = disk_feature_matrices
+        elif feature_matrices is None:
             price_data = self._components.get("price_data", {}).get("price_daily_recent", {})
             if not price_data:
                 raise ValueError("No price data loaded. Run the data pipeline before retraining models.")
@@ -7453,6 +7649,13 @@ class MacroIntelligenceSystem:
                         self._last_feature_signature.pop(symbol, None)
                         return 0
 
+                    # Deduplicate columns: duplicate column names cause features.iloc[-1]
+                    # to return a non-unique-index Series, making f["col"] return a
+                    # multi-element Series and triggering "truth value of a Series is
+                    # ambiguous" inside the scorer.
+                    if features.columns.duplicated().any():
+                        features = features.loc[:, ~features.columns.duplicated()]
+
                     latest_feature_rows[symbol] = features.iloc[-1]
                     signature = self._build_feature_signature(symbol, features, earnings_events)
                     if self._last_feature_signature.get(symbol) == signature and isinstance(self._signal_store.get(symbol), dict):
@@ -7486,12 +7689,16 @@ class MacroIntelligenceSystem:
                     if symbol_day_mode:
                         self._apply_day_trading_overlay(symbol, latest_row, scored)
 
-                    if xgb_model is not None and bridge._feature_cols is not None:
+                    if xgb_model is not None:
                         try:
                             ohlcv = daily_prices.get(symbol)
                             if ohlcv is not None and self._live_feature_overlay_enabled:
                                 ohlcv = self._mark_price_frame_live(symbol, ohlcv)
-                            X = bridge.prepare_latest(features, ohlcv)
+                            X = bridge.prepare_latest(
+                                features,
+                                ohlcv,
+                                target_feature_cols=(getattr(xgb_model, "feature_names_in", None) or None),
+                            )
                             if X is not None:
                                 # Prefer stacking ensemble; fall back to legacy XGBoost on
                                 # any failure or when no base models are loaded.
@@ -7535,7 +7742,7 @@ class MacroIntelligenceSystem:
                                     abs(scored["factor_scores"].get("earnings_propagation", 0)),
                                     abs(scored["factor_scores"].get("close_reversal", 0)),
                                 )
-                                if xgb_confidence > 0.60:
+                                if xgb_confidence > 0.54:
                                     if xgb_direction == scored["direction"] and xgb_direction != "neutral":
                                         blended_conf = min(1.0, (scored["confidence"] * 0.45) + (xgb_confidence * 0.55))
                                         scored["confidence"] = round(blended_conf, 4)
@@ -7851,22 +8058,51 @@ class MacroIntelligenceSystem:
 
                 feature_matrices = feature_cache
                 self._last_inference_versions = current_versions
+                logger.warning("[INF-BREAD] post-batch loop exited; about to crypto_refresh")
 
+                _step_t = time.time()
                 updated_symbols += self._refresh_crypto_signals(latest_feature_rows)
+                logger.info("Inference step crypto_refresh: %.1fs", time.time() - _step_t)
+                logger.warning("[INF-BREAD] crypto_refresh returned; about to meta_decisions")
 
+                _step_t = time.time()
                 _apply_meta_decisions()
+                logger.info("Inference step meta_decisions: %.1fs", time.time() - _step_t)
+                logger.warning("[INF-BREAD] meta_decisions returned; about to auto_trade")
 
+                _step_t = time.time()
                 self._auto_trade()
+                logger.info("Inference step auto_trade: %.1fs", time.time() - _step_t)
+                logger.warning("[INF-BREAD] auto_trade returned; about to exec_backtest")
+
+                _step_t = time.time()
                 self._maybe_refresh_execution_backtest(feature_matrices)
-                self._persist_feature_store(feature_matrices, updated_symbols=symbols_to_rebuild)
+                logger.info("Inference step exec_backtest: %.1fs", time.time() - _step_t)
+                logger.warning("[INF-BREAD] exec_backtest returned; about to spawn persist thread")
+
+                # Run persist in background thread so it never blocks the inference cycle
+                _persist_matrices = dict(feature_matrices)
+                _persist_symbols = list(symbols_to_rebuild) if symbols_to_rebuild else []
+                threading.Thread(
+                    target=self._persist_feature_store,
+                    args=(_persist_matrices,),
+                    kwargs={"updated_symbols": _persist_symbols},
+                    daemon=True,
+                    name="persist-feature-store",
+                ).start()
+                logger.warning("[INF-BREAD] persist thread spawned; about to maybe_periodic_retrain")
+
                 self._maybe_periodic_retrain(feature_matrices)
+                logger.warning("[INF-BREAD] maybe_periodic_retrain returned; about to count signals")
 
                 buys = sum(1 for s in self._signal_store.values() if s.get("signal") == "buy")
                 sells = sum(1 for s in self._signal_store.values() if s.get("signal") == "sell")
                 holds = len(self._signal_store) - buys - sells
                 logger.info(f"Signals: {buys} BUY | {sells} SELL | {holds} HOLD | {updated_symbols} updated")
+                logger.warning("[INF-BREAD] cycle complete; sleeping %ss", self._inference_refresh_seconds)
             except Exception as exc:
-                logger.error(f"Inference loop error: {exc}")
+                import traceback as _tb
+                logger.error("Inference loop error: %s\n%s", exc, _tb.format_exc())
             time.sleep(self._inference_refresh_seconds)
 
 

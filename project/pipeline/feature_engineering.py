@@ -256,6 +256,7 @@ class FeaturePipeline:
         for span in [9, 21, 50, 200]:
             feat[f"ema_{span}"] = close.ewm(span=span, adjust=False).mean()
 
+        sma_9 = close.rolling(9).mean()
         sma_50 = close.rolling(50).mean()
         sma_200 = close.rolling(200).mean()
         feat["price_vs_ema9"] = (close / feat["ema_9"] - 1) * 100
@@ -264,10 +265,13 @@ class FeaturePipeline:
         feat["price_vs_ema200"] = (close / feat["ema_200"] - 1) * 100
         feat["golden_cross"] = (feat["ema_50"] > feat["ema_200"]).astype(float)
         feat["ema_slope_9"] = feat["ema_9"].pct_change(3)
+        feat["close_vs_sma_9"] = close / sma_9.replace(0, np.nan) - 1
         feat["close_vs_sma_50"] = close / sma_50.replace(0, np.nan) - 1
         feat["close_vs_sma_200"] = close / sma_200.replace(0, np.nan) - 1
         feat["momentum_20d"] = close.pct_change(20)
         feat["momentum_60d"] = close.pct_change(60)
+        feat["momentum_squared"] = feat["momentum_20d"] ** 2
+        feat["momentum_differencing"] = feat["momentum_20d"].diff()
         feat["price_acceleration"] = feat["momentum_20d"] - feat["momentum_60d"]
         feat["returns_1d"] = close.pct_change(1)
 
@@ -294,6 +298,8 @@ class FeaturePipeline:
         vol_ma20 = volume.rolling(20).mean()
         feat["vol_ratio_20"] = volume / vol_ma20.replace(0, np.nan)
         feat["obv"] = _obv(close, volume)
+        feat["obv_log"] = np.log1p(feat["obv"].abs())
+        feat["obv_acceleration"] = feat["obv"].diff().diff()
         feat["obv_slope"] = feat["obv"].pct_change(5)
         feat["obv_trend"] = feat["obv"].diff(5)
         feat["vol_zscore"] = ((volume - vol_ma20) / volume.rolling(20).std().replace(0, np.nan)).clip(-3, 3)
@@ -308,8 +314,15 @@ class FeaturePipeline:
         feat["candle_body"] = (close - df["open"]) / df["open"]
         feat["upper_wick"] = (high - close.clip(lower=df["open"])) / close.clip(lower=1)
         feat["lower_wick"] = (close.clip(upper=df["open"]) - low) / close.clip(lower=1)
+        feat["sma_50_squared"] = feat["close_vs_sma_50"] ** 2
+        feat["sma_50_sign"] = np.sign(feat["close_vs_sma_50"])
+        feat["sma_200_squared"] = feat["close_vs_sma_200"] ** 2
+        feat["sma_200_sign"] = np.sign(feat["close_vs_sma_200"])
+        feat["macd_hist_strength"] = feat["macd_hist"].abs()
+        feat["stoch_cross"] = feat["stoch_k"] - feat["stoch_d"]
         feat["52w_high_ratio"] = close / close.rolling(252).max().replace(0, np.nan)
         feat["52w_low_ratio"] = close / close.rolling(252).min().replace(0, np.nan)
+        feat["close_vs_sma_200_normalized"] = feat["close_vs_sma_200"].clip(-0.2, 0.2) / 0.2
 
         rsi_norm = (50 - feat["rsi_14"]) / 50
         macd_norm = feat["macd_hist"].clip(-2, 2) / 2
@@ -425,6 +438,8 @@ class FeaturePipeline:
         # Drop any already-present event columns before concat to avoid dupes
         feat = feat.drop(columns=[c for c in EVENT_FEATURE_COLUMNS if c in feat.columns], errors="ignore")
         feat = pd.concat([feat, event_cols_df], axis=1)
+        feat["reversal_strength"] = feat["close_reversal_signal"].abs()
+        feat["reversal_sign"] = np.sign(feat["close_reversal_signal"])
 
         # --- alt-data features (batch assign) ---
         if altdata_data is not None:

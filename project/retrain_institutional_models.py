@@ -28,6 +28,7 @@ import pandas as pd
 from models.institutional_retraining import InstitutionalTrainingPipeline
 
 FEATURE_DIR = Path(__file__).parent / "data" / "features"
+FEATURE_DIR_10YR = Path(__file__).parent / "data" / "features_10yr"
 REQUIRED_FEATURE_COLS = {
     "earnings_propagation_signal",
     "close_reversal_signal",
@@ -41,14 +42,56 @@ REQUIRED_FEATURE_COLS = {
 }
 
 
-def load_feature_store() -> dict:
+def _feature_store_sources() -> list[Path]:
+    explicit = str(os.getenv("XGB_RETRAIN_FEATURE_DIR", "")).strip()
+    if explicit:
+        return [Path(explicit)]
+    sources: list[Path] = []
+    if FEATURE_DIR_10YR.exists():
+        sources.append(FEATURE_DIR_10YR)
+    if FEATURE_DIR.exists():
+        sources.append(FEATURE_DIR)
+    return sources
+
+
+def load_feature_store() -> tuple[dict, dict]:
     feature_matrices = {}
-    for path in sorted(FEATURE_DIR.glob("*.parquet")):
-        try:
-            feature_matrices[path.stem] = pd.read_parquet(path)
-        except Exception as exc:
-            print(f"skip {path.name}: {exc}")
-    return feature_matrices
+    source_stats: dict[str, dict[str, int]] = {}
+
+    if FEATURE_DIR_10YR in _feature_store_sources():
+        file_count = 0
+        row_count = 0
+        for path in sorted(FEATURE_DIR_10YR.glob("*USDT*.parquet")):
+            try:
+                df = pd.read_parquet(path)
+            except Exception as exc:
+                print(f"skip {path.name}: {exc}")
+                continue
+            file_count += 1
+            row_count += len(df)
+            feature_matrices.setdefault(path.stem, df)
+        source_stats[str(FEATURE_DIR_10YR)] = {
+            "files": file_count,
+            "rows": row_count,
+        }
+
+    if FEATURE_DIR in _feature_store_sources():
+        file_count = 0
+        row_count = 0
+        for path in sorted(FEATURE_DIR.glob("*.parquet")):
+            try:
+                df = pd.read_parquet(path)
+            except Exception as exc:
+                print(f"skip {path.name}: {exc}")
+                continue
+            file_count += 1
+            row_count += len(df)
+            feature_matrices.setdefault(path.stem, df)
+        source_stats[str(FEATURE_DIR)] = {
+            "files": file_count,
+            "rows": row_count,
+        }
+    return feature_matrices, source_stats
 
 
 def main():
@@ -57,10 +100,19 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     logger = logging.getLogger("retrain")
-    logger.info("Loading feature store from %s", FEATURE_DIR)
-    feature_matrices = load_feature_store()
+    sources = _feature_store_sources()
+    logger.info("Loading retrain feature store from %s", ", ".join(str(path) for path in sources) or "<none>")
+    feature_matrices, source_stats = load_feature_store()
     if not feature_matrices:
-        raise SystemExit("No parquet feature matrices found in data/features")
+        raise SystemExit("No parquet feature matrices found in retrain feature stores")
+
+    for source, stats in source_stats.items():
+        logger.info(
+            "Feature source %s: %s parquet files, %s rows",
+            source,
+            stats.get("files", 0),
+            stats.get("rows", 0),
+        )
 
     coverage = sum(1 for df in feature_matrices.values() if REQUIRED_FEATURE_COLS.issubset(df.columns))
     logger.info("Loaded %s feature matrices, %s with upgraded event/news columns", len(feature_matrices), coverage)

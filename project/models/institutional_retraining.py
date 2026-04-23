@@ -46,6 +46,9 @@ META_REPORT_PREVIOUS_PATH = CHECKPOINTS_DIR / "meta_walkforward_report.previous.
 META_DIRECTIONAL_PATH = CHECKPOINTS_DIR / "meta_directional_models.joblib"
 META_DIRECTIONAL_PREVIOUS_PATH = CHECKPOINTS_DIR / "meta_directional_models.previous.joblib"
 XGB_SHAP_REPORT_PATH = CHECKPOINTS_DIR / "xgboost_shap_monitor.json"
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+FEATURE_DIR = PROJECT_DIR / "data" / "features"
+FEATURE_DIR_10YR = PROJECT_DIR / "data" / "features_10yr"
 
 
 def _clip_prob(value: float) -> float:
@@ -81,6 +84,58 @@ def _calendar_feature_dict(as_of: pd.Timestamp) -> Dict[str, float]:
         "meta_dow_sin": meta_dow_sin,
         "meta_dow_cos": meta_dow_cos,
     }
+
+
+def _merged_retrain_feature_store() -> Tuple[Dict[str, pd.DataFrame], Dict[str, Dict[str, int]]]:
+    feature_matrices: Dict[str, pd.DataFrame] = {}
+    source_stats: Dict[str, Dict[str, int]] = {}
+
+    explicit = str(os.getenv("XGB_RETRAIN_FEATURE_DIR", "")).strip()
+    if explicit:
+        explicit_dir = Path(explicit)
+        file_count = 0
+        row_count = 0
+        for path in sorted(explicit_dir.glob("*.parquet")):
+            try:
+                df = pd.read_parquet(path)
+            except Exception as exc:
+                logger.warning("XGB retrain explicit feature load skipped for %s: %s", path, exc)
+                continue
+            file_count += 1
+            row_count += len(df)
+            feature_matrices.setdefault(path.stem, df)
+        source_stats[str(explicit_dir)] = {"files": file_count, "rows": row_count}
+        return feature_matrices, source_stats
+
+    if FEATURE_DIR_10YR.exists():
+        file_count = 0
+        row_count = 0
+        for path in sorted(FEATURE_DIR_10YR.glob("*USDT*.parquet")):
+            try:
+                df = pd.read_parquet(path)
+            except Exception as exc:
+                logger.warning("XGB retrain features_10yr load skipped for %s: %s", path, exc)
+                continue
+            file_count += 1
+            row_count += len(df)
+            feature_matrices.setdefault(path.stem, df)
+        source_stats[str(FEATURE_DIR_10YR)] = {"files": file_count, "rows": row_count}
+
+    if FEATURE_DIR.exists():
+        file_count = 0
+        row_count = 0
+        for path in sorted(FEATURE_DIR.glob("*.parquet")):
+            try:
+                df = pd.read_parquet(path)
+            except Exception as exc:
+                logger.warning("XGB retrain fallback feature load skipped for %s: %s", path, exc)
+                continue
+            file_count += 1
+            row_count += len(df)
+            feature_matrices.setdefault(path.stem, df)
+        source_stats[str(FEATURE_DIR)] = {"files": file_count, "rows": row_count}
+
+    return feature_matrices, source_stats
 
 
 def _adaptive_horizon_days(frame: pd.DataFrame, idx: int, base_horizon_days: int) -> Tuple[int, float]:
@@ -534,6 +589,93 @@ class TrainedMetaModel:
         return True
 
     @classmethod
+    def _report_rejection_reasons(cls, report: Dict) -> List[str]:
+        walk_forward = report.get("walk_forward", {}) if isinstance(report, dict) else {}
+        summary = walk_forward.get("summary", {}) if isinstance(walk_forward, dict) else {}
+        status = str(walk_forward.get("status") or "").strip().lower()
+        reasons: List[str] = []
+        if not summary:
+            reasons.append("missing_walkforward_summary")
+            return reasons
+        if status in {"pending", "pending_walkforward_retrain"}:
+            reasons.append("walkforward_pending")
+        if float(summary.get("mean_precision", 0.0) or 0.0) < cls._gate_min_precision():
+            reasons.append("precision_below_gate")
+        if float(summary.get("mean_coverage_pct", 0.0) or 0.0) < cls._gate_min_coverage_pct():
+            reasons.append("coverage_below_gate")
+        if float(summary.get("mean_taken_edge_pct", 0.0) or 0.0) < cls._gate_min_taken_edge_pct():
+            reasons.append("edge_below_gate")
+        if float(summary.get("mean_taken_hit_rate_pct", 0.0) or 0.0) < cls._gate_min_hit_rate_pct():
+            reasons.append("hit_rate_below_gate")
+        return reasons
+
+    @classmethod
+    def inspect_runtime_status(cls) -> Dict[str, object]:
+        def _load_report(report_path: Path) -> Optional[Dict]:
+            if not report_path.exists():
+                return None
+            try:
+                with report_path.open("r", encoding="utf-8") as handle:
+                    return json.load(handle)
+            except Exception:
+                return None
+
+        current_report = _load_report(META_REPORT_PATH)
+        previous_report = _load_report(META_REPORT_PREVIOUS_PATH)
+        current_summary = ((current_report or {}).get("walk_forward") or {}).get("summary") or {}
+        previous_summary = ((previous_report or {}).get("walk_forward") or {}).get("summary") or {}
+
+        status: Dict[str, object] = {
+            "state": "missing_artifacts",
+            "loadable": False,
+            "fallback_source": "",
+            "current_report_exists": META_REPORT_PATH.exists(),
+            "current_directional_exists": META_DIRECTIONAL_PATH.exists(),
+            "previous_report_exists": META_REPORT_PREVIOUS_PATH.exists(),
+            "previous_directional_exists": META_DIRECTIONAL_PREVIOUS_PATH.exists(),
+            "legacy_meta_exists": all(
+                path.exists() for path in (META_CLASSIFIER_PATH, META_EDGE_PATH, META_DRAWDOWN_PATH, META_FEATURES_PATH)
+            ),
+            "current_walk_forward_status": ((current_report or {}).get("walk_forward") or {}).get("status"),
+            "previous_walk_forward_status": ((previous_report or {}).get("walk_forward") or {}).get("status"),
+            "current_summary": current_summary,
+            "previous_summary": previous_summary,
+            "rejection_reasons": [],
+        }
+
+        if current_report and cls._report_is_acceptable(current_report) and META_DIRECTIONAL_PATH.exists():
+            status["state"] = "validated"
+            status["loadable"] = True
+            return status
+
+        if current_report:
+            reasons = cls._report_rejection_reasons(current_report)
+            status["rejection_reasons"] = reasons
+            if "walkforward_pending" in reasons:
+                status["state"] = "pending_walkforward"
+            else:
+                status["state"] = "rejected_by_gate"
+
+        if previous_report and cls._report_is_acceptable(previous_report) and META_DIRECTIONAL_PREVIOUS_PATH.exists():
+            status["state"] = "fallback_previous_validated"
+            status["loadable"] = True
+            status["fallback_source"] = "previous_validated_directional"
+            return status
+
+        if status["legacy_meta_exists"] and current_report is not None:
+            if status.get("state") in {"pending_walkforward", "rejected_by_gate"}:
+                status["fallback_source"] = "legacy_meta"
+            else:
+                status["state"] = "legacy_meta_only"
+            status["loadable"] = True
+            return status
+
+        if current_report and META_DIRECTIONAL_PATH.exists() and status.get("state") == "missing_artifacts":
+            status["state"] = "artifact_incompatible"
+
+        return status
+
+    @classmethod
     def load(cls) -> Optional["TrainedMetaModel"]:
         if not cls.is_available():
             return None
@@ -741,11 +883,24 @@ class EventAwareXGBoostRetrainer:
         min_xgb_rows = max(80, int(os.getenv("XGB_MIN_FRAME_ROWS", "100") or 100))
         items = list(feature_matrices.items())
         log_every = max(100, int(os.getenv("RETRAIN_XGB_LOG_EVERY", "400") or 400))
+        min_required_price_fields = ("open", "high", "low", "close", "volume")
+        input_rows_total = 0
+        kept_rows_total = 0
+        dropped_short_frames = 0
+        dropped_missing_core_rows = 0
         for i, (symbol, frame) in enumerate(items):
             if frame is None or frame.empty or len(frame) < min_xgb_rows:
+                if frame is not None:
+                    dropped_short_frames += int(len(frame))
                 continue
+            input_rows_total += len(frame)
             numeric = frame.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan)
-            numeric = numeric.dropna(thresh=max(8, int(len(numeric.columns) * 0.6)))
+            required_cols = [col for col in min_required_price_fields if col in numeric.columns]
+            if "close" not in required_cols:
+                continue
+            before_core_filter = len(numeric)
+            numeric = numeric.dropna(subset=required_cols)
+            dropped_missing_core_rows += max(0, before_core_filter - len(numeric))
             if numeric.empty:
                 continue
             labels = []
@@ -760,8 +915,15 @@ class EventAwareXGBoostRetrainer:
             numeric["symbol"] = symbol
             numeric["timestamp"] = pd.to_datetime(numeric.index)
             rows.append(numeric.reset_index(drop=True))
+            kept_rows_total += len(numeric)
             if (i + 1) % log_every == 0:
-                logger.info("XGB dataset build: processed %s / %s symbols (%s rows so far)", i + 1, len(items), sum(len(r) for r in rows))
+                logger.info(
+                    "XGB dataset build: processed %s / %s symbols (%s kept / %s input rows so far)",
+                    i + 1,
+                    len(items),
+                    kept_rows_total,
+                    input_rows_total,
+                )
 
         if not rows:
             return pd.DataFrame()
@@ -769,7 +931,15 @@ class EventAwareXGBoostRetrainer:
         logger.info("XGB dataset build: concatenating %s symbol blocks...", len(rows))
         dataset = pd.concat(rows, ignore_index=True)
         dataset = dataset.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
-        logger.info("XGB dataset ready: %s rows x %s cols", len(dataset), len(dataset.columns))
+        logger.info(
+            "XGB dataset ready: %s rows x %s cols | input_rows=%s | kept_rows=%s | dropped_missing_core=%s | dropped_short_frame_rows=%s",
+            len(dataset),
+            len(dataset.columns),
+            input_rows_total,
+            kept_rows_total,
+            dropped_missing_core_rows,
+            dropped_short_frames,
+        )
         return dataset
 
     def retrain(self, feature_matrices: Dict[str, pd.DataFrame], run_optuna: bool = False, optuna_trials: int = 40) -> Dict:
@@ -1439,11 +1609,45 @@ class InstitutionalTrainingPipeline:
         )
 
     def train_all(self, feature_matrices: Dict[str, pd.DataFrame], run_optuna: bool = False) -> Dict:
-        n_sym = len(feature_matrices)
+        incoming_feature_matrices = feature_matrices if isinstance(feature_matrices, dict) else {}
+        incoming_symbol_count = len(incoming_feature_matrices)
+        incoming_row_count = sum(len(df) for df in incoming_feature_matrices.values() if isinstance(df, pd.DataFrame))
+
+        disk_feature_matrices, disk_stats = _merged_retrain_feature_store()
+        disk_row_count = sum(len(df) for df in disk_feature_matrices.values() if isinstance(df, pd.DataFrame))
+
+        effective_feature_matrices = incoming_feature_matrices
+        if disk_feature_matrices and disk_row_count >= incoming_row_count:
+            effective_feature_matrices = disk_feature_matrices
+            logger.info(
+                "Institutional pipeline: using disk-backed retrain feature store (%s symbols, %s rows) over incoming cache (%s symbols, %s rows)",
+                len(disk_feature_matrices),
+                disk_row_count,
+                incoming_symbol_count,
+                incoming_row_count,
+            )
+        else:
+            logger.info(
+                "Institutional pipeline: using incoming retrain feature cache (%s symbols, %s rows); disk-backed store had %s symbols, %s rows",
+                incoming_symbol_count,
+                incoming_row_count,
+                len(disk_feature_matrices),
+                disk_row_count,
+            )
+
+        for source, stats in disk_stats.items():
+            logger.info(
+                "Institutional pipeline feature source %s: %s parquet files, %s rows",
+                source,
+                stats.get("files", 0),
+                stats.get("rows", 0),
+            )
+
+        n_sym = len(effective_feature_matrices)
         logger.info("Institutional pipeline: phase 1/2 XGBoost (%s feature matrices)...", n_sym)
-        xgb_report = self.xgb_retrainer.retrain(feature_matrices, run_optuna=run_optuna)
+        xgb_report = self.xgb_retrainer.retrain(effective_feature_matrices, run_optuna=run_optuna)
         logger.info("Institutional pipeline: phase 2/2 meta model...")
-        meta_report = self.meta_trainer.train(feature_matrices)
+        meta_report = self.meta_trainer.train(effective_feature_matrices)
         return {
             "xgboost": xgb_report,
             "meta_model": meta_report,
