@@ -1033,55 +1033,43 @@ class TrainedMetaModel:
             logger.warning(f"Meta model load failed: {exc}")
             return None
 
-    def predict_from_dict(self, features: Dict[str, float]) -> Dict[str, float]:
+    def predict_from_dict(self, features):
         frame = pd.DataFrame([{col: float(features.get(col, 0.0) or 0.0) for col in self.feature_columns}])
         direction = "long" if float(features.get("is_buy_signal", 0.0) or 0.0) >= float(features.get("is_sell_signal", 0.0) or 0.0) else "short"
         bundle = self.bundles.get(direction) or self.bundles.get("long") or next(iter(self.bundles.values()))
         raw_take_probability = float(bundle.classifier.predict_proba(frame)[0][1])
-        # Prefer the production isotonic calibrator (fit OOF on training
-        # data). Falls back to the bundle's Platt calibrator if no isotonic
-        # was persisted, then to the raw probability as a last resort.
-        iso_cal = self.isotonic_calibrators.get(direction) if self.isotonic_calibrators else None
-        if iso_cal is not None:
-            take_probability = float(np.clip(iso_cal.transform(np.array([raw_take_probability]))[0], 0.0, 1.0))
-            calibration_source = "isotonic"
-        elif bundle.calibrator:
-            take_probability = float(bundle.calibrator.transform(np.array([raw_take_probability]))[0])
-            calibration_source = "platt"
-        else:
-            take_probability = raw_take_probability
-            calibration_source = "raw"
+        take_probability = float(bundle.calibrator.transform(np.array([raw_take_probability]))[0]) if bundle.calibrator else raw_take_probability
         expected_edge_pct = float(bundle.edge_model.predict(frame)[0])
         expected_drawdown_pct = float(abs(bundle.drawdown_model.predict(frame)[0]))
 
-        # --- Inference-time stress gate ---
-        # Adds a fixed buffer to the decision_threshold whenever the bar's
-        # market_stress_regime feature == 1. This is NOT a retrained threshold;
-        # it's an additive guard so that during stressed regimes the meta head
-        # must clear a strictly higher bar before a trade is taken. The runtime
-        # consumer (signal_engine_v2) compares take_probability against the
-        # decision_threshold returned here, so bumping the returned value
-        # transparently enforces the gate without code changes downstream.
-        base_threshold = float(bundle.decision_threshold)
-        stress_buffer = float(os.getenv("META_MODEL_STRESS_THRESHOLD_BUFFER", "0.08"))
-        market_stress_regime = float(features.get("market_stress_regime", 0.0) or 0.0)
-        is_stressed = market_stress_regime >= 0.5
-        effective_threshold = base_threshold + (stress_buffer if is_stressed else 0.0)
+        # ─── Regime gate ────────────────────────────────────────────────
+        # Walk-forward evidence (clean retrain, 64,895 rows, Apr 26 2026):
+        #   fold 5 (56% stress): hit 60.6%, edge/draw 0.55x  — marginal
+        #   fold 6 (15% stress): hit 91.7%, edge/draw 4.05x  — strong
+        #   fold 7 (98% stress): hit 52.8%, edge/draw 0.32x  — losing
+        #   fold 8 (95% stress): hit 49.2%, edge/draw 0.19x  — losing
+        # Model has no edge in stress. Block trades when stressed.
+        # Tune via env: META_MODEL_REGIME_GATE_STRESSED (default 0.5).
+        # Set to 1.1 to disable the gate entirely.
+        regime_gate_threshold = float(os.getenv("META_MODEL_REGIME_GATE_STRESSED", "0.5"))
+        market_stress = float(features.get("market_stress_regime", 0.0) or 0.0)
+        if market_stress == 0.0:
+            market_stress = float(features.get("vol_regime_stressed", 0.0) or 0.0)
+        regime_gated = market_stress >= regime_gate_threshold
+        gated_take_probability = 0.0 if regime_gated else take_probability
+
         return {
-            "take_probability": round(take_probability, 4),
+            "take_probability": round(gated_take_probability, 4),
+            "raw_take_probability": round(take_probability, 4),
+            "regime_gated": bool(regime_gated),
+            "market_stress_regime": round(market_stress, 4),
             "expected_edge_pct": round(expected_edge_pct, 3),
             "expected_drawdown_pct": round(max(expected_drawdown_pct, 0.1), 3),
-            "decision_threshold": round(effective_threshold, 4),
-            "decision_threshold_base": round(base_threshold, 4),
-            "stress_threshold_buffer_applied": round(stress_buffer if is_stressed else 0.0, 4),
-            "market_stress_regime": 1.0 if is_stressed else 0.0,
+            "decision_threshold": round(float(bundle.decision_threshold), 4),
             "min_expected_edge_pct": round(float(bundle.min_expected_edge_pct), 4),
             "min_edge_ratio": round(float(bundle.min_edge_ratio), 4),
             "direction_bundle": direction,
-            "calibration_source": calibration_source,
         }
-
-
 class EventAwareXGBoostRetrainer:
     def __init__(self, horizon: int = 5, train_split: float = 0.85):
         self.horizon = horizon
