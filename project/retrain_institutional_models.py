@@ -5,7 +5,8 @@ Usage:
     python retrain_institutional_models.py
 
 Meta model quality scales with **years of daily rows** in data/features/*.parquet.
-Tune via env (see .env.example): META_MODEL_HORIZON_DAYS, META_MODEL_WALKFORWARD_FOLDS,
+Tune via env (see .env.example): INSTITUTIONAL_RETRAIN_MARKET=us|nse|crypto|all,
+META_MODEL_HORIZON_DAYS, META_MODEL_WALKFORWARD_FOLDS,
 META_MODEL_MIN_TRAIN_DAYS, META_MODEL_MIN_FRAME_ROWS, META_MODEL_WARMUP_ROWS,
 META_MODEL_RULE_OBJECTIVE=precision|legacy, META_MODEL_THRESHOLD_GRID, etc.
 Walk-forward metrics near ~70% precision/hit are **not guaranteed** (markets are noisy);
@@ -128,8 +129,12 @@ def main():
         meta_take_threshold=float(os.getenv("META_MODEL_TAKE_THRESHOLD", "0.52")),
         meta_walk_forward_folds=max(3, int(os.getenv("META_MODEL_WALKFORWARD_FOLDS", "6"))),
         meta_min_train_days=max(90, int(os.getenv("META_MODEL_MIN_TRAIN_DAYS", "200"))),
+        market_scope=os.getenv("INSTITUTIONAL_RETRAIN_MARKET", "all"),
     )
-    logger.info("Starting institutional retraining pipeline")
+    logger.info(
+        "Starting institutional retraining pipeline (market_scope=%s)",
+        os.getenv("INSTITUTIONAL_RETRAIN_MARKET", "all"),
+    )
     report = trainer.train_all(
         feature_matrices=feature_matrices,
         run_optuna=os.getenv("RUN_XGB_OPTUNA", "0").strip().lower() in {"1", "true", "yes", "on"},

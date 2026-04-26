@@ -138,6 +138,53 @@ def _merged_retrain_feature_store() -> Tuple[Dict[str, pd.DataFrame], Dict[str, 
     return feature_matrices, source_stats
 
 
+def _normalize_market_scope(raw_scope: Optional[str]) -> str:
+    scope = str(raw_scope or "all").strip().lower()
+    aliases = {
+        "": "all",
+        "stocks": "us",
+        "equities": "us",
+        "us-stocks": "us",
+        "us_equities": "us",
+        "usa": "us",
+        "india": "nse",
+        "ind": "nse",
+        "nse-stocks": "nse",
+        "crypto-only": "crypto",
+    }
+    return aliases.get(scope, scope if scope in {"all", "us", "nse", "crypto"} else "all")
+
+
+def _market_bucket_for_symbol(symbol: str) -> str:
+    raw = str(symbol or "").strip().upper()
+    if raw.endswith(".NS"):
+        return "nse"
+    if "USDT" in raw or raw.endswith("-USD") or raw.endswith("USD"):
+        return "crypto"
+    return "us"
+
+
+def _symbol_matches_market_scope(symbol: str, market_scope: str) -> bool:
+    scope = _normalize_market_scope(market_scope)
+    if scope == "all":
+        return True
+    return _market_bucket_for_symbol(symbol) == scope
+
+
+def _filter_feature_matrices_for_market(
+    feature_matrices: Dict[str, pd.DataFrame],
+    market_scope: str,
+) -> Dict[str, pd.DataFrame]:
+    scope = _normalize_market_scope(market_scope)
+    if scope == "all":
+        return dict(feature_matrices)
+    return {
+        symbol: frame
+        for symbol, frame in feature_matrices.items()
+        if _symbol_matches_market_scope(symbol, scope)
+    }
+
+
 def _adaptive_horizon_days(frame: pd.DataFrame, idx: int, base_horizon_days: int) -> Tuple[int, float]:
     row = frame.iloc[idx]
     multiplier = 1.0
@@ -328,6 +375,13 @@ class MetaFeatureBuilder:
         "short_spread_widening_edge",
         "short_book_pressure_reversal_edge",
         "short_earnings_miss_propagation_edge",
+        "cross_sectional_candidate_count",
+        "cross_sectional_selection_rank_pct",
+        "cross_sectional_edge_rank_pct",
+        "cross_sectional_edge_ratio_rank_pct",
+        "cross_sectional_drawdown_rank_pct",
+        "cross_sectional_conviction_rank_pct",
+        "cross_sectional_score_rank_pct",
         "is_nse_symbol",
         "meta_year_norm",
         "meta_month_sin",
@@ -1059,11 +1113,13 @@ class MetaModelTrainer:
         take_threshold: float = 0.52,
         walk_forward_folds: int = 4,
         min_train_days: int = 180,
+        market_scope: str = "all",
     ):
         self.horizon_days = horizon_days
         self.take_threshold = take_threshold
         self.walk_forward_folds = walk_forward_folds
         self.min_train_days = min_train_days
+        self.market_scope = _normalize_market_scope(market_scope)
 
     def _estimate_risk_parameters(self, row: pd.Series) -> Dict[str, float]:
         atr_pct = float(row.get("atr_pct", 0.02) or 0.02)
@@ -1299,6 +1355,8 @@ class MetaModelTrainer:
         meta_log_every = max(80, int(os.getenv("RETRAIN_META_LOG_EVERY", "250") or 250))
 
         for fi, (symbol, frame) in enumerate(fm_items):
+            if not _symbol_matches_market_scope(symbol, self.market_scope):
+                continue
             if frame is None or frame.empty or len(frame) < min_frame:
                 continue
 
@@ -1362,7 +1420,7 @@ class MetaModelTrainer:
                 edge_ratio = path_stats["edge_pct"] / max(path_stats["drawdown_pct"], 0.35)
                 label_min_edge = float(os.getenv("META_MODEL_LABEL_MIN_EDGE_PCT", "0.18"))
                 label_min_ratio = float(os.getenv("META_MODEL_LABEL_MIN_EDGE_RATIO", "0.08"))
-                take_label = int(
+                path_take_label = int(
                     path_stats["edge_pct"] > label_min_edge
                     and edge_ratio > label_min_ratio
                     and path_stats["hit"] == 1
@@ -1371,10 +1429,11 @@ class MetaModelTrainer:
                     {
                         "symbol": symbol,
                         "timestamp": pd.Timestamp(ordered.index[idx]),
+                        "market_bucket": _market_bucket_for_symbol(symbol),
                         "direction_label": "long" if direction == "buy" else "short",
                         "adaptive_horizon_days": horizon_days,
                         "adaptive_horizon_multiplier": horizon_multiplier,
-                        "take_label": take_label,
+                        "path_take_label": path_take_label,
                         "edge_pct": path_stats["edge_pct"],
                         "drawdown_pct": path_stats["drawdown_pct"],
                         "edge_ratio": round(float(edge_ratio), 4),
@@ -1392,7 +1451,78 @@ class MetaModelTrainer:
         logger.info("Meta dataset build: assembling %s rows...", len(records))
         dataset = pd.DataFrame(records)
         dataset = dataset.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+        dataset = self._apply_cross_sectional_context(dataset)
         logger.info("Meta dataset ready: %s rows", len(dataset))
+        return dataset
+
+    def _apply_cross_sectional_context(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        if dataset.empty:
+            return dataset
+
+        dataset = dataset.copy()
+        dataset["market_bucket"] = dataset["market_bucket"].fillna("us").astype(str)
+        group_keys = ["timestamp", "market_bucket", "direction_label"]
+        group_size = dataset.groupby(group_keys)["symbol"].transform("count").astype(float)
+        dataset["cross_sectional_candidate_count"] = group_size
+
+        def _numeric_series(column: str) -> pd.Series:
+            if column in dataset.columns:
+                return pd.to_numeric(dataset[column], errors="coerce").fillna(0.0)
+            return pd.Series(0.0, index=dataset.index, dtype=float)
+
+        directional_alpha = (
+            0.50 * _numeric_series("alpha_signal")
+            + 0.35 * _numeric_series("event_alpha_signal")
+            + 0.15 * _numeric_series("earnings_propagation_signal")
+        )
+        long_mask = dataset["direction_label"].eq("long")
+        directional_alpha = directional_alpha.where(long_mask, -directional_alpha)
+
+        dataset["__directional_alpha"] = directional_alpha
+        dataset["cross_sectional_selection_rank_pct"] = dataset.groupby(group_keys)["__directional_alpha"].rank(
+            pct=True,
+            method="average",
+        )
+        dataset["cross_sectional_edge_rank_pct"] = dataset.groupby(group_keys)["edge_pct"].rank(
+            pct=True,
+            method="average",
+        )
+        dataset["cross_sectional_edge_ratio_rank_pct"] = dataset.groupby(group_keys)["edge_ratio"].rank(
+            pct=True,
+            method="average",
+        )
+        dataset["cross_sectional_drawdown_rank_pct"] = dataset.groupby(group_keys)["drawdown_pct"].transform(
+            lambda series: (-series).rank(pct=True, method="average")
+        )
+        dataset["cross_sectional_conviction_rank_pct"] = dataset.groupby(group_keys)["conviction_score"].rank(
+            pct=True,
+            method="average",
+        )
+
+        dataset["__cross_sectional_score"] = (
+            0.38 * dataset["cross_sectional_edge_rank_pct"]
+            + 0.22 * dataset["cross_sectional_edge_ratio_rank_pct"]
+            + 0.16 * dataset["cross_sectional_drawdown_rank_pct"]
+            + 0.14 * dataset["cross_sectional_selection_rank_pct"]
+            + 0.10 * dataset["cross_sectional_conviction_rank_pct"]
+        )
+        dataset["cross_sectional_score_rank_pct"] = dataset.groupby(group_keys)["__cross_sectional_score"].rank(
+            pct=True,
+            method="average",
+        )
+
+        top_pct = float(os.getenv("META_MODEL_CROSS_SECTIONAL_LABEL_PCT", "0.18") or 0.18)
+        top_pct = float(np.clip(top_pct, 0.02, 0.50))
+        min_candidates = max(3, int(os.getenv("META_MODEL_CROSS_SECTIONAL_MIN_CANDIDATES", "6") or 6))
+        top_cutoff = 1.0 - top_pct
+        small_group_mask = dataset["cross_sectional_candidate_count"] < float(min_candidates)
+        selected_rank_mask = dataset["cross_sectional_score_rank_pct"] >= top_cutoff
+        dataset["take_label"] = (
+            dataset["path_take_label"].astype(int).eq(1)
+            & (small_group_mask | selected_rank_mask)
+        ).astype(int)
+
+        dataset = dataset.drop(columns=["__directional_alpha", "__cross_sectional_score"], errors="ignore")
         return dataset
 
     def walk_forward_validate(self, dataset: pd.DataFrame) -> Dict:
@@ -1565,6 +1695,7 @@ class MetaModelTrainer:
         report = {
             "status": "ok",
             "rows": int(len(dataset)),
+            "path_positive_labels": int(dataset["path_take_label"].sum()) if "path_take_label" in dataset.columns else 0,
             "positive_labels": int(dataset["take_label"].sum()),
             "feature_count": len(MetaFeatureBuilder.FEATURE_COLUMNS),
             "direction_rows": {
@@ -1574,12 +1705,15 @@ class MetaModelTrainer:
             "deployment_rules": deployment_rules,
             "walk_forward": walk_forward,
             "training_config": {
+                "market_scope": self.market_scope,
                 "rule_objective": os.getenv("META_MODEL_RULE_OBJECTIVE", "precision"),
                 "horizon_days": self.horizon_days,
                 "walk_forward_folds": self.walk_forward_folds,
                 "min_train_days": self.min_train_days,
                 "min_frame_rows_env": os.getenv("META_MODEL_MIN_FRAME_ROWS", ""),
                 "warmup_rows_env": os.getenv("META_MODEL_WARMUP_ROWS", ""),
+                "cross_sectional_label_pct": os.getenv("META_MODEL_CROSS_SECTIONAL_LABEL_PCT", "0.18"),
+                "cross_sectional_min_candidates": os.getenv("META_MODEL_CROSS_SECTIONAL_MIN_CANDIDATES", "6"),
             },
         }
         META_REPORT_PATH.write_text(json.dumps(report, indent=2))
@@ -1599,13 +1733,16 @@ class InstitutionalTrainingPipeline:
         meta_take_threshold: float = 0.52,
         meta_walk_forward_folds: int = 6,
         meta_min_train_days: int = 180,
+        market_scope: str = "all",
     ):
+        self.market_scope = _normalize_market_scope(market_scope)
         self.xgb_retrainer = EventAwareXGBoostRetrainer(horizon=xgb_horizon)
         self.meta_trainer = MetaModelTrainer(
             horizon_days=meta_horizon,
             take_threshold=meta_take_threshold,
             walk_forward_folds=meta_walk_forward_folds,
             min_train_days=meta_min_train_days,
+            market_scope=self.market_scope,
         )
 
     def train_all(self, feature_matrices: Dict[str, pd.DataFrame], run_optuna: bool = False) -> Dict:
@@ -1643,7 +1780,19 @@ class InstitutionalTrainingPipeline:
                 stats.get("rows", 0),
             )
 
+        effective_feature_matrices = _filter_feature_matrices_for_market(
+            effective_feature_matrices,
+            self.market_scope,
+        )
+        if not effective_feature_matrices:
+            raise ValueError(f"No feature matrices matched market_scope={self.market_scope}")
+
         n_sym = len(effective_feature_matrices)
+        logger.info(
+            "Institutional pipeline: market scope %s (%s feature matrices after filter)",
+            self.market_scope,
+            n_sym,
+        )
         logger.info("Institutional pipeline: phase 1/2 XGBoost (%s feature matrices)...", n_sym)
         xgb_report = self.xgb_retrainer.retrain(effective_feature_matrices, run_optuna=run_optuna)
         logger.info("Institutional pipeline: phase 2/2 meta model...")
