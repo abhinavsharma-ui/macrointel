@@ -6,6 +6,8 @@ Usage:
 
 Meta model quality scales with **years of daily rows** in data/features/*.parquet.
 Tune via env (see .env.example): INSTITUTIONAL_RETRAIN_MARKET=us|nse|crypto|all,
+SKIP_XGB_RETRAIN=1 for fast meta-only iteration,
+META_MODEL_BUILD_WORKERS for parallel symbol dataset building,
 META_MODEL_HORIZON_DAYS, META_MODEL_WALKFORWARD_FOLDS,
 META_MODEL_MIN_TRAIN_DAYS, META_MODEL_MIN_FRAME_ROWS, META_MODEL_WARMUP_ROWS,
 META_MODEL_RULE_OBJECTIVE=precision|legacy, META_MODEL_THRESHOLD_GRID, etc.
@@ -132,8 +134,10 @@ def main():
         market_scope=os.getenv("INSTITUTIONAL_RETRAIN_MARKET", "all"),
     )
     logger.info(
-        "Starting institutional retraining pipeline (market_scope=%s)",
+        "Starting institutional retraining pipeline (market_scope=%s, skip_xgb=%s, meta_build_workers=%s)",
         os.getenv("INSTITUTIONAL_RETRAIN_MARKET", "all"),
+        os.getenv("SKIP_XGB_RETRAIN", "0"),
+        os.getenv("META_MODEL_BUILD_WORKERS", "<auto>"),
     )
     report = trainer.train_all(
         feature_matrices=feature_matrices,
