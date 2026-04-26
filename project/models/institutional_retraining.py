@@ -377,10 +377,10 @@ class MetaFeatureBuilder:
         "short_earnings_miss_propagation_edge",
         "cross_sectional_candidate_count",
         "cross_sectional_selection_rank_pct",
-        "cross_sectional_edge_rank_pct",
-        "cross_sectional_edge_ratio_rank_pct",
-        "cross_sectional_drawdown_rank_pct",
         "cross_sectional_conviction_rank_pct",
+        "cross_sectional_sentiment_rank_pct",
+        "cross_sectional_momentum_rank_pct",
+        "cross_sectional_volatility_rank_pct",
         "cross_sectional_score_rank_pct",
         "is_nse_symbol",
         "meta_year_norm",
@@ -1477,34 +1477,56 @@ class MetaModelTrainer:
         )
         long_mask = dataset["direction_label"].eq("long")
         directional_alpha = directional_alpha.where(long_mask, -directional_alpha)
+        directional_momentum = (
+            0.55 * _numeric_series("momentum_20d")
+            + 0.25 * _numeric_series("momentum_60d")
+            + 0.20 * _numeric_series("price_acceleration")
+        )
+        directional_momentum = directional_momentum.where(long_mask, -directional_momentum)
+        directional_sentiment = (
+            0.45 * _numeric_series("sentiment_velocity")
+            + 0.30 * _numeric_series("weighted_sentiment_zscore")
+            + 0.25 * _numeric_series("earnings_tone_signal")
+        )
+        directional_sentiment = directional_sentiment.where(long_mask, -directional_sentiment)
+        directional_volatility = (
+            -0.60 * _numeric_series("realized_vol_21d")
+            -0.25 * _numeric_series("vol_regime_ratio")
+            +0.15 * _numeric_series("vol_ratio_20")
+        )
+        directional_volatility = directional_volatility.where(long_mask, -directional_volatility)
 
         dataset["__directional_alpha"] = directional_alpha
+        dataset["__directional_momentum"] = directional_momentum
+        dataset["__directional_sentiment"] = directional_sentiment
+        dataset["__directional_volatility"] = directional_volatility
         dataset["cross_sectional_selection_rank_pct"] = dataset.groupby(group_keys)["__directional_alpha"].rank(
             pct=True,
             method="average",
-        )
-        dataset["cross_sectional_edge_rank_pct"] = dataset.groupby(group_keys)["edge_pct"].rank(
-            pct=True,
-            method="average",
-        )
-        dataset["cross_sectional_edge_ratio_rank_pct"] = dataset.groupby(group_keys)["edge_ratio"].rank(
-            pct=True,
-            method="average",
-        )
-        dataset["cross_sectional_drawdown_rank_pct"] = dataset.groupby(group_keys)["drawdown_pct"].transform(
-            lambda series: (-series).rank(pct=True, method="average")
         )
         dataset["cross_sectional_conviction_rank_pct"] = dataset.groupby(group_keys)["conviction_score"].rank(
             pct=True,
             method="average",
         )
+        dataset["cross_sectional_sentiment_rank_pct"] = dataset.groupby(group_keys)["__directional_sentiment"].rank(
+            pct=True,
+            method="average",
+        )
+        dataset["cross_sectional_momentum_rank_pct"] = dataset.groupby(group_keys)["__directional_momentum"].rank(
+            pct=True,
+            method="average",
+        )
+        dataset["cross_sectional_volatility_rank_pct"] = dataset.groupby(group_keys)["__directional_volatility"].rank(
+            pct=True,
+            method="average",
+        )
 
         dataset["__cross_sectional_score"] = (
-            0.38 * dataset["cross_sectional_edge_rank_pct"]
-            + 0.22 * dataset["cross_sectional_edge_ratio_rank_pct"]
-            + 0.16 * dataset["cross_sectional_drawdown_rank_pct"]
-            + 0.14 * dataset["cross_sectional_selection_rank_pct"]
-            + 0.10 * dataset["cross_sectional_conviction_rank_pct"]
+            0.34 * dataset["cross_sectional_selection_rank_pct"]
+            + 0.22 * dataset["cross_sectional_momentum_rank_pct"]
+            + 0.18 * dataset["cross_sectional_sentiment_rank_pct"]
+            + 0.14 * dataset["cross_sectional_conviction_rank_pct"]
+            + 0.12 * dataset["cross_sectional_volatility_rank_pct"]
         )
         dataset["cross_sectional_score_rank_pct"] = dataset.groupby(group_keys)["__cross_sectional_score"].rank(
             pct=True,
@@ -1522,7 +1544,16 @@ class MetaModelTrainer:
             & (small_group_mask | selected_rank_mask)
         ).astype(int)
 
-        dataset = dataset.drop(columns=["__directional_alpha", "__cross_sectional_score"], errors="ignore")
+        dataset = dataset.drop(
+            columns=[
+                "__directional_alpha",
+                "__directional_momentum",
+                "__directional_sentiment",
+                "__directional_volatility",
+                "__cross_sectional_score",
+            ],
+            errors="ignore",
+        )
         return dataset
 
     def walk_forward_validate(self, dataset: pd.DataFrame) -> Dict:
