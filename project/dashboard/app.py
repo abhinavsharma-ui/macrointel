@@ -46,7 +46,7 @@ load_dotenv(ROOT / ".env.example", override=False)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, make_response, render_template_string, request
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 
@@ -501,13 +501,42 @@ def create_app(
                     return {}
         return {}
 
+    def _snapshot_sequence(value: Any) -> List[Any]:
+        if value is None:
+            return []
+        try:
+            return list(value)
+        except RuntimeError:
+            try:
+                return list(tuple(value))
+            except Exception:
+                return []
+        except Exception:
+            return []
+
+    def _snapshot_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: _snapshot_value(item)
+                for key, item in _snapshot_mapping(value).items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [_snapshot_value(item) for item in _snapshot_sequence(value)]
+        return value
+
+    def _status_snapshot(value: Any) -> Dict[str, Any]:
+        return _json_safe(_snapshot_value(value))
+
     def _signal_store_snapshot() -> Dict[str, Dict[str, Any]]:
         snapshot = _snapshot_mapping(_signal_store)
-        return {
-            str(symbol): dict(payload)
-            for symbol, payload in snapshot.items()
-            if isinstance(payload, dict)
-        }
+        stable_snapshot: Dict[str, Dict[str, Any]] = {}
+        for symbol, payload in snapshot.items():
+            if not isinstance(payload, dict):
+                continue
+            payload_snapshot = _snapshot_value(payload)
+            if isinstance(payload_snapshot, dict):
+                stable_snapshot[str(symbol)] = payload_snapshot
+        return stable_snapshot
 
     def _to_datetime(value: Any) -> Optional[datetime]:
         if isinstance(value, datetime):
@@ -1091,6 +1120,10 @@ def create_app(
                     "setup_stats": setup_rows[:6],
                     "exit_reasons": reason_rows[:6],
                     "time_buckets": time_rows[:6],
+                    # Per-lane kill switch state — lets the crypto lane card
+                    # show an amber warning when entries are paused (Issue #4).
+                    "kill_switch_active": bool(getattr(paper_broker, "_kill_switch_activated", False)) if paper_broker is not None else False,
+                    "kill_switch_reason": getattr(paper_broker, "_kill_switch_reason", "") if paper_broker is not None else "",
                 }
             )
 
@@ -1118,7 +1151,15 @@ def create_app(
 
     @app.route("/")
     def index():
-        return render_template_string(DASHBOARD_HTML)
+        response = make_response(render_template_string(DASHBOARD_HTML))
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    @app.route("/favicon.ico")
+    def favicon():
+        return ("", 204)
 
     @app.route("/api/signals")
     def get_signals():
@@ -1126,7 +1167,7 @@ def create_app(
         requested_limit = max(0, int(request.args.get("limit") or _dashboard_signal_limit or 0))
         sigs = _flatten_signal_store(
             _signal_store_snapshot(),
-            limit=requested_limit if requested_limit > 0 else None,
+            limit=None,
             hydrate_meta=False,
             hydrate_prices=False,
         )
@@ -1136,17 +1177,22 @@ def create_app(
             0 if s.get("signal") == "buy" else 1 if s.get("signal") == "sell" else 2,
             -_safe_float(s.get("confidence"), 0.0),
         ))
+        lane_counts = {
+            lane: sum(1 for s in sigs if str(s.get("lane", "")).lower() == lane)
+            for lane in ("normal", "day", "crypto")
+        }
+        total_count = len(sigs)
+        if requested_limit > 0:
+            sigs = sigs[:requested_limit]
         signal_payload = [_dashboard_signal_summary(signal) for signal in sigs]
         return jsonify(_json_safe({
             "signals":    signal_payload,
             "count":      len(signal_payload),
+            "total_count": total_count,
             "buy_count":  sum(1 for s in signal_payload if s.get("signal") == "buy"),
             "sell_count": sum(1 for s in signal_payload if s.get("signal") == "sell"),
             "hold_count": sum(1 for s in signal_payload if s.get("signal") == "neutral"),
-            "lane_counts": {
-                lane: sum(1 for s in signal_payload if str(s.get("lane", "")).lower() == lane)
-                for lane in ("normal", "day", "crypto")
-            },
+            "lane_counts": lane_counts,
             "timestamp":  datetime.now(timezone.utc).isoformat(),
         }))
 
@@ -1290,12 +1336,16 @@ def create_app(
         if not issues:
             issues.append("OK: Signal distribution looks healthy.")
         diag["issues"] = issues
+        runtime = ((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {})
+        diag["skip_summary"] = runtime.get("skip_summary", {})
+        diag["artifact_status"] = runtime.get("artifact_status", {})
+        diag["meta_state"] = runtime.get("meta_state")
         diag["checked_at"] = datetime.now(timezone.utc).isoformat()
         return jsonify(diag)
 
     @app.route("/api/execution-trace")
     def get_execution_trace():
-        rows = list(_execution_trace)
+        rows = _snapshot_sequence(_execution_trace)
         rows.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
         limited = rows[:_dashboard_execution_trace_limit]
         return jsonify(
@@ -1322,7 +1372,7 @@ def create_app(
 
     @app.route("/api/execution-divergence")
     def get_execution_divergence():
-        rows = list(_execution_reconciliation or [])
+        rows = _snapshot_sequence(_execution_reconciliation)
         rows.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
         limited = rows[:_dashboard_execution_trace_limit]
         total = len(rows)
@@ -1400,13 +1450,28 @@ def create_app(
     def get_meta_model():
         if not _meta_model_status:
             return jsonify({"note": "Meta model status not ready yet."})
-        return jsonify(_meta_model_status)
+        return jsonify(_status_snapshot(_meta_model_status))
 
     @app.route("/api/learning-status")
     def get_learning_status():
         if not _learning_status:
             return jsonify({"note": "Learning status not ready yet."})
-        return jsonify(_learning_status)
+        return jsonify(_status_snapshot(_learning_status))
+
+    @app.route("/api/trade-blockers")
+    def get_trade_blockers():
+        runtime = ((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {})
+        return jsonify(
+            {
+                "trade_readiness": (_system_health.get("status") if isinstance(_system_health, dict) else "unknown"),
+                "new_entries_enabled": bool((_system_health.get("new_entries_enabled") if isinstance(_system_health, dict) else False)),
+                "blocking_reasons": ((_system_health.get("blocking_reasons", []) if isinstance(_system_health, dict) else []) or []),
+                "skip_summary": runtime.get("skip_summary", {}),
+                "artifact_status": runtime.get("artifact_status", {}),
+                "meta_state": runtime.get("meta_state"),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
     @app.route("/api/daily-report")
     def get_daily_report():
@@ -1447,6 +1512,8 @@ def create_app(
             "data_sources":     (_system_health.get("data_sources", {}) if isinstance(_system_health, dict) else {}),
             "lane_open_counts": (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("lane_open_counts", {})),
             "lane_targets":     (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("lane_targets", {})),
+            "skip_summary":     (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("skip_summary", {})),
+            "artifact_status":  (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("artifact_status", {})),
             "universe_sync":    (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("universe_sync", {})),
             "pipeline_selection": (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("pipeline_selection", {})),
             "data_pipeline":   (((_system_health.get("runtime", {}) if isinstance(_system_health, dict) else {}) or {}).get("data_pipeline", {})),
@@ -1630,7 +1697,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MacroIntel Live</title>
-<script src="/socket.io/socket.io.js"></script>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet">
 <style>
@@ -2713,6 +2780,13 @@ function renderLaneOverview(){
     const status = laneReport.status || (actionable.length ? 'active' : laneSignals.length ? 'warming' : 'standby');
     const active = activeLane === lane || (activeLane === 'all' && lane === 'normal');
     const accent = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--text)';
+    // Issue #4: show amber kill-switch warning inside the crypto lane card
+    // when entries are paused due to consecutive losses (or any kill reason).
+    const ksActive = !!laneReport.kill_switch_active;
+    const ksReason = laneReport.kill_switch_reason ? String(laneReport.kill_switch_reason) : 'portfolio protection';
+    const killWarnHtml = (lane === 'crypto' && ksActive)
+      ? `<div style="color:var(--amber);font-size:10px;margin-top:4px;line-height:1.3">⚠ Entries paused — kill switch active (${ksReason})</div>`
+      : '';
     return `<div class="laneCard clickable${active ? ' active' : ''}" onclick="openLaneView('${lane}')">
       <div class="lanel">${LANE_LABELS[lane]}</div>
       <div class="lanev" style="color:${laneSignals.length ? 'var(--blue)' : accent}">${laneSignals.length}</div>
@@ -2721,6 +2795,7 @@ function renderLaneOverview(){
         <span class="lanePill">${status}</span>
         <span class="laneMini">${laneReport.open_positions || 0} open • day P&amp;L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}</span>
       </div>
+      ${killWarnHtml}
     </div>`;
   });
   const totalActionable = Object.values(signals).filter(isTradeReady).length;
@@ -3627,8 +3702,25 @@ function refreshMetaModel(){
     label.style.color = active ? 'var(--green)' : 'var(--amber)';
     const edge = d.mean_taken_edge_pct != null ? `${Number(d.mean_taken_edge_pct).toFixed(2)}% edge` : 'edge -';
     const hit = d.mean_taken_hit_rate_pct != null ? `${Number(d.mean_taken_hit_rate_pct).toFixed(1)}% hit` : 'hit -';
-    const prec = d.mean_precision != null ? `${Number(d.mean_precision).toFixed(2)} precision` : 'precision -';
-    sub.textContent = `${active ? 'trained meta' : 'heuristic fallback'} - ${edge} - ${hit} - ${prec}`;
+    const live = d.live_metrics || {};
+    let prec = 'precision -';
+    if(d.mean_precision_source === 'live_runtime'){
+      const samples = Number(live.precision_sample_count || 0);
+      const target = Number(live.precision_warmup_target || 20);
+      if(live.precision_source === 'warming_up' || d.mean_precision == null){
+        prec = `warming up... ${samples}/${target}`;
+      }else{
+        const sampleNote = samples > 0 ? ` (${samples} trades)` : '';
+        prec = `${Number(d.mean_precision).toFixed(2)} precision${sampleNote}`;
+      }
+    }else if(d.walk_forward_status === 'failed'){
+      prec = 'Awaiting retrain';
+    }else if(d.mean_precision != null){
+      prec = `${Number(d.mean_precision).toFixed(2)} precision`;
+    }
+    const state = d.state ? String(d.state).replaceAll('_', ' ') : (active ? 'trained meta' : 'heuristic fallback');
+    const fallback = d.fallback_source ? ` - ${String(d.fallback_source).replaceAll('_', ' ')}` : '';
+    sub.textContent = `${state}${fallback} - ${edge} - ${hit} - ${prec}`;
   }).catch(() => {
     metaStatusFailures += 1;
     if(metaStatusFailures < 4){
@@ -3663,7 +3755,8 @@ function refreshLearningStatus(){
     label.style.color = inProgress ? 'var(--amber)' : (active ? 'var(--green)' : 'var(--muted)');
     const files = d.feature_store_files != null ? `${d.feature_store_files} feature files` : 'feature store -';
     const metaEdge = d.meta_edge_pct != null ? `${Number(d.meta_edge_pct).toFixed(2)}% edge` : 'edge -';
-    sub.textContent = `${files} - ${metaEdge} - refresh ${Math.round((d.learning_refresh_seconds || 0) / 3600)}h`;
+    const mode = d.runtime_mode ? String(d.runtime_mode).replaceAll('_', ' ') : 'runtime mode -';
+    sub.textContent = `${files} - ${metaEdge} - ${mode} - refresh ${Math.round((d.learning_refresh_seconds || 0) / 3600)}h`;
   }).catch(() => {
     learningStatusFailures += 1;
     if(learningStatusFailures < 4){
@@ -3692,7 +3785,7 @@ function refreshHealth(){
   fetch('/api/health').then(r => r.json()).then(d => {
     healthSnapshot = d || {};
     const s = d.uptime_seconds || 0;
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sc = s % 60;
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
     const hs = document.getElementById('hs');
     const hsi = document.getElementById('hsi');
     const ht = document.getElementById('ht');
@@ -3702,13 +3795,13 @@ function refreshHealth(){
       hsi.textContent = d.signal_count ? d.signal_count : ((d.active_symbols || d.tick_count) ? 'warming' : '0');
     }
     if(ht && d.timestamp) ht.textContent = new Date(d.timestamp).toLocaleTimeString();
-    if(hu) hu.textContent = h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${sc}s` : `${sc}s`;
+    if(hu) hu.textContent = h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${sec}s` : `${sec}s`;
     updateMetrics();
     renderSidebar();
     renderMarketBoard();
     // Server has signals but browser store empty (often /api/signals timed out while CPU-heavy); retry fetch.
-    const sc = Number(d.signal_count || 0);
-    if(sc > 0 && !Object.keys(signals).length){
+    const signalCount = Number(d.signal_count || 0);
+    if(signalCount > 0 && !Object.keys(signals).length){
       refreshSignals();
       setTimeout(refreshSignals, 3000);
     }
@@ -3716,7 +3809,27 @@ function refreshHealth(){
 }
 
 function refreshSignals(){
-  fetch('/api/signals').then(r => r.json()).then(d => applySignals(d.signals || [], true)).catch(() => {});
+  const lanes = ['normal', 'day', 'crypto'];
+  Promise.allSettled(
+    lanes.map(lane =>
+      fetch(`/api/signals?lane=${encodeURIComponent(lane)}&limit=${encodeURIComponent(String(500))}`)
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`signals_${lane}_${r.status}`)))
+    )
+  ).then(results => {
+    const merged = [];
+    results.forEach(result => {
+      if(result.status === 'fulfilled' && result.value){
+        merged.push(...(result.value.signals || []));
+      }
+    });
+    if(merged.length){
+      applySignals(merged, true);
+      return;
+    }
+    return fetch('/api/signals')
+      .then(r => r.json())
+      .then(d => applySignals(d.signals || [], true));
+  }).catch(() => {});
 }
 
 function refreshPortfolioSummary(){
@@ -3825,9 +3938,12 @@ if __name__ == "__main__":
             while True:
                 try:
                     from pipeline.earnings_collector import EarningsEventPipeline
-                    from pipeline.price_collector import PriceDataPipeline
+                    from pipeline.price_collector import PriceDataPipeline, _resolve_universe_mode
+                    from pipeline.universe import get_universe
                     from pipeline.feature_engineering import FeaturePipeline
-                    pd_res = PriceDataPipeline().run_incremental_update()
+                    # Pass universe-mode-aware symbols so the standalone
+                    # dashboard respects UNIVERSE_MODE (Issue #1 fix).
+                    pd_res = PriceDataPipeline(symbols=get_universe(_resolve_universe_mode())).run_incremental_update()
                     earn_res = EarningsEventPipeline().run(
                         symbols=list(pd_res.get("price_daily_recent", {}).keys()),
                         save=False,

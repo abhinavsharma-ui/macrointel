@@ -82,6 +82,12 @@ class GateDecision:
             "stacking_used": self.stacking_used,
             "meta_used": self.meta_used,
             "models_used": self.models_used,
+            "stacking_fallback_reason": (
+                self.prediction.fallback_reason
+                if self.prediction is not None and self.prediction.fallback_reason
+                else ("stacking_unavailable" if not self.stacking_used else "")
+            ),
+            "stacking_prediction_class": self.prediction.pred_class if self.prediction is not None else None,
             "penalties": self.confidence.penalties_applied,
             "bonuses": self.confidence.bonuses_applied,
             "reasons": self.reasons,

@@ -559,9 +559,29 @@ class MetaDecisionEngine:
     TAKE_THRESHOLD = 0.40
 
     def __init__(self):
+        def _env_float(*names: str) -> Optional[float]:
+            for name in names:
+                raw = os.getenv(name)
+                if raw is None or str(raw).strip() == "":
+                    continue
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        configured_take_threshold = _env_float("META_MODEL_TAKE_THRESHOLD")
+        runtime_take_threshold = _env_float("META_MODEL_RUNTIME_THRESHOLD")
+        base_take_threshold = (
+            configured_take_threshold
+            if configured_take_threshold is not None
+            else runtime_take_threshold
+            if runtime_take_threshold is not None
+            else self.TAKE_THRESHOLD
+        )
         self._take_threshold = min(
             0.99,
-            max(0.01, float(os.getenv("META_MODEL_RUNTIME_THRESHOLD", str(self.TAKE_THRESHOLD)))),
+            max(0.01, float(base_take_threshold)),
         )
         self._min_edge_pct = max(
             0.0,
@@ -579,10 +599,27 @@ class MetaDecisionEngine:
             0.0,
             float(os.getenv("META_MODEL_RUNTIME_MIN_CONVICTION", "3.0")),
         )
+        def _lane_threshold(*names: str) -> float:
+            value = _env_float(*names)
+            if value is None:
+                value = self._take_threshold
+            if configured_take_threshold is not None:
+                value = min(value, configured_take_threshold)
+            return min(0.99, max(0.01, float(value)))
+
         self._lane_take_threshold_caps = {
-            "normal": min(0.99, max(0.01, float(os.getenv("META_MODEL_RUNTIME_NORMAL_THRESHOLD", "0.48")))),
-            "day": min(0.99, max(0.01, float(os.getenv("META_MODEL_RUNTIME_DAY_THRESHOLD", "0.40")))),
-            "crypto": min(0.99, max(0.01, float(os.getenv("META_MODEL_RUNTIME_CRYPTO_THRESHOLD", "0.28")))),
+            "normal": _lane_threshold(
+                "META_MODEL_RUNTIME_NORMAL_THRESHOLD",
+                "NORMAL_LANE_MIN_TAKE_PROBABILITY",
+            ),
+            "day": _lane_threshold(
+                "META_MODEL_RUNTIME_DAY_THRESHOLD",
+                "DAY_LANE_MIN_TAKE_PROBABILITY",
+            ),
+            "crypto": _lane_threshold(
+                "META_MODEL_RUNTIME_CRYPTO_THRESHOLD",
+                "CRYPTO_LANE_MIN_TAKE_PROBABILITY",
+            ),
         }
         self._lane_min_convictions = {
             "normal": max(0.0, float(os.getenv("META_MODEL_RUNTIME_NORMAL_MIN_CONVICTION", "0.90"))),

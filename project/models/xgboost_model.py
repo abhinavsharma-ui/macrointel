@@ -86,7 +86,7 @@ class FeatureSelector:
     This runs a quick initial XGB fit and drops features with zero importance.
     """
 
-    def __init__(self, correlation_threshold: float = 0.92):
+    def __init__(self, correlation_threshold: float = 0.98):
         self.corr_threshold = correlation_threshold
         self.selected_features: List[str] = []
 
@@ -564,6 +564,8 @@ class XGBoostSignalModel:
     def _prepare_runtime_input(self, X) -> np.ndarray:
         if isinstance(X, pd.DataFrame):
             X_aug = add_regime_interactions(X)
+            X_aug = add_advanced_features(X_aug)
+            X_aug = add_regime_conditional_features(X_aug)
             X_sel = self.selector.transform(X_aug).fillna(0)
             return X_sel.to_numpy(dtype=float)
 

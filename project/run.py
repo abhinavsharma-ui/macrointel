@@ -9,6 +9,16 @@ import os
 import json
 
 ROOT = Path(__file__).resolve().parent
+
+# Ensure the project root is always on sys.path so that `from core.*` and
+# `from pipeline.*` imports work regardless of the working directory or how
+# this module is invoked (e.g. imported by dashboard/app.py, run via screen,
+# or called from a subdirectory).  This fixes the "No module named
+# 'core.runtime_artifacts'" startup warning (Issue #5).
+import sys as _sys
+if str(ROOT) not in _sys.path:
+    _sys.path.insert(0, str(ROOT))
+
 load_dotenv(ROOT / ".env")
 load_dotenv(ROOT / ".env.example", override=False)
 if not os.getenv("UNIVERSE_FILE_PATH", "").strip():
@@ -41,6 +51,11 @@ from core.trade_gate import evaluate_trade_gate as _evaluate_trade_gate, GateDec
 from pipeline.universe import is_leader_symbol  # noqa: E402 – needed by _build_lane_candidates & _simulate_overlay_backtest
 
 logger = logging.getLogger(__name__)
+
+try:
+    _EASTERN_TZ = ZoneInfo("America/New_York")
+except Exception:
+    _EASTERN_TZ = timezone(timedelta(hours=-5))
 
 
 def _get_primary_env_value(*env_names: str) -> str:
@@ -91,6 +106,19 @@ class MacroIntelligenceSystem:
         self._components: Dict = {}
         self._running = False
         self._enhanced_exit_manager = EnhancedExitManager()
+        # Meta precision tracker — rolling deque of last 100 closed trades.
+        # Each entry is 1 (win) or 0 (loss). Access is gated by a single lock
+        # so we never read a torn numerator/denominator across threads.
+        self._precision_lock = threading.Lock()
+        self._precision_outcomes: deque = deque(maxlen=100)
+        self._precision_seen_order_ids: set = set()
+        self._precision_last_value: Optional[float] = None
+        self._precision_last_refresh_ts: float = 0.0
+        self._precision_last_log_ts: float = 0.0
+        self._precision_refresh_interval = max(30.0, float(os.getenv("PRECISION_REFRESH_INTERVAL_SECONDS", "60")))
+        self._precision_max_delta = max(0.01, float(os.getenv("PRECISION_MAX_DELTA", "0.05")))
+        self._precision_warmup_min = max(1, int(os.getenv("PRECISION_WARMUP_MIN_SAMPLES", "20")))
+        self._reload_precision_history_from_csv()
         self._data_versions = {"prices": 0, "sentiment": 0, "earnings": 0, "altdata": 0}
         self._last_inference_versions = dict(self._data_versions)
         self._last_seen_tick_ts: Dict[str, str] = {}
@@ -102,9 +130,33 @@ class MacroIntelligenceSystem:
             "upstox": os.getenv("UPSTOX_ACCESS_TOKEN", ""),
             "fred": os.getenv("FRED_API_KEY", ""),
         }
+        # ── Paper / US-only run guards ──
+        # PAPER_TRADING=true + LIVE_TRADING=false together hard-block any live
+        # broker submission regardless of BROKER_EXECUTION_MODE. US_ONLY=true
+        # skips NSE (Upstox) and crypto (Binance/Bybit/KuCoin) feeds and brokers.
+        def _env_truthy(name: str, default: str) -> bool:
+            return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+        self._paper_trading_forced = _env_truthy("PAPER_TRADING", "false")
+        self._live_trading_allowed = _env_truthy("LIVE_TRADING", "true")
+        self._us_only = _env_truthy("US_ONLY", "false")
+        if self._paper_trading_forced and not self._live_trading_allowed:
+            # Forbid any live broker path.
+            if os.getenv("BROKER_EXECUTION_MODE", "paper").strip().lower() == "live":
+                logger.warning("PAPER_TRADING=true + LIVE_TRADING=false: overriding BROKER_EXECUTION_MODE=live → paper")
+            os.environ["BROKER_EXECUTION_MODE"] = "paper"
+            os.environ["STOCK_BROKER"] = "paper"
+            os.environ["CRYPTO_BROKER"] = "paper"
+        if self._us_only:
+            # Silence crypto + NSE broker/feed paths entirely.
+            os.environ["CRYPTO_DEPTH_ENABLED"] = "0"
+            os.environ["NSE_NATIVE_FEED_ENABLED"] = "0"
+            os.environ["MT5_FEED_ENABLED"] = "0"
         self._universe_mode = os.getenv("UNIVERSE_MODE", "full").strip().lower() or "full"
+        if self._universe_mode == "normal":
+            self._universe_mode = "us"
         if self._universe_mode not in {
             "core",
+            "crypto",
             "full",
             "us",
             "nse",
@@ -114,6 +166,7 @@ class MacroIntelligenceSystem:
             "throughput",
             "throughput_us",
             "throughput_nse",
+            "screened",      # pre-market screener output (screener/output/YYYY-MM-DD/)
         }:
             logger.warning(f"Invalid UNIVERSE_MODE '{self._universe_mode}', defaulting to full")
             self._universe_mode = "full"
@@ -922,7 +975,9 @@ class MacroIntelligenceSystem:
     ) -> Dict[str, Any]:
         payload = self._decorate_signal(str(symbol or "").upper(), signal or {}, lane_override=lane_override)
         payload["warmup_only"] = True
+        payload["meta_evaluated"] = False
         payload["trade_eligible"] = False
+        payload["take_trade"] = False
         payload["stale_reason"] = reason
         payload["stale_seconds"] = None
         meta = payload.get("meta_decision")
@@ -1069,7 +1124,30 @@ class MacroIntelligenceSystem:
             return True
         current_ts = timestamp if isinstance(timestamp, datetime) else datetime.now(timezone.utc)
         local_ts, open_local, close_local = self._market_session_clock(current_ts, market)
-        return open_local <= local_ts <= close_local
+        if local_ts.weekday() >= 5:
+            return False
+        return open_local <= local_ts < close_local
+
+    def _is_market_open_for_trading(
+        self,
+        *,
+        lane: Optional[str] = None,
+        symbol: Optional[str] = None,
+        signal: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[datetime] = None,
+    ) -> bool:
+        signal_payload = signal if isinstance(signal, dict) else {}
+        if str(lane or signal_payload.get("lane") or "").lower() == "crypto":
+            return True
+
+        intraday = signal_payload.get("intraday_overlay", {}) if isinstance(signal_payload.get("intraday_overlay"), dict) else {}
+        market = str(
+            signal_payload.get("market")
+            or intraday.get("market")
+            or self._market_code_for_symbol(symbol or "")
+            or "US"
+        ).upper()
+        return self._market_is_open(market, timestamp=timestamp)
 
     def _entry_readiness_gate(self, symbol: str, lane: str, signal: Optional[Dict] = None) -> Dict[str, Any]:
         lane_key = str(lane or "normal").lower()
@@ -1229,7 +1307,29 @@ class MacroIntelligenceSystem:
     def _get_target_symbols(self, market: str = "full") -> List[str]:
         from pipeline.universe import get_universe
 
-        mode = self._universe_mode
+        mode = "us" if str(self._universe_mode or "").lower() == "normal" else self._universe_mode
+
+        # US_ONLY: never return NSE symbols, and treat "full" as "us".
+        if getattr(self, "_us_only", False):
+            if market == "nse":
+                return []
+            if market == "full":
+                market = "us"
+
+        # ── Screened mode: slice the screener output by market ───────────────
+        if mode == "screened":
+            all_screened = get_universe("screened")
+            us_only_list = [s for s in all_screened if not s.endswith(".NS") and not s.endswith("-USD")]
+            if getattr(self, "_us_only", False):
+                # Regardless of requested market, US_ONLY hard-filters to US tickers.
+                return us_only_list
+            if market == "us":
+                return us_only_list
+            if market == "nse":
+                return [s for s in all_screened if s.endswith(".NS")]
+            # "full" or unspecified — return everything (US + NSE + crypto tickers)
+            return all_screened
+
         if market == "us":
             if mode in {"daytrade", "daytrade_us"}:
                 return get_universe("daytrade_us")
@@ -1250,7 +1350,7 @@ class MacroIntelligenceSystem:
             if mode == "throughput_us":
                 return []
             return get_universe("nse") if mode != "core" else [s for s in get_universe("core") if s.endswith(".NS")]
-        if mode in {"core", "full", "us", "nse", "daytrade", "daytrade_us", "daytrade_nse", "throughput", "throughput_us", "throughput_nse"}:
+        if mode in {"core", "crypto", "full", "us", "nse", "daytrade", "daytrade_us", "daytrade_nse", "throughput", "throughput_us", "throughput_nse"}:
             return get_universe(mode)
         return get_universe("full")
 
@@ -1368,8 +1468,10 @@ class MacroIntelligenceSystem:
 
     def _apply_event_window_mode(self) -> None:
         self._day_trading_mode = True
-        self._crypto_depth_enabled = True
-        if not self._crypto_symbols:
+        self._crypto_depth_enabled = not self._us_only
+        if self._us_only:
+            self._crypto_symbols = []
+        elif not self._crypto_symbols:
             self._crypto_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
         self._price_refresh_seconds = min(
             self._price_refresh_seconds,
@@ -1622,6 +1724,14 @@ class MacroIntelligenceSystem:
             return 0
         if self._data_versions.get(source_key, 0) > 0:
             return 0
+        if source_key == "prices":
+            try:
+                from pipeline.universe import get_universe
+
+                if total_symbols <= len(get_universe("normal")):
+                    return 0
+            except Exception:
+                pass
         default_caps = {
             "prices": 160,
             "sentiment": 80,
@@ -2703,6 +2813,36 @@ class MacroIntelligenceSystem:
             return None
         return rows.get(symbol)
 
+    def _apply_meta_runtime_fields(self, signal: Optional[Dict], meta: Optional[Dict]) -> Dict:
+        payload = signal if isinstance(signal, dict) else {}
+        meta_payload = dict(meta) if isinstance(meta, dict) else {}
+        if not payload or not meta_payload:
+            return payload
+
+        take_trade = bool(meta_payload.get("take_trade", False))
+        take_probability = self._safe_number(meta_payload.get("take_probability"), 0.0)
+        skip_probability = self._safe_number(meta_payload.get("skip_probability"), 1.0)
+
+        payload["warmup_only"] = False
+        payload["meta_evaluated"] = True
+        payload["meta_decision"] = meta_payload
+        payload["trade_eligible"] = take_trade
+        payload["take_trade"] = take_trade
+        payload["take_probability"] = take_probability
+        payload["take_prob"] = take_probability
+        payload["skip_probability"] = skip_probability
+        payload["skip_prob"] = skip_probability
+        payload["expected_edge_pct"] = self._safe_number(meta_payload.get("expected_edge_pct"), 0.0)
+        payload["expected_drawdown_pct"] = self._safe_number(meta_payload.get("expected_drawdown_pct"), 0.0)
+        payload["rank_score"] = self._safe_number(meta_payload.get("rank_score"), 0.0)
+        payload["rank_percentile"] = self._safe_number(meta_payload.get("rank_percentile"), 0.0)
+        payload["size_multiplier"] = self._safe_number(meta_payload.get("size_multiplier"), 0.0)
+        payload["meta_reason"] = str(meta_payload.get("reason", "") or "")
+        payload["meta_source"] = meta_payload.get("source", "heuristic")
+        payload.pop("stale_reason", None)
+        payload.pop("stale_seconds", None)
+        return payload
+
     def _hydrate_signal_runtime_fields(self, symbol: str, signal: Optional[Dict]) -> Dict:
         payload = dict(signal or {})
         if not payload:
@@ -2718,16 +2858,7 @@ class MacroIntelligenceSystem:
                 logger.debug(f"Meta hydration failed for {symbol}: {exc}")
                 evaluated = {}
             if evaluated:
-                payload["meta_decision"] = evaluated
-                payload["trade_eligible"] = evaluated.get("take_trade", False)
-                payload["take_probability"] = evaluated.get("take_probability", 0.0)
-                payload["skip_probability"] = evaluated.get("skip_probability", 1.0)
-                payload["expected_edge_pct"] = evaluated.get("expected_edge_pct", 0.0)
-                payload["expected_drawdown_pct"] = evaluated.get("expected_drawdown_pct", 0.0)
-                payload["rank_score"] = evaluated.get("rank_score", 0.0)
-                payload["rank_percentile"] = evaluated.get("rank_percentile", 0.0)
-                payload["size_multiplier"] = evaluated.get("size_multiplier", 1.0)
-                payload["meta_source"] = evaluated.get("source", "heuristic")
+                payload = self._apply_meta_runtime_fields(payload, evaluated)
 
         lane = str(payload.get("lane") or self._signal_lane_meta(symbol, payload).get("lane") or "normal").lower()
         overlay = self._components.get("portfolio_overlay", {})
@@ -4542,19 +4673,7 @@ class MacroIntelligenceSystem:
             signal = self._signal_store.get(symbol)
             if not isinstance(signal, dict):
                 continue
-            signal["warmup_only"] = False
-            signal["meta_decision"] = meta
-            signal["trade_eligible"] = meta.get("take_trade", False)
-            signal["take_probability"] = meta.get("take_probability", 0.0)
-            signal["skip_probability"] = meta.get("skip_probability", 1.0)
-            signal["expected_edge_pct"] = meta.get("expected_edge_pct", 0.0)
-            signal["expected_drawdown_pct"] = meta.get("expected_drawdown_pct", 0.0)
-            signal["rank_score"] = meta.get("rank_score", 0.0)
-            signal["rank_percentile"] = meta.get("rank_percentile", 0.0)
-            signal["size_multiplier"] = meta.get("size_multiplier", 0.0)
-            signal["meta_source"] = meta.get("source", "heuristic")
-            signal.pop("stale_reason", None)
-            signal.pop("stale_seconds", None)
+            self._apply_meta_runtime_fields(signal, meta)
             applied += 1
         return applied
 
@@ -4930,6 +5049,164 @@ class MacroIntelligenceSystem:
                 signal["normal_lane_signal"]["governor_state"] = governor.get("normal", {})
         return dict(target)
 
+    def _reload_precision_history_from_csv(self) -> None:
+        """Rehydrate today's precision history from logs/precision_log.csv so
+        an intraday restart does not reset the rolling precision tracker back
+        into warmup. We only replay rows whose timestamp date matches today's
+        Eastern date, and we reconstruct enough outcomes to match the last
+        recorded sample_count (up to the deque's 100-sample cap)."""
+        try:
+            log_dir = Path(__file__).resolve().parent / "logs"
+            csv_path = log_dir / "precision_log.csv"
+            if not csv_path.exists():
+                return
+
+            import csv as _csv
+            last_precision: Optional[float] = None
+            last_count: int = 0
+            today_et = datetime.now(_EASTERN_TZ).date()
+            with open(csv_path, newline="", encoding="utf-8") as fh:
+                reader = _csv.DictReader(fh)
+                for row in reader:
+                    ts = str(row.get("timestamp", "")).strip()
+                    if not ts:
+                        continue
+                    try:
+                        ts_dt = datetime.fromisoformat(ts)
+                    except ValueError:
+                        continue
+                    if ts_dt.tzinfo is None:
+                        ts_dt = ts_dt.replace(tzinfo=_EASTERN_TZ)
+                    if ts_dt.astimezone(_EASTERN_TZ).date() != today_et:
+                        continue
+                    try:
+                        last_count = int(float(row.get("sample_count", "0")))
+                    except (TypeError, ValueError):
+                        continue
+                    precision_raw = str(row.get("precision", "")).strip()
+                    if precision_raw:
+                        try:
+                            last_precision = float(precision_raw)
+                        except (TypeError, ValueError):
+                            pass
+
+            if last_count <= 0:
+                return
+
+            replay_n = min(last_count, self._precision_outcomes.maxlen or 100)
+            replay_precision = 0.5 if last_precision is None else float(last_precision)
+            wins = int(round(replay_precision * replay_n))
+            wins = max(0, min(replay_n, wins))
+            losses = replay_n - wins
+            with self._precision_lock:
+                self._precision_outcomes.clear()
+                for _ in range(wins):
+                    self._precision_outcomes.append(1)
+                for _ in range(losses):
+                    self._precision_outcomes.append(0)
+                if last_precision is None or replay_n < self._precision_warmup_min:
+                    self._precision_last_value = None
+                else:
+                    self._precision_last_value = round(replay_precision, 4)
+            logger.info(
+                f"Precision history rehydrated from {csv_path.name}: "
+                f"{replay_n} samples, precision={replay_precision:.4f}"
+            )
+        except Exception as exc:
+            logger.debug(f"precision history rehydrate skipped: {exc}")
+
+    def _refresh_precision_tracker(self) -> Optional[float]:
+        """Pull closed trades from the paper broker, update the rolling precision
+        deque, rate-limit + clamp the output value, and log to
+        logs/precision_log.csv. Returns the current stable precision or None
+        while warming up.
+
+        Fixes meta-precision flicker (0.3 ↔ 0) by:
+          - Never resetting the counter mid-session (deque persists across cycles).
+          - Scoring only CLOSED, calibrated trades (realized_pnl, not raw logits).
+          - Computing numerator/denominator atomically under a lock.
+          - Rate-limiting to once per PRECISION_REFRESH_INTERVAL_SECONDS (60s).
+          - Clamping sudden jumps to ±PRECISION_MAX_DELTA (0.05).
+          - Returning None (warming up) until PRECISION_WARMUP_MIN_SAMPLES reached.
+        """
+        now = time.time()
+        if (now - self._precision_last_refresh_ts) < self._precision_refresh_interval:
+            return self._precision_last_value
+
+        broker = self._components.get("broker")
+        if broker is None or not hasattr(broker, "trade_log"):
+            return self._precision_last_value
+
+        try:
+            trades_snapshot = list(broker.trade_log)
+        except Exception:
+            return self._precision_last_value
+
+        with self._precision_lock:
+            updated = False
+            for trade in trades_snapshot:
+                if not isinstance(trade, dict):
+                    continue
+                order_id = str(trade.get("order_id") or "")
+                if not order_id or order_id in self._precision_seen_order_ids:
+                    continue
+                realized_pnl = trade.get("realized_pnl", 0.0)
+                try:
+                    realized_pnl = float(realized_pnl)
+                except (TypeError, ValueError):
+                    continue
+                # Only closing fills (non-zero realized PnL) count as a calibrated prediction outcome.
+                if abs(realized_pnl) < 1e-9:
+                    continue
+                self._precision_seen_order_ids.add(order_id)
+                self._precision_outcomes.append(1 if realized_pnl > 0 else 0)
+                updated = True
+
+            sample_count = len(self._precision_outcomes)
+            if sample_count <= 0:
+                self._precision_last_refresh_ts = now
+                return self._precision_last_value
+
+            # Atomic ratio under the lock — no torn reads.
+            numerator = sum(self._precision_outcomes)
+            denominator = sample_count  # deque is non-empty here
+            raw_precision = max(0.0, min(1.0, float(numerator / denominator)))
+            logged_precision = round(raw_precision, 4)
+            self._precision_last_refresh_ts = now
+            count = sample_count
+            if sample_count < self._precision_warmup_min:
+                value = None
+            else:
+                # Clamp sudden jumps (indicates a bug, not a real change).
+                if self._precision_last_value is not None:
+                    delta = raw_precision - self._precision_last_value
+                    if delta > self._precision_max_delta:
+                        raw_precision = self._precision_last_value + self._precision_max_delta
+                    elif delta < -self._precision_max_delta:
+                        raw_precision = self._precision_last_value - self._precision_max_delta
+                raw_precision = max(0.0, min(1.0, float(raw_precision)))
+                self._precision_last_value = round(raw_precision, 4)
+                value = self._precision_last_value
+
+        if updated:
+            # Log (outside lock) — precision_log.csv
+            try:
+                log_dir = Path(os.getenv("LOG_DIR", "logs"))
+                if not log_dir.is_absolute():
+                    log_dir = Path(__file__).resolve().parent / log_dir
+                log_dir.mkdir(parents=True, exist_ok=True)
+                csv_path = log_dir / "precision_log.csv"
+                new_file = not csv_path.exists()
+                with open(csv_path, "a", encoding="utf-8", newline="") as fh:
+                    if new_file:
+                        fh.write("timestamp,precision,sample_count\n")
+                    fh.write(f"{datetime.now(_EASTERN_TZ).isoformat()},{logged_precision},{count}\n")
+                self._precision_last_log_ts = now
+            except Exception as exc:
+                logger.debug(f"precision_log.csv write failed: {exc}")
+
+        return value
+
     def _compute_live_meta_metrics(self) -> Dict[str, Optional[float]]:
         """
         Compute live runtime precision / hit-rate / edge from the signal store
@@ -4988,9 +5265,20 @@ class MacroIntelligenceSystem:
         out["n_signals"] = total
         out["n_eligible"] = eligible
         out["n_warmup"] = warmup
-        if directional > 0:
-            # precision proxy: % of directional signals the meta gate takes
-            out["precision"] = round(eligible / directional, 4)
+        # Precision: prefer the stable rolling-trade tracker; fall back to
+        # eligibility ratio only during warmup (samples < PRECISION_WARMUP_MIN_SAMPLES).
+        stable_precision = self._refresh_precision_tracker()
+        with self._precision_lock:
+            sample_count = len(self._precision_outcomes)
+        if stable_precision is not None:
+            out["precision"] = stable_precision
+            out["precision_source"] = "rolling_trades"
+            out["precision_sample_count"] = sample_count
+        else:
+            out["precision"] = None
+            out["precision_source"] = "warming_up"
+            out["precision_sample_count"] = sample_count
+            out["precision_warmup_target"] = self._precision_warmup_min
         if total > 0:
             out["coverage_pct"] = round(100.0 * directional / total, 2)
         if edge_count > 0:
@@ -6294,6 +6582,8 @@ class MacroIntelligenceSystem:
             signal = self._get_lane_signal(symbol, lane)
             if not isinstance(signal, dict):
                 signal = {}
+            if not self._is_market_open_for_trading(lane=lane, symbol=symbol, signal=signal):
+                continue
             meta = signal.get("meta_decision", {}) if isinstance(signal.get("meta_decision"), dict) else {}
             construction = signal.get("portfolio_construction", {}) if isinstance(signal.get("portfolio_construction"), dict) else {}
             intraday = signal.get("intraday_overlay", {}) if isinstance(signal.get("intraday_overlay"), dict) else {}
@@ -6455,6 +6745,18 @@ class MacroIntelligenceSystem:
                 continue
 
             lane = str(lane or signal.get("lane") or "normal").lower()
+            if not self._is_market_open_for_trading(lane=lane, symbol=symbol, signal=signal):
+                position_key = str(signal.get("signal_key") or self._position_key(symbol, lane))
+                self._record_execution_event(
+                    symbol,
+                    "buy",
+                    "skipped",
+                    "market_closed",
+                    signal=signal,
+                    position_key=position_key,
+                    conviction=float(signal.get("conviction_score", 0.0) or 0.0),
+                )
+                continue
             lane_config = self._lane_config(lane)
             leader_symbol = lane in {"normal", "day"} and is_leader_symbol(symbol)
             meta = signal.get("meta_decision", {}) if isinstance(signal.get("meta_decision"), dict) else {}
@@ -7826,44 +8128,23 @@ class MacroIntelligenceSystem:
                     self._last_feature_signature[symbol] = signature
                     return 1
 
-                def _apply_meta_decisions() -> None:
+                def _apply_meta_decisions() -> int:
                     meta_decisions = meta_engine.evaluate_universe(self._signal_store, feature_rows=latest_feature_rows)
+                    applied = 0
                     for symbol, meta in meta_decisions.items():
                         signal = self._signal_store.get(symbol)
                         if not isinstance(signal, dict):
                             continue
-                        signal["warmup_only"] = False
-                        signal["meta_decision"] = meta
-                        signal["trade_eligible"] = meta.get("take_trade", False)
-                        signal["take_probability"] = meta.get("take_probability", 0.0)
-                        signal["skip_probability"] = meta.get("skip_probability", 1.0)
-                        signal["expected_edge_pct"] = meta.get("expected_edge_pct", 0.0)
-                        signal["expected_drawdown_pct"] = meta.get("expected_drawdown_pct", 0.0)
-                        signal["rank_score"] = meta.get("rank_score", 0.0)
-                        signal["rank_percentile"] = meta.get("rank_percentile", 0.0)
-                        signal["size_multiplier"] = meta.get("size_multiplier", 0.0)
-                        signal["meta_source"] = meta.get("source", "heuristic")
-                        signal.pop("stale_reason", None)
-                        signal.pop("stale_seconds", None)
+                        self._apply_meta_runtime_fields(signal, meta)
+                        applied += 1
                         normal_signal = signal.get("normal_lane_signal")
                         if isinstance(normal_signal, dict):
-                            normal_signal["warmup_only"] = False
                             normal_meta = meta_engine.evaluate_universe(
                                 {symbol: normal_signal},
                                 feature_rows={symbol: latest_feature_rows.get(symbol)} if symbol in latest_feature_rows else {},
                             ).get(symbol, {})
-                            normal_signal["meta_decision"] = normal_meta
-                            normal_signal["trade_eligible"] = normal_meta.get("take_trade", False)
-                            normal_signal["take_probability"] = normal_meta.get("take_probability", 0.0)
-                            normal_signal["skip_probability"] = normal_meta.get("skip_probability", 1.0)
-                            normal_signal["expected_edge_pct"] = normal_meta.get("expected_edge_pct", 0.0)
-                            normal_signal["expected_drawdown_pct"] = normal_meta.get("expected_drawdown_pct", 0.0)
-                            normal_signal["rank_score"] = normal_meta.get("rank_score", 0.0)
-                            normal_signal["rank_percentile"] = normal_meta.get("rank_percentile", 0.0)
-                            normal_signal["size_multiplier"] = normal_meta.get("size_multiplier", 0.0)
-                            normal_signal["meta_source"] = normal_meta.get("source", "heuristic")
-                            normal_signal.pop("stale_reason", None)
-                            normal_signal.pop("stale_seconds", None)
+                            self._apply_meta_runtime_fields(normal_signal, normal_meta)
+                    return applied
 
                 has_non_crypto_signals = any(
                     isinstance(signal, dict)
@@ -8082,8 +8363,14 @@ class MacroIntelligenceSystem:
                 logger.warning("[INF-BREAD] crypto_refresh returned; about to meta_decisions")
 
                 _step_t = time.time()
-                _apply_meta_decisions()
-                logger.info("Inference step meta_decisions: %.1fs", time.time() - _step_t)
+                applied_meta = _apply_meta_decisions()
+                logger.info(
+                    "Inference step meta_decisions: %.1fs | %s signals updated",
+                    time.time() - _step_t,
+                    applied_meta,
+                )
+                if applied_meta or updated_symbols:
+                    self._persist_runtime_state(force=True)
                 logger.warning("[INF-BREAD] meta_decisions returned; about to auto_trade")
 
                 _step_t = time.time()

@@ -6674,3 +6674,149 @@ Traceback (most recent call last):
            ^^^^^^^^^^^^^^^^^^^^^^
 AssertionError: write() before start_response
 20:25:04  ERROR     websocket                       ping/pong timed out - goodbye
+02:11:35  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:11:46  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:12:01  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:12:19  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:12:47  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:13:27  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:14:27  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:14:57  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:15:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:15:30  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:15:31  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:15:36  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:15:42  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:15:43  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:15:48  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:15:55  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:16:03  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:16:17  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:16:32  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:17:25  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:17:38  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:18:40  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:18:41  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:18:44  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:18:47  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:18:59  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:19:04  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:19:44  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:20:07  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:20:10  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:20:47  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:21:54  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:22:30  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:22:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:22:57  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:24:00  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:25:02  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:25:50  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:25:50  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:26:05  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:27:08  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:28:11  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:28:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:28:57  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:29:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:29:15  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:30:19  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:30:21  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:30:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:31:26  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:31:28  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:32:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:32:19  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:32:32  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:32:38  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:33:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:33:06  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:33:18  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:33:35  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:33:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:33:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:34:03  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:34:22  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:34:22  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:34:40  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:35:19  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:35:43  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:36:02  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:36:04  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:36:05  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:36:39  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:36:42  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:36:46  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:37:04  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:37:20  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:37:21  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:37:48  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:38:48  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:38:50  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:39:22  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:39:30  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:39:53  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:39:55  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:40:33  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:40:55  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:41:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:41:32  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:41:51  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:41:53  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:41:53  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:41:57  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:42:16  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:42:35  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:42:55  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:42:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:43:00  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:43:38  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:44:00  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:44:02  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:44:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:44:15  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:44:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:44:57  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:44:58  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:45:01  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:45:04  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:45:38  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:45:39  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:45:40  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:45:56  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:46:00  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:46:06  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:46:18  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:46:45  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:47:05  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:47:09  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:47:45  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:48:05  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:48:12  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:48:22  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:48:36  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:48:45  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:49:01  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:49:14  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:49:32  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:49:37  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:50:12  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:50:12  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:50:16  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:51:19  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:52:17  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:52:21  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:52:37  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:52:57  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:53:17  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:53:26  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:54:30  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:55:32  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:55:44  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:56:01  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:56:24  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:56:24  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:56:29  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:56:31  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye
+02:56:35  ERROR     core.realtime_engine            Polygon IEX auth failed: Your plan doesn't include websocket access. Visit https://massive.com/pricing to upgrade.. Check POLYGON_API_KEY in your .env
+02:56:42  ERROR     websocket                       [WinError 10054] An existing connection was forcibly closed by the remote host - goodbye

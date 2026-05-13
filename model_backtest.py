@@ -36,32 +36,19 @@ ATR_PERIOD    = 14
 ATR_STOP_MULT = 1.5       # stop loss = 1.5 × ATR
 ATR_TP_MULT   = 2.5       # take profit = 2.5 × ATR
 MAX_HOLD_BARS = 10        # max bars to hold if neither SL nor TP hit
-INITIAL_CAPITAL = 10_000.0
-POSITION_SIZE_PCT = 0.02
 
 
 def load_models():
     """Load all stacking artifacts from checkpoints."""
     logger.info("Loading stacking models...")
-    xgb_blob  = joblib.load(CHECKPOINTS / "stacking_xgb.joblib")
-    lgb_blob  = joblib.load(CHECKPOINTS / "stacking_lgb.joblib")
-    cat_blob  = joblib.load(CHECKPOINTS / "stacking_cat.joblib")
-    meta_blob = joblib.load(CHECKPOINTS / "stacking_meta.joblib")
-
-    xgb = xgb_blob.get("model", xgb_blob) if isinstance(xgb_blob, dict) else xgb_blob
-    lgb = lgb_blob.get("model", lgb_blob) if isinstance(lgb_blob, dict) else lgb_blob
-    cat = cat_blob.get("model", cat_blob) if isinstance(cat_blob, dict) else cat_blob
-    meta = meta_blob.get("model", meta_blob) if isinstance(meta_blob, dict) else meta_blob
+    xgb  = joblib.load(CHECKPOINTS / "stacking_xgb.joblib")
+    lgb  = joblib.load(CHECKPOINTS / "stacking_lgb.joblib")
+    cat  = joblib.load(CHECKPOINTS / "stacking_cat.joblib")
+    meta = joblib.load(CHECKPOINTS / "stacking_meta.joblib")
 
     meta_json = json.loads((CHECKPOINTS / "stacking_meta.json").read_text())
-    feature_order = (
-        meta_json.get("feature_order")
-        or meta_json.get("features")
-        or (xgb_blob.get("features") if isinstance(xgb_blob, dict) else None)
-    )
-    if not feature_order:
-        raise KeyError("stacking_meta.json missing feature_order/features")
-    meta_kind = meta_json.get("meta_kind") or (meta_blob.get("kind") if isinstance(meta_blob, dict) else None) or "rf"
+    feature_order = meta_json["feature_order"]
+    meta_kind     = meta_json.get("meta_kind", "rf")
 
     logger.info(f"Models loaded. Meta: {meta_kind}, Features: {len(feature_order)}")
     return xgb, lgb, cat, meta, feature_order, meta_kind
@@ -125,54 +112,32 @@ def backtest_symbol(
     if not path.exists():
         return []
 
-    df_raw = pd.read_parquet(path)
-    numeric_cols = [c for c in df_raw.columns if pd.api.types.is_numeric_dtype(df_raw[c])]
-    if "close" not in df_raw.columns or "close" not in numeric_cols:
-        return []
+    df = pd.read_parquet(path)
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    df = df[numeric_cols].replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
 
-    # Keep prices sane: never fill prices with zeros. Skip rows with invalid/zero close.
-    close_series = (
-        pd.to_numeric(df_raw["close"], errors="coerce")
-        .replace([np.inf, -np.inf], np.nan)
-        .ffill()
-    )
-    valid_price_mask = close_series.notna() & np.isfinite(close_series) & (close_series > 0)
-    if valid_price_mask.sum() < 200:
-        return []
-
-    df_feat = df_raw.loc[valid_price_mask, numeric_cols].copy()
-    df_feat = df_feat.replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
-    close_series = close_series.loc[valid_price_mask].reset_index(drop=True)
-
-    if len(df_feat) < 200:
+    if len(df) < 200:
         return []
 
     # Align features to training order
-    missing = [c for c in feature_order if c not in df_feat.columns]
+    missing = [c for c in feature_order if c not in df.columns]
     for c in missing:
-        df_feat[c] = 0.0
-    X_all = df_feat[feature_order].copy()
+        df[c] = 0.0
+    X_all = df[feature_order].copy()
 
     # ATR for exit sizing
-    if "high" in df_raw.columns and "low" in df_raw.columns and "close" in df_raw.columns:
-        # ATR uses raw OHLC, but align to the valid price mask and keep NaNs (no zero-fill)
-        price_block = df_raw.loc[valid_price_mask, ["high", "low", "close"]].copy()
-        for col in ("high", "low", "close"):
-            price_block[col] = (
-                pd.to_numeric(price_block[col], errors="coerce")
-                .replace([np.inf, -np.inf], np.nan)
-                .ffill()
-            )
-        atr = compute_atr(price_block).reset_index(drop=True)
+    if "high" in df.columns and "low" in df.columns and "close" in df.columns:
+        atr = compute_atr(df)
     else:
-        atr = (close_series.pct_change().rolling(14).std() * close_series).fillna(0.0)
+        atr = pd.Series(df["close"].pct_change().rolling(14).std() * df["close"]
+                        if "close" in df.columns else 0.01, index=df.index)
 
     # Use last 20% as test set (same as training holdout)
-    n = len(df_feat)
+    n = len(df)
     test_start = int(n * 0.80)
     X_test = X_all.iloc[test_start:].reset_index(drop=True)
-    close_test = close_series.iloc[test_start:].reset_index(drop=True)
-    atr_test = atr.iloc[test_start:].reset_index(drop=True) if isinstance(atr, pd.Series) else pd.Series(atr)[test_start:].reset_index(drop=True)
+    df_test = df.iloc[test_start:].reset_index(drop=True)
+    atr_test = atr.iloc[test_start:].reset_index(drop=True)
 
     if len(X_test) < horizon + MAX_HOLD_BARS + 1:
         return []
@@ -189,22 +154,21 @@ def backtest_symbol(
     preds, proba = meta_predict(meta, X_meta, meta_kind)
 
     trades = []
-    close = close_test.values.astype(float)
+    close = df_test["close"].values if "close" in df_test.columns else None
+    if close is None:
+        return []
 
     for i in range(len(X_test) - MAX_HOLD_BARS - 1):
         if proba[i] < confidence_threshold:
             continue
 
         entry_price = close[i]
-        if not np.isfinite(entry_price) or entry_price <= 0:
-            continue
         atr_val     = atr_test.iloc[i] if not np.isnan(atr_test.iloc[i]) else entry_price * 0.01
-        if (not np.isfinite(atr_val)) or atr_val <= 0:
-            atr_val = entry_price * 0.01
 
-        # Determine direction from forward return
-        fwd_idx = min(i + horizon, len(close) - 1)
-        direction = "long" if close[fwd_idx] > entry_price else "short"
+        # Determine direction from recent momentum (no lookahead)
+        # Use last 3 bars: if price trending up → long, else short
+        lookback = min(3, i)
+        direction = "long" if close[i] > close[i - lookback] else "short"
 
         stop_loss   = atr_val * ATR_STOP_MULT
         take_profit = atr_val * ATR_TP_MULT
@@ -239,18 +203,11 @@ def backtest_symbol(
         else:
             gross_pnl = (entry_price - exit_price) / entry_price
 
-        if (not np.isfinite(gross_pnl)) or abs(float(gross_pnl)) > 5.0:
-            # Guard against zero/near-zero prices or corrupted bars causing nonsense PnL.
-            continue
-
         net_pnl = gross_pnl - 2 * fee  # entry + exit fee
-        if not np.isfinite(net_pnl) or net_pnl <= -0.99:
-            continue
 
         trades.append({
             "symbol":      symbol,
             "bar":         i,
-            "exit_bar":    min(i + MAX_HOLD_BARS, len(close) - 1) if exit_reason == "timeout" else j,
             "direction":   direction,
             "confidence":  round(float(proba[i]), 4),
             "entry_price": round(float(entry_price), 6),
@@ -261,35 +218,6 @@ def backtest_symbol(
         })
 
     return trades
-
-
-def simulate_portfolio(
-    trades_df: pd.DataFrame,
-    *,
-    initial_capital: float,
-    position_size_pct: float,
-) -> tuple[float, float]:
-    equity = float(initial_capital)
-    peak_equity = float(initial_capital)
-    max_drawdown_pct = 0.0
-
-    ordered = trades_df.sort_values(["exit_bar", "bar", "symbol"]).reset_index(drop=True)
-    for _, trade in ordered.iterrows():
-        trade_return = float(trade["net_pnl"])
-        if not np.isfinite(trade_return):
-            continue
-        position_notional = equity * position_size_pct
-        pnl_cash = position_notional * trade_return
-        equity += pnl_cash
-        if equity > peak_equity:
-            peak_equity = equity
-        if peak_equity > 0:
-            drawdown_pct = (peak_equity - equity) / peak_equity * 100.0
-            if np.isfinite(drawdown_pct):
-                max_drawdown_pct = max(max_drawdown_pct, float(drawdown_pct))
-
-    total_pnl_pct = ((equity / initial_capital) - 1.0) * 100.0 if initial_capital > 0 else 0.0
-    return total_pnl_pct, max_drawdown_pct
 
 
 def run_backtest(horizon: int, confidence: float, fee: float, max_symbols: int):
@@ -323,13 +251,14 @@ def run_backtest(horizon: int, confidence: float, fee: float, max_symbols: int):
     win_rate   = len(winners) / total * 100
     avg_win    = winners["net_pnl"].mean() * 100 if len(winners) else 0
     avg_loss   = losers["net_pnl"].mean()  * 100 if len(losers)  else 0
+    total_pnl  = df["net_pnl"].sum() * 100
     pf         = abs(winners["net_pnl"].sum() / losers["net_pnl"].sum()) if len(losers) else 999
 
-    total_pnl, max_dd = simulate_portfolio(
-        df,
-        initial_capital=INITIAL_CAPITAL,
-        position_size_pct=POSITION_SIZE_PCT,
-    )
+    # Equity curve & drawdown
+    equity = np.cumprod(1 + df["net_pnl"].values)
+    peak   = np.maximum.accumulate(equity)
+    dd     = (peak - equity) / peak * 100
+    max_dd = dd.max()
 
     # Exit reason breakdown
     exit_counts = df["exit_reason"].value_counts().to_dict()
@@ -347,9 +276,7 @@ def run_backtest(horizon: int, confidence: float, fee: float, max_symbols: int):
     print(f"  Avg win          : +{avg_win:.3f}%")
     print(f"  Avg loss         : {avg_loss:.3f}%")
     print(f"  Profit factor    : {pf:.2f}")
-    print(f"  Starting capital : ${INITIAL_CAPITAL:,.2f}")
-    print(f"  Position size    : {POSITION_SIZE_PCT*100:.2f}% of equity per trade")
-    print(f"  Total P&L        : {total_pnl:+.2f}%  (account-based)")
+    print(f"  Total P&L        : {total_pnl:+.2f}%  (sum across all symbols)")
     print(f"  Max drawdown     : {max_dd:.2f}%")
     print()
     print(f"  Exit reasons     : {exit_counts}")
@@ -366,8 +293,6 @@ def run_backtest(horizon: int, confidence: float, fee: float, max_symbols: int):
         "avg_win_pct": round(avg_win, 4),
         "avg_loss_pct": round(avg_loss, 4),
         "profit_factor": round(pf, 3),
-        "initial_capital": INITIAL_CAPITAL,
-        "position_size_pct": POSITION_SIZE_PCT,
         "total_pnl_pct": round(total_pnl, 4),
         "max_drawdown_pct": round(max_dd, 2),
         "exit_reasons": exit_counts,

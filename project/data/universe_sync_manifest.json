@@ -1,12 +1,12 @@
 {
   "status": "ok",
-  "generated_at": "2026-04-08T19:52:42.538829+00:00",
+  "generated_at": "2026-04-22T20:37:25.328127+00:00",
   "us_symbols": 6000,
-  "nse_symbols": 2125,
+  "nse_symbols": 2175,
   "crypto_symbols": 800,
-  "binance_crypto_symbols": 721,
-  "bybit_crypto_symbols": 551,
-  "shared_crypto_symbols": 316,
+  "binance_crypto_symbols": 723,
+  "bybit_crypto_symbols": 548,
+  "shared_crypto_symbols": 317,
   "files": {
     "us": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\universe_us_official.txt",
     "nse": "C:\\Users\\Sidhnath\\Downloads\\macro_intelligence_complete\\project\\data\\universe_nse_official.txt",
