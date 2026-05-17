@@ -21,6 +21,9 @@ from options.black_scholes import price_option, implied_volatility, scenario_pnl
 from options.iv_rank import IVRankCalculator, iv_rank_filter
 from options.strike_selector import StrikeSelector, delta_adjusted_kelly
 from options.options_trader import OptionsTrader, run_options_cron
+from options.backtester import OptionsBacktester, BacktestResults
+from options.universe import LiquidUniverse, LIQUID_UNIVERSE
+from options.tradier_client import TradierClient, get_options_chain_yf_compat
 
 __all__ = [
     'price_option',
@@ -32,4 +35,10 @@ __all__ = [
     'delta_adjusted_kelly',
     'OptionsTrader',
     'run_options_cron',
+    'OptionsBacktester',
+    'BacktestResults',
+    'LiquidUniverse',
+    'LIQUID_UNIVERSE',
+    'TradierClient',
+    'get_options_chain_yf_compat',
 ]

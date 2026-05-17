@@ -43,6 +43,7 @@ import pandas as pd
 from options.black_scholes import price_option, scenario_pnl, print_scenario_table
 from options.iv_rank import IVRankCalculator
 from options.strike_selector import StrikeSelector, ContractSpec, delta_adjusted_kelly
+from options.universe import LiquidUniverse
 
 logger = logging.getLogger(__name__)
 
@@ -405,12 +406,14 @@ class OptionsTrader:
         self.ml_reader        = MLSignalReader(ml_cache_path)
         self.iv_calc          = IVRankCalculator(max_ivr=max_ivr)
         self.strike_selector  = StrikeSelector(use_live_chain=True)
+        self.universe         = LiquidUniverse()   # liquid options universe filter
 
         self._positions: List[OptionsPosition] = []
         self._load_positions()
 
         logger.info(f"OptionsTrader initialised | portfolio=${portfolio_value:,.0f} | "
-                    f"open positions={len(self.open_positions)}")
+                    f"open positions={len(self.open_positions)} | "
+                    f"universe={len(self.universe)} liquid symbols")
 
     # ── Position persistence ──────────────────────────────────────────────
 
@@ -532,6 +535,13 @@ class OptionsTrader:
             if ml_conf < MIN_ML_CONFIDENCE:
                 continue
 
+            # ── Liquid universe gate ──────────────────────────────────────
+            # Skip small-caps and illiquid names — their options chains have
+            # wide spreads and low OI which would negate any signal edge.
+            if not self.universe.in_universe(symbol):
+                logger.debug(f"Skipping {symbol} — not in liquid options universe")
+                continue
+
             has_catalyst = cat_score >= MIN_CATALYST_SCORE
 
             # Tier A: both signals
@@ -559,6 +569,10 @@ class OptionsTrader:
         # Tier C: catalyst-only symbols not in screener
         for symbol, cat_score in catalyst_scores.items():
             if symbol in seen or cat_score < 0.65:
+                continue
+            # apply universe filter to Tier C too
+            if not self.universe.in_universe(symbol):
+                logger.debug(f"Skipping Tier C {symbol} — not in liquid options universe")
                 continue
             candidates.append({
                 'symbol':         symbol,
