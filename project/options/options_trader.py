@@ -121,7 +121,7 @@ class CatalystReader:
         if not self.db_path.exists():
             logger.warning(f"Catalyst DB not found: {db_path}")
 
-    def get_catalyst_scores(self, lookback_hours: int = 24) -> Dict[str, float]:
+    def get_catalyst_scores(self, lookback_hours: int = 168) -> Dict[str, float]:
         """
         Get catalyst scores for symbols with recent activity.
         Returns {symbol: score} where score is 0-1.
@@ -148,7 +148,7 @@ class CatalystReader:
             # Lookback window — for options we want signals from last 48h
             # (catalyst may fire a day before the move)
             cutoff_primary = (datetime.now() - timedelta(hours=lookback_hours)).isoformat()
-            cutoff_wide    = (datetime.now() - timedelta(hours=48)).isoformat()
+            cutoff_wide    = (datetime.now() - timedelta(hours=lookback_hours)).isoformat()
 
             cursor.execute(f"""
                 SELECT
