@@ -231,6 +231,8 @@ class OptionsBacktester:
     def _clean(self) -> None:
         """Remove obviously bad rows."""
         df = self.df
+        n0 = len(df)
+
         # numeric coerce
         for col in ["underlying", "strike", "c_iv", "c_delta", "c_bid", "c_ask"]:
             if col in df.columns:
@@ -238,18 +240,33 @@ class OptionsBacktester:
 
         # remove NaN fundamentals
         df.dropna(subset=["underlying", "strike", "c_iv"], inplace=True)
+        logger.debug(f"  After NaN drop: {len(df):,} (removed {n0-len(df):,})")
 
         # remove zero/negative prices
+        n1 = len(df)
         df = df[(df["underlying"] > 0) & (df["strike"] > 0)]
         df = df[(df["c_bid"] >= 0) & (df["c_ask"] > 0)]
+        logger.debug(f"  After price filter: {len(df):,} (removed {n1-len(df):,})")
 
         # remove IV artefacts (IV > 500% is a data error)
+        # Note: Kaggle SPY data may store IV as decimal (0.25 = 25%) or percent (25.0)
+        # detect which format: if median > 2.0, it's in percent form — divide by 100
+        n2 = len(df)
+        iv_median = df["c_iv"].median()
+        if iv_median > 2.0:
+            logger.info(f"  IV appears to be in percent form (median={iv_median:.1f}) — converting to decimal")
+            df = df.copy()
+            df["c_iv"] = df["c_iv"] / 100.0
         df = df[(df["c_iv"] > 0.01) & (df["c_iv"] < 5.0)]
+        logger.debug(f"  After IV filter: {len(df):,} (removed {n2-len(df):,})")
 
-        # remove rows where ask/bid spread is > 50% of ask (illiquid junk)
+        # remove rows where ask/bid spread is > 80% of ask
+        # (relaxed from 50% — 2010-era options had wider spreads)
+        n3 = len(df)
         if "c_bid" in df.columns:
             spread_pct = (df["c_ask"] - df["c_bid"]) / df["c_ask"].clip(lower=0.01)
-            df = df[spread_pct < 0.50]
+            df = df[spread_pct < 0.80]
+        logger.debug(f"  After spread filter: {len(df):,} (removed {n3-len(df):,})")
 
         self.df = df.reset_index(drop=True)
 
@@ -306,10 +323,21 @@ class OptionsBacktester:
         dates = sorted(self.df["quote_date"].unique())
         dates = [d for d in dates if start <= str(d.date()) <= end]
 
-        # get daily underlying price
+        if not dates:
+            data_start = str(self.df["quote_date"].min().date())
+            data_end   = str(self.df["quote_date"].max().date())
+            logger.error(
+                f"No trading dates found in range {start} → {end}.\n"
+                f"  Dataset covers: {data_start} → {data_end}\n"
+                f"  Fix: pass --start {data_start[:7]}-01 --end {data_end}"
+            )
+            return []
+
+        # get daily underlying price — use the first row per day (all rows on
+        # same day have the same underlying_last, so any agg works; first is fastest)
         daily_price = (
             self.df.groupby("quote_date")["underlying"]
-            .median()
+            .first()      # not median — underlying_last is same for all rows on a date
             .sort_index()
         )
 
@@ -529,8 +557,11 @@ class OptionsBacktester:
                 results.signals_blocked_iv += 1
                 continue
 
-            # 3. Get underlying price
-            daily_px = self.df[self.df["quote_date"] == signal_date]["underlying"].median()
+            # 3. Get underlying price — take first row (all rows same day have same value)
+            day_rows = self.df[self.df["quote_date"] == signal_date]
+            if day_rows.empty:
+                continue
+            daily_px = float(day_rows["underlying"].iloc[0])
             if pd.isna(daily_px) or daily_px <= 0:
                 continue
 
@@ -579,7 +610,8 @@ class OptionsBacktester:
 
                 # record underlying move for closed trades
                 entry_px = trade.entry_stock
-                exit_chain = self.df[self.df["quote_date"] == last_date]["underlying"].median()
+                exit_rows  = self.df[self.df["quote_date"] == last_date]
+        exit_chain = float(exit_rows["underlying"].iloc[0]) if not exit_rows.empty else float("nan")
                 if not pd.isna(exit_chain):
                     trade.underlying_move_pct = (exit_chain - entry_px) / entry_px * 100
 
