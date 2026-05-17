@@ -424,8 +424,19 @@ class StrikeSelector:
         best_pricing  = None
         best_breakdown = {}
 
+        # Compute median IV from chain to detect yfinance artifacts
+        chain_iv_median = float(chain['impliedVolatility'].median())
+
         for _, row in chain.iterrows():
             try:
+                raw_iv = float(row['impliedVolatility'])
+                # Reject rows where IV is > 3× the chain median — yfinance artifact
+                if raw_iv > chain_iv_median * 3.0 and raw_iv > 1.0:
+                    logger.debug(f"Skipping strike {row.get('strike')} — IV artifact ({raw_iv:.2f})")
+                    continue
+                # Also cap IV at a sanity ceiling of 200%
+                if raw_iv > 2.0:
+                    continue
                 score, breakdown, pricing = self._score_contract(
                     row, S, expected_move_pct, dte, direction
                 )

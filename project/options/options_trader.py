@@ -126,69 +126,102 @@ class CatalystReader:
         Get catalyst scores for symbols with recent activity.
         Returns {symbol: score} where score is 0-1.
 
-        Reads from your existing catalyst.db schema.
-        Adjust the SQL to match your actual table/column names.
+        Schema (confirmed from catalyst.db inspection):
+          table  : catalyst_events
+          ticker : ticker
+          score  : strength  (0.0 - 1.0)
+          time   : ingested_at
+          extra  : event_type, source, headline, payload
+
+        Also reads option_baselines for UOA confirmation bonus.
         """
         if not self.db_path.exists():
             return {}
 
-        cutoff = (datetime.now() - timedelta(hours=lookback_hours)).isoformat()
-
         scores: Dict[str, float] = {}
 
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn   = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
 
-            # --- Try common table schemas ---
-            # Query 1: look for a signals/catalyst table with score column
-            queries = [
-                # Standard schema with score
-                f"""
-                SELECT symbol, MAX(score) as score
-                FROM catalyst_signals
-                WHERE timestamp >= '{cutoff}'
-                  AND score IS NOT NULL
-                GROUP BY symbol
-                """,
-                # Alternate: signals table
-                f"""
-                SELECT ticker as symbol, MAX(score) as score
-                FROM signals
-                WHERE created_at >= '{cutoff}'
-                  AND score IS NOT NULL
-                GROUP BY ticker
-                """,
-                # Fallback: raw events, compute score from event count
-                f"""
-                SELECT symbol, COUNT(*) * 0.15 as score
-                FROM events
-                WHERE timestamp >= '{cutoff}'
-                GROUP BY symbol
-                HAVING score <= 1.0
-                """,
-            ]
+            # ── Primary: catalyst_events with strength score ───────────────
+            # Lookback window — for options we want signals from last 48h
+            # (catalyst may fire a day before the move)
+            cutoff_primary = (datetime.now() - timedelta(hours=lookback_hours)).isoformat()
+            cutoff_wide    = (datetime.now() - timedelta(hours=48)).isoformat()
 
-            for q in queries:
-                try:
-                    cursor.execute(q)
-                    rows = cursor.fetchall()
-                    if rows:
-                        for row in rows:
-                            symbol = str(row[0]).upper().strip()
-                            score  = float(row[1] or 0)
-                            if symbol and 0 < score <= 1.0:
-                                scores[symbol] = score
-                        break
-                except sqlite3.OperationalError:
-                    continue  # table doesn't exist, try next query
+            cursor.execute(f"""
+                SELECT
+                    ticker,
+                    MAX(strength)                          AS max_strength,
+                    COUNT(*)                               AS event_count,
+                    GROUP_CONCAT(DISTINCT event_type)      AS event_types,
+                    GROUP_CONCAT(DISTINCT source)          AS sources
+                FROM catalyst_events
+                WHERE ingested_at >= ?
+                  AND strength IS NOT NULL
+                  AND strength > 0
+                GROUP BY ticker
+                ORDER BY max_strength DESC
+            """, (cutoff_wide,))
+
+            rows = cursor.fetchall()
+            for row in rows:
+                ticker      = str(row[0]).upper().strip()
+                strength    = float(row[1] or 0)
+                count       = int(row[2] or 1)
+                event_types = str(row[3] or '')
+                sources     = str(row[4] or '')
+
+                if not ticker or strength <= 0:
+                    continue
+
+                # Boost score for multiple corroborating events
+                count_bonus = min(0.10, (count - 1) * 0.03)
+
+                # Boost for high-conviction event types
+                type_bonus = 0.0
+                if 'insider' in event_types.lower() or 'form4' in event_types.lower():
+                    type_bonus += 0.05
+                if 'clinical' in event_types.lower() or 'trial' in event_types.lower():
+                    type_bonus += 0.05
+                if 'edgar' in event_types.lower() or 'sec' in event_types.lower():
+                    type_bonus += 0.03
+
+                final_score = min(1.0, strength + count_bonus + type_bonus)
+                scores[ticker] = round(final_score, 4)
+
+            # ── UOA bonus: option_baselines unusual activity ───────────────
+            # If call volume is anomalously high vs baseline, add a small boost
+            try:
+                cursor.execute("""
+                    SELECT ticker,
+                           call_volume,
+                           put_volume
+                    FROM option_baselines
+                    WHERE as_of_date >= date('now', '-2 days')
+                """)
+                uoa_rows = cursor.fetchall()
+                for urow in uoa_rows:
+                    ticker     = str(urow[0]).upper().strip()
+                    call_vol   = float(urow[1] or 0)
+                    put_vol    = float(urow[2] or 0)
+                    total      = call_vol + put_vol
+                    if total > 0 and call_vol / total > 0.65:
+                        # Unusual call skew — smart money buying calls
+                        if ticker in scores:
+                            scores[ticker] = min(1.0, scores[ticker] + 0.08)
+                        else:
+                            scores[ticker] = 0.55   # UOA-only signal
+            except sqlite3.OperationalError:
+                pass  # option_baselines may be empty
 
             conn.close()
 
         except Exception as e:
             logger.error(f"Catalyst DB read failed: {e}")
 
-        logger.info(f"Catalyst scores loaded: {len(scores)} symbols")
+        logger.info(f"Catalyst scores loaded: {len(scores)} symbols with activity")
         return scores
 
     def get_table_names(self) -> List[str]:
@@ -220,22 +253,66 @@ class MLSignalReader:
     def __init__(self, signals_cache_path: Optional[str] = None):
         self.cache_path = Path(signals_cache_path) if signals_cache_path else None
 
+    # Common locations where your pipeline writes signal output
+    _SIGNAL_SEARCH_PATHS = [
+        "data/signals.json",
+        "data/runtime_state.json",
+        "data/latest_signals.json",
+        "logs/signals.json",
+        "signals.json",
+    ]
+
     def get_ml_signals(self) -> Dict[str, dict]:
         """
         Returns {symbol: {'confidence': float, 'signal': str, 'conviction': float}}
-        Reads from the SIGNALS global in signal_generator or a JSON cache.
+        Reads from the SIGNALS global in signal_generator or a JSON/JSONL cache.
         """
-        # Try reading from pipeline cache first
+        # Try explicit cache path first
         if self.cache_path and self.cache_path.exists():
             try:
                 with open(self.cache_path) as f:
                     raw = json.load(f)
-                logger.info(f"ML signals loaded from {self.cache_path}: {len(raw)} symbols")
-                return {s['symbol']: s for s in raw if s.get('signal') == 'buy'}
+                # Handle both list and dict formats
+                if isinstance(raw, list):
+                    result = {s['symbol']: s for s in raw if s.get('signal') == 'buy'}
+                elif isinstance(raw, dict):
+                    # runtime_state.json may have signals nested
+                    signals_list = raw.get('signals', raw.get('buy_signals', []))
+                    result = {s['symbol']: s for s in signals_list if s.get('signal') == 'buy'}
+                else:
+                    result = {}
+                logger.info(f"ML signals loaded from {self.cache_path}: {len(result)} buy signals")
+                return result
             except Exception as e:
                 logger.warning(f"ML cache read failed: {e}")
 
-        # Try importing directly from signal_generator
+        # Search common paths relative to the project directory
+        project_root = Path(__file__).parents[1]
+        for rel_path in self._SIGNAL_SEARCH_PATHS:
+            candidate = project_root / rel_path
+            if candidate.exists():
+                try:
+                    with open(candidate) as f:
+                        content = f.read().strip()
+                    # Handle JSONL format (one JSON object per line)
+                    if content.startswith('{'):
+                        raw = json.loads(content)
+                        signals_list = raw.get('signals', raw.get('buy_signals', []))
+                        if isinstance(signals_list, list):
+                            result = {s['symbol']: s for s in signals_list if s.get('signal') == 'buy'}
+                            if result:
+                                logger.info(f"ML signals from {candidate}: {len(result)} buy signals")
+                                return result
+                    elif content.startswith('['):
+                        raw = json.loads(content)
+                        result = {s['symbol']: s for s in raw if s.get('signal') == 'buy'}
+                        if result:
+                            logger.info(f"ML signals from {candidate}: {len(result)} buy signals")
+                            return result
+                except Exception as e:
+                    logger.debug(f"Signal read failed at {candidate}: {e}")
+
+        # Try importing directly from signal_generator (works if cron just ran)
         try:
             import sys
             sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -244,11 +321,13 @@ class MLSignalReader:
             for sig in SIGNALS:
                 if sig.get('signal') == 'buy' and sig.get('confidence', 0) >= MIN_ML_CONFIDENCE:
                     result[sig['symbol']] = sig
-            logger.info(f"ML signals from live generator: {len(result)} buy signals")
-            return result
+            if result:
+                logger.info(f"ML signals from live generator: {len(result)} buy signals")
+                return result
         except Exception as e:
             logger.debug(f"Direct ML import failed: {e}")
 
+        logger.info("ML signals: 0 — pipeline hasn't run yet today or no buy signals")
         return {}
 
 

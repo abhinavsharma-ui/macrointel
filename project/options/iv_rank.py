@@ -241,7 +241,9 @@ class IVRankCalculator:
             return "IV rank acceptable — reasonable premium to pay"
         if ivr > 80:
             return "IV near 52w high — you'd be buying at the top; wait for IV crush"
-        return f"IVR={ivr:.0f}% too high — market already pricing in the move"
+        if ivp > 70 and ivr <= 50:
+            return f"IVP={ivp:.0f}% elevated — IV has been low most of the year, rising now"
+        return f"IVR={ivr:.0f}% / IVP={ivp:.0f}% too high — market already pricing in the move"
 
     def get_iv_rank(self, symbol: str) -> Optional[IVRankResult]:
         """
