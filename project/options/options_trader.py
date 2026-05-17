@@ -253,81 +253,128 @@ class MLSignalReader:
     def __init__(self, signals_cache_path: Optional[str] = None):
         self.cache_path = Path(signals_cache_path) if signals_cache_path else None
 
-    # Common locations where your pipeline writes signal output
-    _SIGNAL_SEARCH_PATHS = [
-        "data/signals.json",
-        "data/runtime_state.json",
-        "data/latest_signals.json",
-        "logs/signals.json",
-        "signals.json",
-    ]
+    # Primary: screener CSV output (written daily by your live pipeline)
+    # Format: rank,ticker,close,momentum_1m,momentum_3m,avg_vol_20d,dollar_vol,
+    #         vol_score,atr_pct,momentum_1m_rank,momentum_3m_rank,
+    #         vol_score_rank,atr_pct_rank,score
+    SCREENER_OUTPUT_DIR = Path("/home/abhinavsharma1359/screener/output")
+    SCREENER_FILENAME   = "us_stocks_top125.csv"
+
+    def _load_screener_csv(self) -> Dict[str, dict]:
+        """
+        Read the most recent us_stocks_top125.csv from the screener output dir.
+        Returns {ticker: signal_dict} for all tickers with score >= MIN_ML_CONFIDENCE.
+        The 'close' column gives us the current price — no extra yfinance call needed.
+        """
+        if not self.SCREENER_OUTPUT_DIR.exists():
+            return {}
+
+        # Find the most recent dated subdirectory
+        dated_dirs = sorted(
+            [d for d in self.SCREENER_OUTPUT_DIR.iterdir() if d.is_dir()],
+            reverse=True
+        )
+        if not dated_dirs:
+            return {}
+
+        csv_path = dated_dirs[0] / self.SCREENER_FILENAME
+        if not csv_path.exists():
+            # Try second most recent in case today's hasn't been written yet
+            if len(dated_dirs) > 1:
+                csv_path = dated_dirs[1] / self.SCREENER_FILENAME
+            if not csv_path.exists():
+                return {}
+
+        try:
+            df = pd.read_csv(csv_path)
+            # Normalise column names
+            df.columns = [c.strip().lower() for c in df.columns]
+
+            required = {'ticker', 'score'}
+            if not required.issubset(set(df.columns)):
+                logger.warning(f"Screener CSV missing columns. Got: {list(df.columns)}")
+                return {}
+
+            result = {}
+            for _, row in df.iterrows():
+                ticker     = str(row['ticker']).upper().strip()
+                score      = float(row.get('score', 0))
+                close      = float(row.get('close', 0))
+
+                if score < MIN_ML_CONFIDENCE:
+                    continue
+
+                # Map screener columns to the signal dict format the rest of the
+                # system expects — conviction is scaled from score (0-1 → 1-10)
+                result[ticker] = {
+                    'symbol':          ticker,
+                    'signal':          'buy',
+                    'confidence':      round(score, 4),
+                    'conviction_score': round(score * 10, 1),
+                    'entry_price':     close,
+                    'momentum_1m':     float(row.get('momentum_1m', 0)),
+                    'momentum_3m':     float(row.get('momentum_3m', 0)),
+                    'vol_score':       float(row.get('vol_score', 0)),
+                    'atr_pct':         float(row.get('atr_pct', 0)),
+                    'rank':            int(row.get('rank', 999)),
+                    'source':          f"screener:{csv_path.parent.name}",
+                }
+
+            logger.info(f"Screener signals loaded from {csv_path}: "
+                        f"{len(result)} symbols above threshold "
+                        f"(date: {dated_dirs[0].name})")
+            return result
+
+        except Exception as e:
+            logger.warning(f"Screener CSV read failed: {e}")
+            return {}
 
     def get_ml_signals(self) -> Dict[str, dict]:
         """
-        Returns {symbol: {'confidence': float, 'signal': str, 'conviction': float}}
-        Reads from the SIGNALS global in signal_generator or a JSON/JSONL cache.
+        Returns {symbol: signal_dict} for buy signals.
+        Priority:
+          1. Screener CSV  (/home/.../screener/output/<date>/us_stocks_top125.csv)
+          2. Explicit cache path (if provided at init)
+          3. Live signal_generator SIGNALS global (if pipeline is running)
         """
-        # Try explicit cache path first
+        # 1. Primary: screener CSV
+        result = self._load_screener_csv()
+        if result:
+            return result
+
+        # 2. Explicit cache path
         if self.cache_path and self.cache_path.exists():
             try:
                 with open(self.cache_path) as f:
                     raw = json.load(f)
-                # Handle both list and dict formats
                 if isinstance(raw, list):
                     result = {s['symbol']: s for s in raw if s.get('signal') == 'buy'}
                 elif isinstance(raw, dict):
-                    # runtime_state.json may have signals nested
                     signals_list = raw.get('signals', raw.get('buy_signals', []))
                     result = {s['symbol']: s for s in signals_list if s.get('signal') == 'buy'}
-                else:
-                    result = {}
-                logger.info(f"ML signals loaded from {self.cache_path}: {len(result)} buy signals")
-                return result
+                if result:
+                    logger.info(f"ML signals from cache {self.cache_path}: {len(result)}")
+                    return result
             except Exception as e:
                 logger.warning(f"ML cache read failed: {e}")
 
-        # Search common paths relative to the project directory
-        project_root = Path(__file__).parents[1]
-        for rel_path in self._SIGNAL_SEARCH_PATHS:
-            candidate = project_root / rel_path
-            if candidate.exists():
-                try:
-                    with open(candidate) as f:
-                        content = f.read().strip()
-                    # Handle JSONL format (one JSON object per line)
-                    if content.startswith('{'):
-                        raw = json.loads(content)
-                        signals_list = raw.get('signals', raw.get('buy_signals', []))
-                        if isinstance(signals_list, list):
-                            result = {s['symbol']: s for s in signals_list if s.get('signal') == 'buy'}
-                            if result:
-                                logger.info(f"ML signals from {candidate}: {len(result)} buy signals")
-                                return result
-                    elif content.startswith('['):
-                        raw = json.loads(content)
-                        result = {s['symbol']: s for s in raw if s.get('signal') == 'buy'}
-                        if result:
-                            logger.info(f"ML signals from {candidate}: {len(result)} buy signals")
-                            return result
-                except Exception as e:
-                    logger.debug(f"Signal read failed at {candidate}: {e}")
-
-        # Try importing directly from signal_generator (works if cron just ran)
+        # 3. Live signal_generator (if cron just ran in same process)
         try:
             import sys
             sys.path.insert(0, str(Path(__file__).parents[1]))
             from pipeline.signal_generator import SIGNALS
-            result = {}
-            for sig in SIGNALS:
-                if sig.get('signal') == 'buy' and sig.get('confidence', 0) >= MIN_ML_CONFIDENCE:
-                    result[sig['symbol']] = sig
+            result = {
+                sig['symbol']: sig for sig in SIGNALS
+                if sig.get('signal') == 'buy'
+                and sig.get('confidence', 0) >= MIN_ML_CONFIDENCE
+            }
             if result:
-                logger.info(f"ML signals from live generator: {len(result)} buy signals")
+                logger.info(f"ML signals from live generator: {len(result)}")
                 return result
         except Exception as e:
             logger.debug(f"Direct ML import failed: {e}")
 
-        logger.info("ML signals: 0 — pipeline hasn't run yet today or no buy signals")
+        logger.info("ML signals: 0 — screener hasn't run today or no qualifying signals")
         return {}
 
 
@@ -509,8 +556,8 @@ class OptionsTrader:
                 continue
 
             # 3. IV rank gate
-            iv_result = self.iv_calc.get_iv_rank(symbol)
-            iv_rank   = iv_result.iv_rank if iv_result else 50.0
+            iv_result  = self.iv_calc.get_iv_rank(symbol)
+            iv_rank    = iv_result.iv_rank if iv_result else 50.0
             current_iv = iv_result.current_iv if iv_result else 0.35
 
             if iv_result and not iv_result.buy_signal:
@@ -523,15 +570,19 @@ class OptionsTrader:
                 print(f"⛔ {symbol}: combined score {combined:.2f} < {MIN_COMBINED_SCORE}")
                 continue
 
-            # 5. Select contract
-            try:
-                import yfinance as yf
-                info = yf.Ticker(symbol).fast_info
-                S    = getattr(info, 'last_price', None) or getattr(info, 'regularMarketPrice', None)
-                if not S or S <= 0:
-                    logger.warning(f"{symbol}: can't get current price")
-                    continue
-            except Exception:
+            # 5. Get current price — use screener's close price if available
+            #    (avoids redundant yfinance call since screener already fetched it)
+            S = float(ml.get('entry_price', 0))
+            if S <= 0:
+                try:
+                    import yfinance as yf
+                    info = yf.Ticker(symbol).fast_info
+                    S    = getattr(info, 'last_price', None) or getattr(info, 'regularMarketPrice', None)
+                    S    = float(S) if S else 0
+                except Exception:
+                    pass
+            if not S or S <= 0:
+                logger.warning(f"{symbol}: can't get current price")
                 continue
 
             contract = self.strike_selector.select(
