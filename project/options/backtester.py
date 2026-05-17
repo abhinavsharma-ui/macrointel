@@ -75,9 +75,11 @@ MIN_DELTA             = 0.20
 MAX_DELTA             = 0.55
 
 # Expiry selection
-TARGET_DTE            = 12           # 8-day hold + 4-day buffer
-MIN_DTE               = 7
-MAX_DTE               = 21
+# NOTE: 2010-2013 SPY had monthly options only — nearest expiry is often 20-35 DTE.
+# Widen MAX_DTE to 45 so we don't filter out all available contracts.
+TARGET_DTE            = 20           # relaxed for monthly-only era
+MIN_DTE               = 5
+MAX_DTE               = 45
 
 # Exit rules
 PROFIT_TAKE_MULT      = 2.0          # 2× premium → take profit
@@ -201,6 +203,19 @@ class OptionsBacktester:
         logger.info(f"  Date range: {self.df['quote_date'].min()} → {self.df['quote_date'].max()}")
         logger.info(f"  Unique expiries: {self.df['expire_date'].nunique()}")
         logger.info(f"  Strikes: {self.df['strike'].min():.0f} – {self.df['strike'].max():.0f}")
+        logger.info(f"  Columns: {list(self.df.columns)}")
+
+        # Show DTE distribution for first quote date — critical for tuning MAX_DTE
+        first_date = self.df["quote_date"].min()
+        sample = self.df[self.df["quote_date"] == first_date].copy()
+        sample["dte"] = (sample["expire_date"] - first_date).dt.days
+        dte_vals = sorted(sample["dte"].unique())
+        logger.info(f"  Sample DTEs on {first_date.date()}: {dte_vals[:10]}")
+
+        # Check if delta column has real values
+        if "c_delta" in self.df.columns:
+            nonzero_delta = (self.df["c_delta"].abs() > 0.01).sum()
+            logger.info(f"  Delta non-zero rows: {nonzero_delta:,} / {len(self.df):,}")
 
     def _normalise_columns(self) -> None:
         """Map whatever column names the CSV has → our standard names."""
@@ -389,8 +404,15 @@ class OptionsBacktester:
         chain["dte"] = (chain["expire_date"] - quote_date).dt.days
 
         # filter DTE window
+        n_before_dte = len(chain)
         chain = chain[(chain["dte"] >= MIN_DTE) & (chain["dte"] <= MAX_DTE)]
         if chain.empty:
+            # diagnostic: show what DTEs were available
+            all_chain = self.df[self.df["quote_date"] == quote_date].copy()
+            all_chain["dte"] = (all_chain["expire_date"] - quote_date).dt.days
+            available_dtes = sorted(all_chain["dte"].unique())
+            logger.debug(f"  {str(quote_date.date())}: {n_before_dte} contracts, "
+                         f"no DTE in [{MIN_DTE},{MAX_DTE}]. Available: {available_dtes[:8]}")
             return None
 
         # target strike: OTM by 60% of 7% expected move
@@ -403,12 +425,23 @@ class OptionsBacktester:
         # compute mid price
         chain = chain.copy()
         chain["mid"] = (chain["c_bid"] + chain["c_ask"]) / 2.0
-        chain = chain[chain["mid"] > 0.05]   # skip sub-nickel contracts
+        chain = chain[chain["mid"] > 0.01]   # skip sub-penny contracts (relaxed from 0.05)
 
-        # delta filter
-        if "c_delta" in chain.columns and direction == "call":
-            delta_col = chain["c_delta"].abs()
-            chain = chain[(delta_col >= MIN_DELTA) & (delta_col <= MAX_DELTA)]
+        if chain.empty:
+            return None
+
+        # delta filter — ONLY apply if delta column has real non-zero values
+        # (Kaggle dataset may not include delta, or may be all zeros)
+        if "c_delta" in chain.columns:
+            delta_vals = chain["c_delta"].abs()
+            has_real_deltas = (delta_vals > 0.01).sum() > len(chain) * 0.5
+            if has_real_deltas:
+                if direction == "call":
+                    chain = chain[(delta_vals >= MIN_DELTA) & (delta_vals <= MAX_DELTA)]
+                else:
+                    chain = chain[(delta_vals >= MIN_DELTA) & (delta_vals <= MAX_DELTA)]
+            else:
+                logger.debug(f"  Delta column present but mostly zero — skipping delta filter")
 
         if chain.empty:
             return None
@@ -508,26 +541,40 @@ class OptionsBacktester:
         signals = self._generate_signals(start, end)
         results.signals_total = len(signals)
 
+        # Build signal lookup: date → direction (for O(1) entry check per day)
+        signal_map: Dict[pd.Timestamp, str] = {dt: d for dt, d in signals}
+
         open_trades: List[BacktestTrade] = []
+
+        # ALL trading dates in range — exits checked EVERY day, not just signal days
         trading_dates = sorted(self.df["quote_date"].unique())
-        date_set = set(trading_dates)
+        trading_dates = [d for d in trading_dates if start <= str(d.date()) <= end]
 
         # daily equity curve for drawdown / Sharpe
         daily_pnl: List[float] = []
 
-        for signal_date, direction in signals:
+        for today in trading_dates:
 
-            # ── Check exits for all open trades first ──────────────────────
+            # ── 1. Check exits for all open trades (runs EVERY trading day) ──
             still_open = []
             day_pnl = 0.0
             for trade in open_trades:
-                exited, exit_px, reason = self._evaluate_exit(trade, signal_date)
+                exited, exit_px, reason = self._evaluate_exit(trade, today)
                 if exited:
-                    trade.exit_date   = str(signal_date.date())
+                    trade.exit_date   = str(today.date())
                     trade.exit_price  = exit_px
                     trade.exit_reason = reason
                     trade.pnl_dollars = (exit_px - trade.entry_price) * 100 * trade.contracts
                     trade.pnl_pct     = (exit_px - trade.entry_price) / trade.entry_price * 100
+
+                    # record underlying move
+                    day_rows = self.df[self.df["quote_date"] == today]
+                    if not day_rows.empty:
+                        exit_stock = float(day_rows["underlying"].iloc[0])
+                        trade.underlying_move_pct = (
+                            (exit_stock - trade.entry_stock) / trade.entry_stock * 100
+                        )
+
                     results.trades.append(trade)
                     day_pnl += trade.pnl_dollars
 
@@ -536,7 +583,6 @@ class OptionsBacktester:
                     else:
                         results.losing_trades  += 1
 
-                    # tally exit reasons
                     if reason == "profit_take": results.profit_takes += 1
                     elif reason == "stop_loss": results.stop_losses  += 1
                     elif reason == "time_exit": results.time_exits   += 1
@@ -546,40 +592,44 @@ class OptionsBacktester:
             open_trades = still_open
             daily_pnl.append(day_pnl)
 
-            # ── Evaluate new entry ─────────────────────────────────────────
-            # 1. Max positions check
+            # ── 2. Evaluate new entry — only on signal days ────────────────
+            if today not in signal_map:
+                continue
+            direction = signal_map[today]
+
+            # Max positions check
             if len(open_trades) >= 5:
                 continue
 
-            # 2. IV rank gate
-            iv_rank, iv_pct = self._get_iv_rank(signal_date)
+            # IV rank gate
+            iv_rank, iv_pct = self._get_iv_rank(today)
             if iv_rank > MAX_IVR_ENTRY:
                 results.signals_blocked_iv += 1
                 continue
 
-            # 3. Get underlying price — take first row (all rows same day have same value)
-            day_rows = self.df[self.df["quote_date"] == signal_date]
+            # Get underlying price
+            day_rows = self.df[self.df["quote_date"] == today]
             if day_rows.empty:
                 continue
             daily_px = float(day_rows["underlying"].iloc[0])
             if pd.isna(daily_px) or daily_px <= 0:
                 continue
 
-            # 4. Select contract
-            contract = self._select_contract(signal_date, direction, daily_px)
+            # Select contract
+            contract = self._select_contract(today, direction, daily_px)
             if contract is None:
                 results.signals_blocked_liquidity += 1
                 continue
 
-            # 5. Kelly sizing
-            premium    = (contract["c_bid"] + contract["c_ask"]) / 2.0
-            max_risk   = PORTFOLIO_VALUE * MAX_RISK_PCT
-            contracts  = max(1, int((max_risk * KELLY_FRACTION) / (premium * 100)))
-            contracts  = min(contracts, 10)   # cap at 10 contracts
+            # Kelly sizing
+            premium   = (contract["c_bid"] + contract["c_ask"]) / 2.0
+            max_risk  = PORTFOLIO_VALUE * MAX_RISK_PCT
+            contracts = max(1, int((max_risk * KELLY_FRACTION) / (premium * 100)))
+            contracts = min(contracts, 10)
 
             trade = BacktestTrade(
                 symbol       = symbol,
-                entry_date   = str(signal_date.date()),
+                entry_date   = str(today.date()),
                 expiry_date  = str(contract["expire_date"].date()),
                 strike       = float(contract["strike"]),
                 option_type  = direction,
