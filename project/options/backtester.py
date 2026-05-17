@@ -609,9 +609,9 @@ class OptionsBacktester:
                 trade.pnl_pct     = (exit_px - trade.entry_price) / trade.entry_price * 100
 
                 # record underlying move for closed trades
-                entry_px = trade.entry_stock
-                exit_rows  = self.df[self.df["quote_date"] == last_date]
-        exit_chain = float(exit_rows["underlying"].iloc[0]) if not exit_rows.empty else float("nan")
+                entry_px  = trade.entry_stock
+                exit_rows = self.df[self.df["quote_date"] == last_date]
+                exit_chain = float(exit_rows["underlying"].iloc[0]) if not exit_rows.empty else float("nan")
                 if not pd.isna(exit_chain):
                     trade.underlying_move_pct = (exit_chain - entry_px) / entry_px * 100
 
