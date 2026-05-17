@@ -53,8 +53,8 @@ logger = logging.getLogger(__name__)
 
 LOOKBACK_DAYS   = 252    # 1 trading year
 CACHE_TTL_HOURS = 4      # re-fetch IV data every 4 hours
-MAX_IVR_ENTRY   = 60.0   # don't buy options if IVR > 60%
-MAX_IVP_ENTRY   = 70.0   # don't buy options if IVP > 70%
+MAX_IVR_ENTRY   = 65.0   # don't buy options if IVR > 65%
+MAX_IVP_ENTRY   = 80.0   # don't buy options if IVP > 80%
 MIN_DATA_POINTS = 60     # need at least 60 days of IV history to trust ranking
 
 

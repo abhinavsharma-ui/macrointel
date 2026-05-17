@@ -443,19 +443,26 @@ class OptionsTrader:
         ml_confidence:  float,
         catalyst_score: float,
         iv_rank:        float,   # 0-100
+        tier:           str = 'B',
     ) -> float:
         """
         Combine ML confidence + catalyst score into a final entry score.
-        IV rank acts as a multiplier penalty (higher IV rank = reduce score).
 
-        Weights (calibrated to mirror your stock system):
-          ML confidence : 60%
-          Catalyst score: 40%
-          IV penalty    : up to -20% if IV rank is high
+        Tier A (both signals): 60% ML + 40% catalyst — highest bar
+        Tier B (ML only):      100% ML — don't penalise absence of catalyst
+        Tier C (catalyst only): 100% catalyst strength
+        IV rank penalty: up to -0.15 deducted from base (at IVR=100)
         """
-        base  = 0.60 * ml_confidence + 0.40 * catalyst_score
-        # IV rank penalty: 0 at IVR=0, -0.20 at IVR=100
-        iv_penalty = (iv_rank / 100) * 0.20
+        if tier == 'A':
+            base = 0.60 * ml_confidence + 0.40 * catalyst_score
+        elif tier == 'C':
+            base = catalyst_score
+        else:
+            # Tier B — ML confidence is the signal, no catalyst penalty
+            base = ml_confidence
+
+        # IV rank penalty: small (max -0.15) so IV alone can't veto a strong signal
+        iv_penalty = (iv_rank / 100) * 0.15
         return float(np.clip(base - iv_penalty, 0, 1))
 
     # ── Entry signal generation ───────────────────────────────────────────
@@ -596,13 +603,16 @@ class OptionsTrader:
             current_iv = iv_result.current_iv if iv_result else 0.35
 
             if iv_result and not iv_result.buy_signal:
-                print(f"⛔ {symbol}: IV rank too high ({iv_rank:.0f}%) — skipping")
+                ivp = iv_result.iv_percentile
+                blocker = f"IVR={iv_rank:.0f}%" if iv_rank > MAX_IVR_ENTRY else f"IVP={ivp:.0f}%"
+                print(f"⛔ {symbol}: {blocker} too high — skipping")
                 continue
 
             # 4. Combined score gate
-            combined = self._combined_score(ml_conf, cat_score, iv_rank)
+            tier     = cand.get('tier', 'B')
+            combined = self._combined_score(ml_conf, cat_score, iv_rank, tier)
             if combined < MIN_COMBINED_SCORE:
-                print(f"⛔ {symbol}: combined score {combined:.2f} < {MIN_COMBINED_SCORE}")
+                print(f"⛔ {symbol}[{tier}]: combined score {combined:.2f} < {MIN_COMBINED_SCORE}")
                 continue
 
             # 5. Get current price — use screener's close price if available
