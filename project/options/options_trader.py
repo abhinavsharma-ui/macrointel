@@ -57,7 +57,7 @@ MIN_CATALYST_SCORE  = 0.50   # minimum catalyst score from catalyst.db
 MIN_COMBINED_SCORE  = 0.60   # weighted combination must clear this
 
 # IV rank gate
-MAX_IVR_ENTRY       = 50.0   # skip if IV rank > 50%
+MAX_IVR_ENTRY       = 60.0   # skip if IV rank > 60% (50% too tight for large-caps)
 
 # Portfolio risk
 DEFAULT_PORTFOLIO   = 50_000.0
@@ -502,44 +502,79 @@ class OptionsTrader:
         print(f"ML signals: {len(ml_signals)} buy  |  "
               f"Catalyst events: {len(catalyst_scores)} symbols\n")
 
-        # 2. Find overlap
+        # 2. Build candidate pool — two tiers, sorted by combined priority
+        #
+        # Tier A (score bonus +0.10): symbol appears in BOTH screener AND catalyst DB
+        #   → highest conviction: ML momentum + confirmed catalyst event
+        #
+        # Tier B (no bonus): symbol in screener top 125 with ML confidence ≥ 0.85
+        #   → strong ML signal even without a catalyst event on file
+        #   → your system's 89% accuracy doesn't require a catalyst every time
+        #
+        # Tier C: symbol in catalyst DB but not in screener top 125
+        #   → pure catalyst play, use catalyst strength as confidence proxy
+
         candidates = []
+        seen = set()
+
+        # Tier A & B — screener symbols
         for symbol, ml in ml_signals.items():
-            ml_conf    = float(ml.get('confidence', 0))
-            cat_score  = catalyst_scores.get(symbol, 0.0)
+            ml_conf   = float(ml.get('confidence', 0))
+            cat_score = catalyst_scores.get(symbol, 0.0)
+
             if ml_conf < MIN_ML_CONFIDENCE:
                 continue
-            if cat_score < MIN_CATALYST_SCORE and len(catalyst_scores) > 0:
-                # If we have catalyst data but this symbol isn't in it, skip
-                logger.debug(f"{symbol}: skipped — no catalyst signal ({cat_score:.2f})")
+
+            has_catalyst = cat_score >= MIN_CATALYST_SCORE
+
+            # Tier A: both signals
+            if has_catalyst:
+                candidates.append({
+                    'symbol':         symbol,
+                    'ml_confidence':  ml_conf,
+                    'catalyst_score': cat_score,
+                    'conviction':     float(ml.get('conviction_score', 9)),
+                    'tier':           'A',
+                })
+                seen.add(symbol)
+
+            # Tier B: strong ML signal only (confidence ≥ 0.85)
+            elif ml_conf >= 0.85:
+                candidates.append({
+                    'symbol':         symbol,
+                    'ml_confidence':  ml_conf,
+                    'catalyst_score': 0.0,
+                    'conviction':     float(ml.get('conviction_score', 7)),
+                    'tier':           'B',
+                })
+                seen.add(symbol)
+
+        # Tier C: catalyst-only symbols not in screener
+        for symbol, cat_score in catalyst_scores.items():
+            if symbol in seen or cat_score < 0.65:
                 continue
             candidates.append({
-                'symbol':       symbol,
-                'ml_confidence': ml_conf,
+                'symbol':         symbol,
+                'ml_confidence':  cat_score,   # use strength as proxy
                 'catalyst_score': cat_score,
-                'conviction':   float(ml.get('conviction_score', 5)),
+                'conviction':     7.0,
+                'tier':           'C',
             })
 
-        # If no catalyst DB overlap (new setup), fall through with ML-only signals
-        if not candidates and catalyst_scores:
-            print("⚠ No symbols in both ML and catalyst signals — check DB connection")
+        if not candidates:
+            print("ℹ No qualifying candidates today "
+                  f"(125 ML signals, {len(catalyst_scores)} catalyst events, no overlap meeting thresholds)")
             return []
-        elif not candidates:
-            # No catalyst data available — use ML-only mode
-            candidates = [
-                {
-                    'symbol':        s,
-                    'ml_confidence': float(ml.get('confidence', 0)),
-                    'catalyst_score': 0.5,   # default when no catalyst DB
-                    'conviction':    float(ml.get('conviction_score', 5)),
-                }
-                for s, ml in ml_signals.items()
-                if float(ml.get('confidence', 0)) >= MIN_ML_CONFIDENCE
-            ]
-            print("ℹ Running ML-only mode (no catalyst DB)")
 
-        # Sort by ML confidence descending
-        candidates.sort(key=lambda x: x['ml_confidence'], reverse=True)
+        # Sort: Tier A first, then by ML confidence
+        tier_order = {'A': 0, 'B': 1, 'C': 2}
+        candidates.sort(key=lambda x: (tier_order[x['tier']], -x['ml_confidence']))
+
+        tier_counts = {t: sum(1 for c in candidates if c['tier'] == t) for t in 'ABC'}
+        print(f"Candidates: {len(candidates)} total  "
+              f"(A={tier_counts['A']} both-signal, "
+              f"B={tier_counts['B']} ML-only, "
+              f"C={tier_counts['C']} catalyst-only)\n")
 
         trades = []
         for cand in candidates[:capacity * 2]:   # evaluate 2× capacity to find best
