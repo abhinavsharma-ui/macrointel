@@ -475,6 +475,33 @@ class OptionsBacktester:
 
     # ── Exit evaluation ───────────────────────────────────────────────────────
 
+    def _bsm_price(
+        self,
+        trade: BacktestTrade,
+        check_date: pd.Timestamp,
+        current_stock: float,
+    ) -> Optional[float]:
+        """
+        Synthetic option price via Black-Scholes when the contract isn't
+        in the chain on check_date. Uses entry IV (held constant) as sigma.
+        This lets us apply exit rules even between chain snapshots.
+        """
+        try:
+            dte = (pd.Timestamp(trade.expiry_date) - check_date).days
+            if dte <= 0:
+                return 0.0
+            sigma = max(trade.iv_at_entry / 100.0, 0.05)
+            result = price_option(
+                S=current_stock,
+                K=trade.strike,
+                T=dte,
+                sigma=sigma,
+                option_type=trade.option_type,
+            )
+            return result.price
+        except Exception:
+            return None
+
     def _evaluate_exit(
         self,
         trade: BacktestTrade,
@@ -482,30 +509,49 @@ class OptionsBacktester:
     ) -> Tuple[bool, float, str]:
         """
         Given a live trade and a check date, return (should_exit, current_price, reason).
-        Looks up actual option mid price from the historical chain on check_date.
+
+        Priority:
+          1. Look up real bid/ask from the historical chain (most accurate)
+          2. Fall back to BSM synthetic price if contract not in chain that day
+             (dataset is sparse — only ~1 snapshot per 3 days in 2010-2013)
+          3. Always apply hold_days exit regardless of price source
         """
-        chain = self.df[self.df["quote_date"] == check_date].copy()
-        if chain.empty:
-            return False, trade.entry_price, ""
-
-        # find this specific contract
-        contract = chain[
-            (chain["expire_date"] == pd.Timestamp(trade.expiry_date)) &
-            (chain["strike"].round(1) == round(trade.strike, 1))
-        ]
-
-        if contract.empty:
-            # contract not found → may have expired, fall back to BSM estimate
-            # or treat as zero
-            return False, trade.entry_price, ""
-
-        row = contract.iloc[0]
-        mid = (row["c_bid"] + row["c_ask"]) / 2.0
-        dte = (pd.Timestamp(trade.expiry_date) - check_date).days
-
-        # hold days since entry
+        dte       = (pd.Timestamp(trade.expiry_date) - check_date).days
         hold_days = (check_date - pd.Timestamp(trade.entry_date)).days
 
+        # ── Try real chain first ───────────────────────────────────────────
+        mid = None
+        chain = self.df[self.df["quote_date"] == check_date]
+        if not chain.empty:
+            contract = chain[
+                (chain["expire_date"] == pd.Timestamp(trade.expiry_date)) &
+                (chain["strike"].round(1) == round(trade.strike, 1))
+            ]
+            if not contract.empty:
+                row = contract.iloc[0]
+                raw_mid = (row["c_bid"] + row["c_ask"]) / 2.0
+                if raw_mid > 0:
+                    mid = raw_mid
+
+        # ── Fall back to BSM if contract not found in chain ───────────────
+        if mid is None:
+            # get current underlying from any row on this date
+            day_rows = self.df[self.df["quote_date"] == check_date]
+            if not day_rows.empty:
+                current_stock = float(day_rows["underlying"].iloc[0])
+                mid = self._bsm_price(trade, check_date, current_stock)
+
+        # ── If still no price, can only apply calendar-based exits ────────
+        if mid is None:
+            # DTE exit (can check without a price)
+            if dte <= MIN_DTE_EXIT:
+                return True, 0.0, "dte_exit"
+            # Day-8 time exit — exit at last known price (entry price as proxy)
+            if hold_days >= MAX_HOLD_DAYS:
+                return True, trade.entry_price, "time_exit"
+            return False, trade.entry_price, ""
+
+        # ── Apply all exit rules ──────────────────────────────────────────
         # 1. Profit take: 2× premium
         if mid >= trade.entry_price * PROFIT_TAKE_MULT:
             return True, mid, "profit_take"
