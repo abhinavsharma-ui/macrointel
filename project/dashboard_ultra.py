@@ -949,7 +949,7 @@ def file_age(path):
     return None
 
 
-def run_cmd(args, timeout=2):
+def run_cmd(args, timeout=0.4):
     try:
         out = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
         text = (out.stdout or out.stderr or "").strip()
@@ -1716,7 +1716,19 @@ if($('diagSymbol')){$('diagSymbol').addEventListener('keydown',e=>{if(e.key==='E
 if($('diagToggle'))restoreSymbolDiagnosticState();
 if($('diagExamples'))loadDiagnosticExamples();
 async function loadOperator(){
- const o=await (await fetch('/api/operator?ts='+Date.now())).json(); const c=o.clock||{}, e=o.engine||{}, f=o.filters||{}, r=o.risk||{}, real=o.reality||{}, sh=o.nse_shadow||{};
+ const ctrl=new AbortController();
+ const timer=setTimeout(()=>ctrl.abort(),1800);
+ let o;
+ try{
+  o=await (await fetch('/api/operator?ts='+Date.now(),{signal:ctrl.signal})).json();
+ }catch(err){
+  $('operatorSummary').innerHTML='<span class=badge>operator panel delayed</span>';
+  $('refreshState').textContent=autoRefresh?'auto 30s':'manual';
+  return;
+ }finally{
+  clearTimeout(timer);
+ }
+ const c=o.clock||{}, e=o.engine||{}, f=o.filters||{}, r=o.risk||{}, real=o.reality||{}, sh=o.nse_shadow||{};
  $('operatorSummary').innerHTML=(o.summary||[]).map(x=>`<span class=badge>${x}</span>`).join('');
  $('marketClock').innerHTML=[
   `<div class=miniCell><div class=label>US Market</div><strong>${dot(c.us_market_open)}${c.us_market_open?'Open':'Closed'}</strong><div class=sub>${c.now_ny||'--'}</div></div>`,
@@ -1815,7 +1827,14 @@ async function loadNSE(){try{
  renderNseCharts(sig,pos,n);
 }catch(e){console.warn('nse load failed',e)}}
 let autoRefresh=true, refreshTimer=null;
-async function load(){try{await Promise.all([loadUS(),loadNSE(),loadOperator()]);await liveRefresh();$('lastRefresh').textContent='last refresh '+new Date().toLocaleTimeString()}catch(e){console.error(e)}}
+async function load(){
+ try{
+  await Promise.allSettled([loadUS(),loadNSE()]);
+  liveRefresh().catch(e=>console.warn('live refresh failed',e));
+  loadOperator().catch(e=>console.warn('operator load failed',e));
+  $('lastRefresh').textContent='last refresh '+new Date().toLocaleTimeString();
+ }catch(e){console.error(e)}
+}
 function scheduleRefresh(){if(refreshTimer)clearInterval(refreshTimer);refreshTimer=setInterval(()=>{if(autoRefresh)load()},30000)}
 $('refreshNow').onclick=()=>load();
 $('autoRefresh').onclick=()=>{autoRefresh=!autoRefresh;$('autoRefresh').textContent=autoRefresh?'Auto refresh on':'Auto refresh off';$('refreshState').textContent=autoRefresh?'auto 30s':'manual'};
