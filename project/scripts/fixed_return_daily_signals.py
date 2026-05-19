@@ -38,6 +38,7 @@ HIST_ROOT = Path(os.getenv("SIG_HIST_ROOT", "data/features_26yr_liquid"))
 RUNTIME_STATE = Path(os.getenv("SIG_RUNTIME_STATE", "data/runtime_state.json"))
 OUT_JSON = Path(os.getenv("SIG_OUT_JSON", "reports/fixed_return_daily_signals.json"))
 OUT_CSV = Path(os.getenv("SIG_OUT_CSV", "reports/fixed_return_daily_signals.csv"))
+SCORES_JSON = Path(os.getenv("SIG_SCORES_JSON", "reports/fixed_return_daily_scores.json"))
 
 SIG_THRESHOLD = float(os.getenv("SIG_THRESHOLD", "0.55"))
 SIG_TOP_N = int(os.getenv("SIG_TOP_N", "5"))
@@ -75,8 +76,13 @@ SIG_REGIME_SOFT_HALF      = os.getenv("SIG_REGIME_SOFT_HALF", "0") != "0"
 # ─────────────────────────────────────────────────────────────────────────────
 
 LLM_MODEL = os.getenv("LLM_FILTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
-LLM_API_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEY","").split(",") if k.strip()]
+RAW_LLM_API_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEY","").split(",") if k.strip()]
+LLM_RESERVE_LAST_KEY_FOR_SEARCH = os.getenv("LLM_RESERVE_LAST_KEY_FOR_SEARCH", "0") == "1"
+LLM_SEARCH_USE_ALL_KEYS = os.getenv("LLM_SEARCH_USE_ALL_KEYS", "1") != "0"
+LLM_SEARCH_API_KEYS = list(reversed(RAW_LLM_API_KEYS)) if LLM_SEARCH_USE_ALL_KEYS else RAW_LLM_API_KEYS[-1:]
+LLM_API_KEYS = RAW_LLM_API_KEYS[:-1] if LLM_RESERVE_LAST_KEY_FOR_SEARCH and len(RAW_LLM_API_KEYS) > 1 else RAW_LLM_API_KEYS
 _llm_key_index = 0
+_llm_dead_key_indices = set()
 LLM_FALLBACK_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
@@ -590,6 +596,37 @@ def _build_llm_user_message(candidates, spy_pct, qqq_pct, num_signals):
     return "\n".join(lines)
 
 
+def _llm_key_order():
+    if not LLM_API_KEYS:
+        return []
+    n = len(LLM_API_KEYS)
+    return [
+        idx
+        for offset in range(n)
+        for idx in [(_llm_key_index + offset) % n]
+        if idx not in _llm_dead_key_indices
+    ]
+
+
+def _advance_llm_key(start_idx=None):
+    global _llm_key_index
+    if not LLM_API_KEYS:
+        return
+    start = _llm_key_index if start_idx is None else start_idx
+    for offset in range(1, len(LLM_API_KEYS) + 1):
+        idx = (start + offset) % len(LLM_API_KEYS)
+        if idx not in _llm_dead_key_indices:
+            _llm_key_index = idx
+            return
+
+
+def _retire_llm_key(idx, status_code, reason=""):
+    _llm_dead_key_indices.add(idx)
+    _advance_llm_key(idx)
+    active = len(LLM_API_KEYS) - len(_llm_dead_key_indices)
+    print(f"  LLM key[{idx}] retired status={status_code} active_keys={max(active, 0)} {reason}", flush=True)
+
+
 def _call_llm_filter_single(candidates, spy_pct, qqq_pct, num_signals):
     if not LLM_API_KEYS:
         print("LLM FILTER: key not set; skipping",flush=True); return {}
@@ -599,23 +636,25 @@ def _call_llm_filter_single(candidates, spy_pct, qqq_pct, num_signals):
         return {}
     try:
         messages=[{"role":"system","content":LLM_SYSTEM_PROMPT},{"role":"user","content":_build_llm_user_message(candidates,spy_pct,qqq_pct,num_signals)}]
-        headers={"Authorization":f"Bearer {LLM_API_KEYS[0]}","Content-Type":"application/json","HTTP-Referer":"https://macro-intelligence.local","X-Title":"MacroIntelligence"}
+        headers={"Content-Type":"application/json","HTTP-Referer":"https://macro-intelligence.local","X-Title":"MacroIntelligence"}
         tool_calls_made=0
         for _round in range(14):
             body={"model":LLM_MODEL,"messages":messages,"tools":TOOLS,"tool_choice":"required" if tool_calls_made<7 else "auto","temperature":0.1}
             _models_to_try = [body["model"]] + [m for m in LLM_FALLBACK_MODELS if m != body["model"]]
             resp = None
             for _try_model in _models_to_try:
-                for _ki, _key in enumerate(LLM_API_KEYS):
+                for _ki in _llm_key_order():
+                    _key = LLM_API_KEYS[_ki]
                     try:
                         body["model"] = _try_model
                         headers["Authorization"] = f"Bearer {_key}"
                         resp=_req.post("https://openrouter.ai/api/v1/chat/completions",headers=headers,json=body,timeout=60)
-                        if resp.status_code == 429:
-                            print(f"  429 on {_try_model} key[{_ki}], trying next key", flush=True)
+                        if resp.status_code in (401, 402, 403, 429):
+                            _retire_llm_key(_ki, resp.status_code, f"model={_try_model}")
                             resp = None
                             continue
                         resp.raise_for_status()
+                        globals()["_llm_key_index"] = _ki
                         break
                     except Exception as _fe:
                         print(f"  {_try_model} key[{_ki}] failed: {_fe}", flush=True)
@@ -641,7 +680,7 @@ def _call_llm_filter_single(candidates, spy_pct, qqq_pct, num_signals):
                     tr_str=tr if isinstance(tr,str) else _j.dumps(tr)
                     print(f"  TOOL {fn}({fa.get('symbol','')}) -> {tr_str[:80]}",flush=True)
                     tool_calls_made+=1
-                    import time as _t; _t.sleep(5)
+                    import time as _t; _t.sleep(float(os.getenv("LLM_TOOL_SLEEP_SECONDS", "5")))
                     messages.append({"role":"tool","tool_call_id":tc["id"],"content":tr_str})
                 continue
             if finish in ("stop","end_turn",""):
@@ -1095,6 +1134,24 @@ def main():
     live["probability"] = proba[:, pos_idx]
     qualified = live[live["probability"] >= SIG_THRESHOLD].sort_values("probability", ascending=False)
     pre_cap = len(qualified)
+    try:
+        score_cols = [c for c in ["symbol", "probability", "price", "entry_price", "adv20_dollar_vol", "pct_today", "feature_date"] if c in live.columns]
+        score_rows = live[score_cols].sort_values("probability", ascending=False).to_dict(orient="records")
+        for idx, row in enumerate(score_rows, 1):
+            row["ml_rank"] = idx
+            if row.get("probability") is not None:
+                row["probability"] = round(float(row["probability"]), 6)
+        SCORES_JSON.parent.mkdir(parents=True, exist_ok=True)
+        SCORES_JSON.write_text(json.dumps({
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "threshold": SIG_THRESHOLD,
+            "top_n": SIG_TOP_N,
+            "scored_universe_count": int(len(live)),
+            "qualified_count": int(pre_cap),
+            "scores": score_rows,
+        }, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"WARN scores cache write failed: {exc}", flush=True)
     picks = select_top_n_with_biotech_cap(qualified, SIG_TOP_N, MAX_BIOTECH_PER_DAY)
     if MAX_BIOTECH_PER_DAY < SIG_TOP_N:
         print(f"BIOTECH CAP: max_per_day={MAX_BIOTECH_PER_DAY} qualified={pre_cap} selected={len(picks)}", flush=True)
