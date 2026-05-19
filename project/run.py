@@ -2355,7 +2355,7 @@ class MacroIntelligenceSystem:
             threading.Thread(target=self._crypto_signal_loop, daemon=True).start()
 
         if run_security:
-            logger.info("[7/8] Starting Humanizer Security Suite...")
+            logger.info("[7/8] Skipping removed legacy security suite...")
             self._start_security_suite(dashboard_port)
 
         if run_dashboard:
@@ -2539,24 +2539,7 @@ class MacroIntelligenceSystem:
 
     def _start_security_suite(self, port: int):
         def _boot():
-            try:
-                from security.camera_alerts import SecuritySuite
-
-                enable_ngrok = os.getenv("SECURITY_ENABLE_NGROK", os.getenv("ENABLE_NGROK", "1")).strip().lower() in {
-                    "1",
-                    "true",
-                    "yes",
-                    "on",
-                }
-                suite = SecuritySuite(camera_index=int(os.getenv("CAMERA_INDEX", "0")), dashboard_port=port)
-                result = suite.start(enable_ngrok=enable_ngrok)
-                self._components["security"] = suite
-                if result.get("ngrok_url"):
-                    logger.info(f"Remote access: {result['ngrok_url']}")
-                elif not enable_ngrok:
-                    logger.info("Remote access: disabled by SECURITY_ENABLE_NGROK=0")
-            except Exception as exc:
-                logger.error(f"Security suite error: {exc}")
+            logger.info("Legacy security suite has been removed from the public trading build.")
 
         threading.Thread(target=_boot, daemon=True).start()
 

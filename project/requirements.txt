@@ -1,10 +1,10 @@
 # ══════════════════════════════════════════════════════════════
-#  Macro Intelligence + Humanizer Security Suite
+#  Macro Intelligence trading system
 #  requirements.txt
 # ══════════════════════════════════════════════════════════════
 #
 #  Full install:  pip install -r requirements.txt
-#  Minimal (no camera):  pip install -r requirements.txt --ignore-requires-python
+#  Install:  pip install -r requirements.txt
 #
 #  Tested on Python 3.10 / 3.11 / 3.12
 # ══════════════════════════════════════════════════════════════
@@ -41,9 +41,7 @@ nltk>=3.8.1               # VADER sentiment (fast, rule-based, free)
 # ── Database ──────────────────────────────────────────────────
 # SQLite is built into Python — no extra package needed
 
-# ── Security Suite (Camera) ───────────────────────────────────
-# NOTE: Camera/YOLO + ngrok are intentionally moved to `requirements.security.txt`
-# to keep the default trading install lightweight (fits small VM disks).
+# Legacy operator extras were removed from the public trading build.
 
 # ── Utilities ─────────────────────────────────────────────────
 python-dotenv>=1.0.0      # Load .env file automatically
