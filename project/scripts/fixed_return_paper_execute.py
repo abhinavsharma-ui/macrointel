@@ -16,6 +16,11 @@ POSITIONS_PATH = Path(os.getenv("FR_POSITIONS_PATH", "reports/fixed_return_open_
 INITIAL_CAPITAL_PNL = float(os.getenv('FR_INITIAL_CAPITAL', '100000'))
 TRADES_CSV = Path(os.getenv("FR_TRADES_CSV", "reports/fixed_return_paper_trades.csv"))
 LIVE_ROOT = Path(os.getenv("SIG_LIVE_ROOT", "data/features"))
+SYMBOL_BLOCKLIST_FILES = [
+    Path(os.getenv("SIG_SYMBOL_BLOCKLIST", "data/blocklist.txt")),
+    Path(os.getenv("SIG_ETF_BLOCKLIST", "data/etf_blocklist.txt")),
+    Path(os.getenv("SIG_LEVERAGED_ETF_BLACKLIST", "data/leveraged_etf_blacklist.txt")),
+]
 MAX_OPEN = int(os.getenv("FR_MAX_OPEN_POSITIONS", "50"))
 NY = ZoneInfo("America/New_York")
 
@@ -25,6 +30,20 @@ def die(msg):
 
 def norm_sym(s):
     return str(s).replace("_US", "").replace(".US", "").upper()
+
+def load_blocked_symbols():
+    blocked = set()
+    for path in SYMBOL_BLOCKLIST_FILES:
+        try:
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                raw = line.split("#", 1)[0].strip()
+                if raw:
+                    blocked.add(norm_sym(raw))
+        except Exception as exc:
+            print(f"WARN blocklist read failed {path}: {exc}")
+    return blocked
 
 def read_feature_file(path):
     df = pd.read_parquet(path)
@@ -122,12 +141,28 @@ def main():
         print(f"WARN signals file not found: {SIGNALS_PATH}. Exits still active; new entries blocked.")
 
     positions = load_positions()
+    blocked_symbols = load_blocked_symbols()
     open_positions = [p for p in positions if p.get("status") == "open"]
     closed_today, still_open = [], []
 
     for pos in open_positions:
         sym = norm_sym(pos["symbol"])
         px = latest_price_row(sym)
+        if sym in blocked_symbols:
+            exit_price = float((px or {}).get("close") or pos.get("entry_price") or 0)
+            pnl_pct = (exit_price / float(pos["entry_price"]) - 1.0) * 100.0 if float(pos.get("entry_price") or 0) else 0.0
+            row = {
+                **pos, "status": "closed", "closed_at": datetime.now(timezone.utc).isoformat(),
+                "exit_reason": "blocked_symbol_etf", "exit_price": round(exit_price, 4),
+                "pnl_pct": round(pnl_pct, 4),
+                "pnl_contribution_pct": round(pnl_pct * float(pos.get("position_pct") or 0), 6),
+                "pnl": round(pnl_pct * float(pos.get("position_pct") or 0) * INITIAL_CAPITAL_PNL / 100, 2),
+            }
+            closed_today.append(row)
+            if not args.dry_run:
+                write_trade(row)
+                safe_alpaca_sell(sym, "blocked_symbol_etf")
+            continue
         if px is None:
             still_open.append(pos)
             continue
@@ -169,6 +204,9 @@ def main():
         payload = {"signals": []}
     for sig in payload.get("signals", []):
         sym = norm_sym(sig["symbol"])
+        if sym in blocked_symbols:
+            print(f"SKIP blocked signal {sym}")
+            continue
         if sym in open_symbols or sym in closed_symbols:
             continue
         if len(still_open) + len(new_positions) >= MAX_OPEN:

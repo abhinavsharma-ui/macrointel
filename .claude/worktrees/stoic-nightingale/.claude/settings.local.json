@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(find /c/Users/Sidhnath/Downloads/macro_intelligence_complete/.claude/worktrees/stoic-nightingale/project/core -name \"*.py\" -exec grep -l \"class.*Trade\\\\|@dataclass\" {} \\\\;)"
-    ]
-  }
-}
