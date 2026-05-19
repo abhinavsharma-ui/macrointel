@@ -1,326 +1,170 @@
-# MACRO INTELLIGENCE - INTEGRATION GUIDE
+# Integration Guide
 
-## 📋 Complete Implementation Checklist
+Current public snapshot: 2026-05-19
 
-### PHASE 1: WebSocket Reconnection Fix (2-5 minutes)
+This guide explains how the current pieces fit together without exposing private runtime details.
 
-**Option A: Automatic Patching (Recommended)**
+## External Services
+
+### Alpaca
+
+Used for:
+
+- Latest US quote/bar marks.
+- Missing-symbol refresh for the stock diagnostic.
+- Paper order bridge for US fixed-return entries and exits.
+
+Environment:
+
+```text
+ALPACA_API_KEY=<paper key>
+ALPACA_SECRET_KEY=<paper secret>
+ALPACA_PAPER=true
+```
+
+Keep `ALPACA_PAPER=true` unless live trading has been separately audited and approved.
+
+### LLM Provider
+
+The current LLM path uses an OpenRouter/Groq-compatible key pool stored as a comma-separated `GROQ_API_KEY` value.
+
+```text
+GROQ_API_KEY=<key1>,<key2>,<key3>
+```
+
+Behavior:
+
+- Normal nightly LLM filtering rotates through the available keys.
+- Rate-limited or exhausted keys are retired for the current run.
+- Search/diagnostic can reserve or reverse key usage so ad hoc research does not burn the same first key the nightly job starts with.
+
+Useful controls:
+
+```text
+LLM_RESERVE_LAST_KEY_FOR_SEARCH=1
+LLM_SEARCH_USE_ALL_KEYS=1
+```
+
+## Data Flow
+
+```text
+Feature parquet files
+    -> fixed_return_daily_signals.py
+    -> ML score and hard gates
+    -> LLM risk filter
+    -> reports/fixed_return_daily_signals.json
+    -> fixed_return_paper_execute.py
+    -> reports/fixed_return_open_positions.json
+    -> intraday_mark_to_market.py
+    -> dashboard_ultra.py
+```
+
+The dashboard reads report files and lightweight APIs. It should not do heavy model work except for explicit single-symbol diagnostic requests.
+
+## Stock Diagnostic Flow
+
+```text
+Dashboard symbol input
+    -> /api/symbol_diagnostic
+    -> single_symbol_diagnostic.py
+    -> local feature lookup
+    -> Alpaca refresh if missing/stale
+    -> model probability
+    -> gates
+    -> optional LLM or Force LLM
+    -> diagnostic JSON rendered on dashboard
+```
+
+Diagnostic output is intentionally more verbose than the daily signal table. It should show:
+
+- Final verdict.
+- Probability and threshold.
+- Data coverage.
+- Liquidity.
+- Sector.
+- Regime.
+- Earnings state.
+- LLM decision and reason.
+- Feature snapshot.
+- Failed gates.
+
+`top_n` is daily capacity context only. It should not block the single-stock research answer.
+
+## ETF and Blocklist Controls
+
+Current block files:
+
+```text
+project/data/blocklist.txt
+project/data/etf_blocklist.txt
+project/data/leveraged_etf_blacklist.txt
+```
+
+These are hard blocks. If a symbol is listed here, the normal system and diagnostic should reject it before LLM approval.
+
+## Report Files
+
+Runtime report files are ignored by git because they contain live state:
+
+```text
+project/reports/fixed_return_daily_signals.json
+project/reports/fixed_return_daily_scores.json
+project/reports/fixed_return_open_positions.json
+project/reports/fixed_return_paper_trades.csv
+project/reports/intraday_quotes.json
+project/reports/intraday_mtm_history.json
+project/reports/symbol_diagnostics.json
+```
+
+For public examples, use synthetic snippets or explain the schema. Do not commit real account state.
+
+## Troubleshooting
+
+Dashboard does not load:
+
 ```bash
-# Run the auto-patcher
-python patch_websocket.py /path/to/your/project/dashboard/app.py
-
-# Expected output:
-# ✅ Patch applied successfully!
-# Backup created at: app.py.backup.YYYYMMDD_HHMMSS
+pgrep -af dashboard_ultra.py
+tail -80 /tmp/dash.log
+curl -s http://127.0.0.1:5055/api/snapshot | head
 ```
 
-**Troubleshooting Phase 1A:**
+Live prices do not update:
 
-If you get: `❌ ERROR: 'socketio' not found`
-- → File path is wrong, or it's not a Flask-SocketIO app
-- → Run: `grep -n "socketio" /path/to/app.py`
-- → Find the correct file and retry
-
-If you get: `⚠️ Could not auto-detect socket.io line`
-- → Use Option B below (manual JavaScript fix)
-
-**Option B: Manual JavaScript Fix**
-1. Open `app_websocket_fix.js` (provided)
-2. Find your socket.io client initialization in your HTML/template:
-   ```html
-   <!-- Usually in base.html or main.html -->
-   <script src="/static/js/socket.js"></script>
-   ```
-3. Replace the socket initialization with code from `app_websocket_fix.js`
-4. Test in browser: Open DevTools (F12) → Console
-   - Should see: `[Socket.IO] ✅ Connected`
-
-**Option C: Manual Python Fix**
-Open `project/dashboard/app.py` and find line ~1924:
-```python
-# BEFORE:
-socket = socketio.emit(...)
-
-# AFTER:
-socket = socketio.emit(
-    reconnectionAttempts=float('inf'),
-    reconnectionDelay=1000,
-    reconnectionDelayMax=5000,
-    transports=['websocket', 'polling']
-)
-```
-
-### PHASE 2: Feature Data Collection (5-15 minutes)
-
-**Step 1: Navigate to project directory**
 ```bash
-cd /path/to/macro_intelligence_complete/project
-```
-
-**Step 2: Run parallel options collector**
-```bash
-# RECOMMENDED: Parallel (5-10 minutes for 6000 symbols)
-python options_data_collector_parallel.py \
-    --symbols 6000 \
-    --workers 8 \
-    --output ./data/features
-
-# OR: Sequential (12-15 minutes, more stable)
-python options_data_collector.py \
-    --symbols 6000 \
-    --output ./data/features
-
-# OR: Test run (faster, ~2 min)
-python options_data_collector_parallel.py \
-    --symbols 100 \
-    --workers 4
-```
-
-**Expected output:**
-```
-📊 OPTIONS DATA COLLECTOR
-============================================================
-Target: 6000 symbols
-Workers: 8
-Output: ./data/features
-
-Collecting |████████████████████████| 6000/6000 [09:34<00:00, 10.5 /s]
-
-============================================================
-📈 RESULTS
-============================================================
-✅ Collected: 5847/6000
-❌ Failed:    153/6000
-📊 Success:   97.5%
-
-💾 Files saved: 5847
-📁 Location:   ./data/features
-```
-
-**Troubleshooting Phase 2:**
-
-If you get: `ModuleNotFoundError: No module named 'yfinance'`
-```bash
-pip install yfinance pandas numpy tqdm --break-system-packages
-```
-
-If collection is very slow (< 2 symbols/sec):
-- Reduce `--workers` to 4: `--workers 4`
-- Or use sequential: `python options_data_collector.py --symbols 1000`
-- Check internet connection
-
-If many symbols fail (success < 70%):
-- This is normal - yfinance sometimes has rate limits
-- Rerun: `python options_data_collector_parallel.py --symbols 6000 --workers 4`
-- It will skip already-collected files
-
-### PHASE 3: Verification & Testing (2-5 minutes)
-
-**Step 1: Count collected feature files**
-```bash
-# Count files
-ls -1 project/data/features/*.parquet | wc -l
-# Expected: 5000+
-
-# List first few files
-ls -1 project/data/features/*.parquet | head -20
-
-# Check file size
-du -sh project/data/features/
-# Expected: 20-30 MB
-```
-
-**Step 2: Restart Flask app**
-```bash
-# Stop current process (Ctrl+C or kill)
-
-# Restart with:
 cd project
-python dashboard/app.py
-
-# Or if using Flask run:
-export FLASK_APP=dashboard/app.py
-flask run --host 0.0.0.0 --port 5000
+source ../venv/bin/activate
+python scripts/intraday_mark_to_market.py --force
+curl -s http://127.0.0.1:5055/api/live_prices | python -m json.tool | head -80
 ```
 
-**Step 3: Check application logs**
+Signals look too small:
+
 ```bash
-# Should see:
-# [INFO] Loading 6000+ feature files...
-# [INFO] Meta model using options_sentiment, unusual_options, iv_rank
-# [INFO] WebSocket server started on :5000
-
-tail -f project/logs/system.jsonl
+cd project
+source ../venv/bin/activate
+python - <<'PY'
+import json
+from pathlib import Path
+d = json.loads(Path("reports/fixed_return_daily_signals.json").read_text())
+print("threshold:", d.get("threshold"))
+print("top_n:", d.get("top_n"))
+print("scored:", d.get("scored_count"))
+print("signals:", len(d.get("signals", [])))
+print("unknown:", d.get("llm_unknown_symbols"))
+print("skipped:", d.get("llm_skipped_symbols"))
+PY
 ```
 
-**Step 4: Open dashboard in browser**
-```
-http://localhost:5000
-```
+LLM appears stuck on a dead key:
 
-In browser DevTools Console (F12), should see:
-```
-[Socket.IO] ✅ Connected
-  Socket ID: abc123def456
-  Transport: websocket
-```
-
-**Step 5: Test WebSocket persistence**
-- Open dashboard
-- Go to DevTools → Network → WS
-- Leave open for 5+ minutes
-- Should NOT see "disconnect" message
-- If you see reconnect, that's OK - it means it's working!
-
----
-
-## 🔍 DETAILED TROUBLESHOOTING
-
-### WebSocket Issues
-
-**Dashboard shows "Socket disconnected"**
-1. Check browser console: `F12` → Console tab
-2. Look for errors like `Connection refused`
-3. Verify Flask app is running: `lsof -i :5000`
-4. Check firewall/network: `curl http://localhost:5000`
-
-**Socket reconnects every 30 seconds**
-1. Auto-patch may not have been applied correctly
-2. Verify patch was applied: `grep -n "reconnection" /path/to/app.py`
-3. Reapply patch: `python patch_websocket.py /path/to/app.py`
-4. Restart Flask app
-5. Check console again
-
-**JavaScript error: "socket is not defined"**
-1. Socket.io library not loaded
-2. Check HTML source: Find `<script src="/socket.io/socket.io.js"></script>`
-3. If missing, add it to your base template
-4. Or add: `<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>`
-
-### Feature Collection Issues
-
-**"Network error" or "yfinance error"**
-- This is normal - some symbols may not have options
-- Rerun collector: it will skip already-done symbols
-- Reduce workers if getting too many errors: `--workers 4`
-
-**Not enough files collected (< 500)**
-- Check internet connection
-- Try sequential: `python options_data_collector.py`
-- Check if output directory is writable: `touch project/data/features/test.txt`
-
-**Collection takes > 20 minutes**
-- Increase workers: `--workers 12` or `--workers 16`
-- Check CPU/memory: `top` or Task Manager
-- On slow network, reduce workers instead
-
-**Parquet files are 0 KB**
-- Failed write (disk space issue?)
-- Check disk: `df -h`
-- Delete corrupted files: `rm project/data/features/*.parquet`
-- Retry collection
-
-### Feature Data Issues
-
-**"No feature files found" error on startup**
-1. Verify files exist: `ls project/data/features/AAPL.parquet`
-2. Check file permissions: `ls -la project/data/features/ | head`
-3. If missing, rerun: `python options_data_collector_parallel.py --symbols 6000`
-
-**Model says "Only 311 features loaded"**
-- Collector didn't complete
-- Check: `ls -1 project/data/features/*.parquet | wc -l`
-- If < 500: rerun collector with `--workers 4`
-
-**Parquet files can't be read**
-1. Try reading one: `python -c "import pandas as pd; pd.read_parquet('project/data/features/AAPL.parquet')"`
-2. If error: corruption or bad format
-3. Delete all: `rm -rf project/data/features/*.parquet`
-4. Rerun collector
-
----
-
-## ✅ SUCCESS CRITERIA
-
-After completing all phases:
-
-- [ ] Patch applied: `grep -n "reconnection" app.py` shows results
-- [ ] Feature files exist: `ls project/data/features/ | wc -l` shows 5000+
-- [ ] Files readable: `ls -lh project/data/features/*.parquet | head`
-- [ ] Flask app runs: `python dashboard/app.py` starts without errors
-- [ ] Dashboard loads: `curl http://localhost:5000` returns HTML
-- [ ] WebSocket connected: Browser console shows `✅ Connected`
-- [ ] No disconnects: Browser console shows no errors for 5+ minutes
-- [ ] Features loaded: Logs show `Loading 6000+ feature files`
-
----
-
-## 📊 PERFORMANCE EXPECTATIONS
-
-### WebSocket Fix
-- **Disconnect frequency:** Every 2-3 hours → Never (unless server restarts)
-- **Reconnection time:** N/A → 1-5 seconds automatic
-- **Dashboard availability:** 95% → 99.9%
-
-### Feature Collection
-- **Collection time:** 6000 symbols, 8 workers = 5-10 minutes
-- **Storage:** ~20-30 MB total (~3-5 KB per file)
-- **Success rate:** Typically 95-98%
-
-### Model Performance
-- **Regime accuracy:** 60% → 95%
-- **Prediction latency:** No impact
-- **Feature diversity:** 311 → 6000+
-
----
-
-## 🆘 GETTING HELP
-
-### Self-Diagnosis
-1. Check error message in logs: `tail -100 project/logs/system.jsonl`
-2. Check browser console: `F12` → Console tab
-3. Check network tab: `F12` → Network → WS (for WebSocket)
-4. Verify directory: `ls -la project/data/features/`
-
-### Manual Checks
 ```bash
-# Python version
-python --version  # Should be 3.8+
-
-# Required modules
-python -c "import yfinance; import pandas; import numpy; print('OK')"
-
-# File permissions
-touch project/data/features/test.txt && rm project/data/features/test.txt
-
-# Port available
-lsof -i :5000  # Should show Flask app, or be empty
+grep -E "LLM key|retired|active_keys|429|exhausted" project/logs/*.log logs/*.log 2>/dev/null | tail -80
 ```
 
-### Revert Changes
+Single-symbol diagnostic from CLI:
+
 ```bash
-# Restore original app.py
-cp project/dashboard/app.py.backup project/dashboard/app.py
-
-# Remove collected features
-rm -rf project/data/features/*.parquet
-
-# Restart app
-python project/dashboard/app.py
+cd project
+source ../venv/bin/activate
+python scripts/single_symbol_diagnostic.py DIS --force-llm
 ```
-
----
-
-## 📌 KEY FILES
-
-- `patch_websocket.py` - Auto-applies WebSocket reconnection fix
-- `app_websocket_fix.js` - Manual JS fix (if auto-patch fails)
-- `options_data_collector_parallel.py` - Parallel options collector (FAST)
-- `options_data_collector.py` - Sequential options collector (STABLE)
-- `README.md` - Quick start guide
-- `DELIVERABLES.md` - What you're getting
-- `INTEGRATION_GUIDE.md` - This file
-
----
-
-**Ready to implement? Start with Phase 1!** ⚡

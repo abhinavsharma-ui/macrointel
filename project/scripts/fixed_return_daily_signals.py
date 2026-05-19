@@ -81,6 +81,9 @@ LLM_RESERVE_LAST_KEY_FOR_SEARCH = os.getenv("LLM_RESERVE_LAST_KEY_FOR_SEARCH", "
 LLM_SEARCH_USE_ALL_KEYS = os.getenv("LLM_SEARCH_USE_ALL_KEYS", "1") != "0"
 LLM_SEARCH_API_KEYS = list(reversed(RAW_LLM_API_KEYS)) if LLM_SEARCH_USE_ALL_KEYS else RAW_LLM_API_KEYS[-1:]
 LLM_API_KEYS = RAW_LLM_API_KEYS[:-1] if LLM_RESERVE_LAST_KEY_FOR_SEARCH and len(RAW_LLM_API_KEYS) > 1 else RAW_LLM_API_KEYS
+LLM_REQUEST_TIMEOUT_SECONDS = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "60"))
+LLM_TOTAL_TIMEOUT_SECONDS = float(os.getenv("LLM_TOTAL_TIMEOUT_SECONDS", "0"))
+LLM_MAX_ROUNDS = int(os.getenv("LLM_MAX_ROUNDS", "14"))
 _llm_key_index = 0
 _llm_dead_key_indices = set()
 LLM_FALLBACK_MODELS = [
@@ -638,17 +641,28 @@ def _call_llm_filter_single(candidates, spy_pct, qqq_pct, num_signals):
         messages=[{"role":"system","content":LLM_SYSTEM_PROMPT},{"role":"user","content":_build_llm_user_message(candidates,spy_pct,qqq_pct,num_signals)}]
         headers={"Content-Type":"application/json","HTTP-Referer":"https://macro-intelligence.local","X-Title":"MacroIntelligence"}
         tool_calls_made=0
-        for _round in range(14):
+        import time as _time
+        _started = _time.time()
+        _request_timeout = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", str(LLM_REQUEST_TIMEOUT_SECONDS)))
+        _total_timeout = float(os.getenv("LLM_TOTAL_TIMEOUT_SECONDS", str(LLM_TOTAL_TIMEOUT_SECONDS)))
+        _max_rounds = int(os.getenv("LLM_MAX_ROUNDS", str(LLM_MAX_ROUNDS)))
+        for _round in range(_max_rounds):
+            if _total_timeout > 0 and _time.time() - _started >= _total_timeout:
+                print(f"LLM FILTER: timeout budget exceeded after {_round} rounds", flush=True)
+                return {}
             body={"model":LLM_MODEL,"messages":messages,"tools":TOOLS,"tool_choice":"required" if tool_calls_made<7 else "auto","temperature":0.1}
             _models_to_try = [body["model"]] + [m for m in LLM_FALLBACK_MODELS if m != body["model"]]
             resp = None
             for _try_model in _models_to_try:
                 for _ki in _llm_key_order():
+                    if _total_timeout > 0 and _time.time() - _started >= _total_timeout:
+                        print("LLM FILTER: timeout budget exceeded during key rotation", flush=True)
+                        return {}
                     _key = LLM_API_KEYS[_ki]
                     try:
                         body["model"] = _try_model
                         headers["Authorization"] = f"Bearer {_key}"
-                        resp=_req.post("https://openrouter.ai/api/v1/chat/completions",headers=headers,json=body,timeout=60)
+                        resp=_req.post("https://openrouter.ai/api/v1/chat/completions",headers=headers,json=body,timeout=_request_timeout)
                         if resp.status_code in (401, 402, 403, 429):
                             _retire_llm_key(_ki, resp.status_code, f"model={_try_model}")
                             resp = None
