@@ -1458,7 +1458,7 @@ tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--hover))}
 .swatch{width:20px;height:20px;border-radius:999px;border:1px solid var(--line);cursor:pointer;background:var(--sw);box-shadow:inset 0 0 0 2px rgba(255,255,255,.10);transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease}
 .swatch:hover{transform:translateY(-1px)}
 .swatch.active{border-color:var(--ink);box-shadow:0 0 0 3px color-mix(in srgb,var(--sw) 28%,transparent),0 0 18px color-mix(in srgb,var(--sw) 34%,transparent)}
-.symbolSearch{display:grid;gap:10px}.searchRow{display:grid;grid-template-columns:minmax(120px,220px) auto auto auto 1fr;gap:8px;align-items:center}.searchInput{height:36px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--ink);font:800 14px ui-monospace,SFMono-Regular,Consolas,monospace;padding:0 11px;text-transform:uppercase}.checkLabel{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:750}.exampleGrid{display:flex;gap:8px;flex-wrap:wrap}.exampleBtn{border:1px solid var(--soft);background:var(--panel2);color:var(--ink);border-radius:999px;padding:6px 9px;font:800 11px ui-monospace,SFMono-Regular,Consolas,monospace;cursor:pointer}.exampleBtn:hover{border-color:var(--accent2)}.diagHero{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.diagCell{background:color-mix(in srgb,var(--accent) 6%,var(--panel2));border:1px solid color-mix(in srgb,var(--accent) 16%,var(--soft));border-radius:8px;padding:10px}.diagCell strong{display:block;font:800 18px ui-monospace,SFMono-Regular,Consolas,monospace;margin-top:5px}.gateGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.gatePill{border:1px solid var(--soft);border-radius:8px;padding:8px;background:var(--panel2)}.gatePill b{display:block;font:800 11px ui-monospace,SFMono-Regular,Consolas,monospace}.gatePill span{display:block;color:var(--muted);font-size:11px;margin-top:4px;overflow:hidden;text-overflow:ellipsis}.diagText{line-height:1.45;color:var(--muted);word-break:break-word}
+.symbolSearch{display:grid;gap:10px}.searchRow{display:grid;grid-template-columns:minmax(120px,220px) auto auto auto 1fr;gap:8px;align-items:center}.searchInput{height:36px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--ink);font:800 14px ui-monospace,SFMono-Regular,Consolas,monospace;padding:0 11px;text-transform:uppercase}.checkLabel{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:750}.exampleGrid{display:flex;gap:8px;flex-wrap:wrap}.exampleBtn{border:1px solid var(--soft);background:var(--panel2);color:var(--ink);border-radius:999px;padding:6px 9px;font:800 11px ui-monospace,SFMono-Regular,Consolas,monospace;cursor:pointer}.exampleBtn:hover{border-color:var(--accent2)}.diagHero{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.diagCell{background:color-mix(in srgb,var(--accent) 6%,var(--panel2));border:1px solid color-mix(in srgb,var(--accent) 16%,var(--soft));border-radius:8px;padding:10px}.diagCell strong{display:block;font:800 18px ui-monospace,SFMono-Regular,Consolas,monospace;margin-top:5px}.gateGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.gatePill{border:1px solid var(--soft);border-radius:8px;padding:8px;background:var(--panel2)}.gatePill b{display:block;font:800 11px ui-monospace,SFMono-Regular,Consolas,monospace}.gatePill span{display:block;color:var(--muted);font-size:11px;margin-top:4px;overflow:hidden;text-overflow:ellipsis}.diagText{line-height:1.45;color:var(--muted);word-break:break-word}.diagJson{max-height:360px;overflow:auto;white-space:pre-wrap;border:1px solid var(--soft);border-radius:8px;background:var(--panel2);padding:10px;color:var(--ink);font:11px ui-monospace,SFMono-Regular,Consolas,monospace}
 @media(max-width:1200px){.diagHero,.gateGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.searchRow{grid-template-columns:1fr auto auto auto}}@media(max-width:720px){.diagHero,.gateGrid,.searchRow{grid-template-columns:1fr}}
 </style>
 </head>
@@ -1575,30 +1575,36 @@ function dot(on,bad=false){return `<span class="statusDot ${bad?'bad':on?'on':'w
 function renderAlerts(id,rows){$(id).innerHTML=rows.length?rows.map(a=>`<div class="alertItem ${a.level||''}"><b>${a.scope}</b> ${a.text}</div>`).join(''):'<div class="alertItem good">No active flags</div>'}
 function renderSymbolDiagnostic(d){
  if(!d||!d.ok){$('diagResult').innerHTML=`<div class="alertItem danger">${esc(d&&d.error?d.error:'diagnostic failed')}</div>`;$('diagBadge').textContent='failed';return}
- const sig=d.signal||{}, rank=d.rank||{}, llm=d.llm||{}, feature=d.feature||{}, source=d.source||{}, fc=d.friend_context||{};
+ const sig=d.signal||{}, rank=d.rank||{}, llm=d.llm||{}, feature=d.feature||{}, source=d.source||{}, fc=d.friend_context||{}, diag=d.diagnostics||{};
+ const decision=diag.decision||{}, dataDiag=diag.data||{}, modelDiag=diag.model||{}, daily=diag.daily_context||{}, risk=diag.risk_plan||{}, market=diag.market||{};
  const verdict=d.verdict||'--', ok=!!d.would_trade;
  $('diagBadge').textContent=ok?'allowed':(llm.research_only?'research':'blocked');
- const mlMargin=fc.ml_margin==null?'--':(Number(fc.ml_margin)>0?'+':'')+Number(fc.ml_margin).toFixed(3);
- const topGap=fc.top_n_margin==null?'--':(Number(fc.top_n_margin)>0?'+':'')+Number(fc.top_n_margin).toFixed(3);
- const tech=fc.technical_snapshot||{};
- const techBits=Object.keys(tech).slice(0,7).map(k=>`${k}: ${tech[k]}`).join(' | ')||'technical snapshot unavailable';
+ const mlMargin=(modelDiag.ml_margin??fc.ml_margin)==null?'--':(Number(modelDiag.ml_margin??fc.ml_margin)>0?'+':'')+Number(modelDiag.ml_margin??fc.ml_margin).toFixed(3);
+ const dailyGap=daily.top_n_margin==null?'--':(Number(daily.top_n_margin)>0?'+':'')+Number(daily.top_n_margin).toFixed(3);
+ const tech=(diag.features&&diag.features.snapshot)||fc.technical_snapshot||{};
+ const techBits=Object.keys(tech).slice(0,20).map(k=>`${k}: ${tech[k]}`).join(' | ')||'technical snapshot unavailable';
  const llmLabel=llm.forced?'Research LLM':llm.ran?'LLM':'LLM';
- const riskPlan=(fc.target_pct||'--')+'% PT / '+(fc.stop_pct||'--')+'% SL / '+(fc.hold_days||'--')+'d';
+ const riskPlan=(risk.profit_target_pct??fc.target_pct??'--')+'% PT / '+(risk.stop_loss_pct??fc.stop_pct??'--')+'% SL / '+(risk.hold_days??fc.hold_days??'--')+'d';
+ const dataRows=(dataDiag.rows??feature.rows??0)+' / '+(dataDiag.required_rows??feature.required_rows??'--');
+ const rankLabel=daily.rank==null?'--':daily.rank+' / '+(daily.scored_universe_count||'--');
+ const sourceLabel=source.source==='fetched_from_alpaca'?'ALPACA':'SYSTEM';
+ const systemRead=(fc.notes||[]).join(' | ')||decision.top_n_note||fc.pipeline_stage||'--';
  $('diagResult').innerHTML=[
   `<div class=diagHero>`,
   `<div class=diagCell><div class=label>Verdict</div><strong class="${ok?'green':'red'}">${esc(verdict)}</strong></div>`,
   `<div class=diagCell><div class=label>Probability</div><strong class="${Number(sig.probability||0)>=Number((d.model||{}).threshold||0)?'green':'red'}">${Number(sig.probability||0).toFixed(3)}</strong></div>`,
-  `<div class=diagCell><div class=label>Rank</div><strong>${rank.rank||'--'} / ${rank.scored_universe_count||'--'}</strong></div>`,
+  `<div class=diagCell><div class=label>Daily Rank</div><strong>${esc(rankLabel)}</strong></div>`,
   `<div class=diagCell><div class=label>Entry</div><strong>${money(sig.entry_price)}</strong></div>`,
-  `<div class=diagCell><div class=label>Source</div><strong>${source.source==='fetched_from_alpaca'?'ALPACA':'SYSTEM'}</strong></div>`,
+  `<div class=diagCell><div class=label>Source</div><strong>${sourceLabel}</strong></div>`,
   `</div>`,
   `<div class=gateGrid>${(d.gates||[]).map(g=>`<div class=gatePill><b class="${g.passed?'green':'red'}">${g.passed?'PASS':'FAIL'} ${esc(g.name)}</b><span>${esc(g.value!=null?g.value+' - '+(g.detail||''):g.detail||'')}</span></div>`).join('')}</div>`,
   `<div class=stackRows>`,
-  `${kv([['threshold',(d.model||{}).threshold,'blue'],['ML margin',mlMargin,Number(fc.ml_margin||0)>=0?'green':'red'],['top N',(d.model||{}).top_n,'blue'],['top N cutoff',rank.top_n_cutoff_probability==null?'--':Number(rank.top_n_cutoff_probability).toFixed(3),'amber'],['top N gap',topGap,Number(fc.top_n_margin||0)>=0?'green':'amber'],['rank source',rank.exact_full_rescore?'cron score cache':(rank.method||'saved report'),'blue'],['size',fc.position_size_pct==null?'--':fc.position_size_pct+'%','blue'],['risk plan',riskPlan,'blue'],['feature rows',feature.rows||0,'blue'],['feature date',feature.feature_date||'--','blue'],['LLM',llm.ran?(llm.decision||llm.status||'ran'):(llm.status||'not run'),llm.decision==='skip'?'red':llm.ran?'green':'amber']])}`,
+  `${kv([['threshold',(d.model||{}).threshold,'blue'],['ML margin',mlMargin,Number(modelDiag.ml_margin??fc.ml_margin??0)>=0?'green':'red'],['daily capacity gate','ignored in this stock check','blue'],['saved report cutoff',daily.top_n_cutoff_probability==null?'--':Number(daily.top_n_cutoff_probability).toFixed(3),'amber'],['distance to saved cutoff',dailyGap,Number(daily.top_n_margin||0)>=0?'green':'amber'],['rank source',daily.rank_method||rank.method||'saved report','blue'],['size',risk.position_pct_display==null?(fc.position_size_pct==null?'--':fc.position_size_pct+'%'):risk.position_pct_display+'%','blue'],['risk plan',riskPlan,'blue'],['data rows',dataRows,(dataDiag.passed??true)?'blue':'red'],['data meaning',dataDiag.meaning||'full feature history available','blue'],['missing model features',modelDiag.missing_model_feature_count??0,(modelDiag.missing_model_feature_count||0)?'amber':'green'],['feature date',dataDiag.feature_date||feature.feature_date||'--','blue'],['sector',market.sector||d.sector||'unknown','blue'],['regime',market.regime||'--','blue'],['ADV20 $',market.adv20_dollar_vol==null?'--':Number(market.adv20_dollar_vol).toLocaleString(),'blue'],['LLM',llm.ran?(llm.decision||llm.status||'ran'):(llm.status||'not run'),llm.decision==='skip'?'red':llm.ran?'green':'amber']])}`,
   `</div>`,
-  `<div class="alertItem ${ok?'good':llm.research_only?'warn':'warn'}"><b>System read</b> ${esc((fc.notes||[]).join(' | ')||fc.pipeline_stage||'--')}</div>`,
-  `<div class="alertItem"><b>Portable fields</b> ${esc(techBits)}</div>`,
-  `<div class="alertItem ${llm.decision==='skip'?'danger':llm.ran?'good':'warn'}"><b>${llmLabel}</b> ${esc(llm.reason||llm.status||'no LLM decision')}</div>`
+  `<div class="alertItem ${ok?'good':llm.research_only?'warn':'warn'}"><b>System read</b> ${esc(systemRead)}</div>`,
+  `<div class="alertItem"><b>Feature snapshot</b> ${esc(techBits)}</div>`,
+  `<div class="alertItem ${llm.decision==='skip'?'danger':llm.ran?'good':'warn'}"><b>${llmLabel}</b> ${esc(llm.reason||llm.status||'no LLM decision')}</div>`,
+  `<pre class=diagJson>${esc(JSON.stringify(diag,null,2))}</pre>`
  ].join('');
 }
 function pickDiagSymbol(sym){$('diagSymbol').value=sym;$('diagStatus').textContent='loaded example '+sym}
