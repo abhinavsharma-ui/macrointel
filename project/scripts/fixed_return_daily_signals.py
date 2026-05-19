@@ -468,16 +468,17 @@ After completing all analysis, output ONLY the following JSON.
 No text before or after. No markdown. No explanation outside the JSON.
 Must be valid Python json.loads() parseable.
 
-{"SYMBOL": {"decision": "proceed|reduce_half|skip", "reason": "one sentence with specific data values cited", "gates": {"G1": "value:status", "G2": "value:status", "G3": "value:status", "G4": "value:status", "G5": "value:status", "G6": "value:status"}, "hk_fired": "none|HK1|HK2|HK3|HK4", "setup_score": 0}}
+{"SYMBOL": {"decision": "proceed|reduce_half|skip", "reason": "one sentence with specific data values cited", "confidence": "high|medium|low", "event_type": "none|earnings|fda|m_and_a|analyst_cluster|regulatory|product|macro|other", "event_confidence": 0.0, "expected_hold_days": 8, "gates": {"G1": "value:status", "G2": "value:status", "G3": "value:status", "G4": "value:status", "G5": "value:status", "G6": "value:status"}, "hk_fired": "none|HK1|HK2|HK3|HK4", "setup_score": 0}}
 
 Replace SYMBOL with the actual ticker. decision must be exactly one of: proceed / reduce_half / skip
+event_type and event_confidence are required. Use event_type="none" when there is no specific catalyst.
 
 """
 
 
 TOOLS = [
     {"type":"function","function":{"name":"check_short_interest","description":"Return short interest % of float and short ratio. Gate G1: <25% required for PROCEED.","parameters":{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}}},
-    {"type":"function","function":{"name":"check_options_iv","description":"Return 30-day ATM implied volatility (%) and put/call ratio. Gate G2: IV<80% required.","parameters":{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}}},
+    {"type":"function","function":{"name":"check_options_iv","description":"Return options-vol diagnostics: ATM IV, IV vs realized, put/call ratio, skew proxy and unusual risk flags. Gate G2: IV<80% preferred; HK4: IV>100% hard skip.","parameters":{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}}},
     {"type":"function","function":{"name":"check_price_momentum","description":"Return 10-day trend (up/down/flat), RSI-14, pct from 52w high/low. Gates G3 and G6.","parameters":{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}}},
     {"type":"function","function":{"name":"check_sector_performance","description":"Return 5-day return of sector ETF. Gate G4: >-2% required.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"sector":{"type":"string"}},"required":["symbol","sector"]}}},
     {"type":"function","function":{"name":"analyze_news_risk","description":"Classify headlines: HARD_STOP / ELEVATED / NEUTRAL / POSITIVE_CATALYST. Gate G5: no HARD_STOP.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"headlines":{"type":"array","items":{"type":"string"}}},"required":["symbol","headlines"]}}},
@@ -509,22 +510,29 @@ def _handle_tool_call(name, args):
         return _j.dumps(r)
 
     elif name == "check_options_iv":
-        r = {"symbol":sym,"iv_pct":None,"put_call_ratio":None,"status":"unknown"}
-        if _yf:
-            try:
-                tk = _yf.Ticker(sym); exp = tk.options
-                if exp:
-                    ch = tk.option_chain(exp[0]); spot = tk.info.get("regularMarketPrice")
-                    if spot and not ch.calls.empty:
-                        atm = ch.calls.iloc[(ch.calls["strike"]-spot).abs().argsort()[:1]]
-                        r["iv_pct"] = round(float(atm["impliedVolatility"].iloc[0])*100,1)
-                        if r["iv_pct"]: _per_symbol_iv[sym] = r["iv_pct"]
-                    if not ch.calls.empty and not ch.puts.empty:
-                        r["put_call_ratio"] = round(ch.puts["openInterest"].sum()/max(ch.calls["openInterest"].sum(),1),2)
-                    r["status"] = "ok" if r["iv_pct"] else "no_data"
-                else: r["status"]="no_chain"
-            except Exception as e: r["status"]=f"error:{e}"
-        return _j.dumps(r)
+        try:
+            from options_vol_diagnostics import cached_or_fetch
+            r = cached_or_fetch(sym)
+            if r.get("iv_pct"):
+                _per_symbol_iv[sym] = float(r["iv_pct"])
+            return _j.dumps(r)
+        except Exception:
+            r = {"symbol":sym,"iv_pct":None,"put_call_ratio":None,"status":"unknown"}
+            if _yf:
+                try:
+                    tk = _yf.Ticker(sym); exp = tk.options
+                    if exp:
+                        ch = tk.option_chain(exp[0]); spot = tk.info.get("regularMarketPrice")
+                        if spot and not ch.calls.empty:
+                            atm = ch.calls.iloc[(ch.calls["strike"]-spot).abs().argsort()[:1]]
+                            r["iv_pct"] = round(float(atm["impliedVolatility"].iloc[0])*100,1)
+                            if r["iv_pct"]: _per_symbol_iv[sym] = r["iv_pct"]
+                        if not ch.calls.empty and not ch.puts.empty:
+                            r["put_call_ratio"] = round(ch.puts["openInterest"].sum()/max(ch.calls["openInterest"].sum(),1),2)
+                        r["status"] = "ok" if r["iv_pct"] else "no_data"
+                    else: r["status"]="no_chain"
+                except Exception as e: r["status"]=f"error:{e}"
+            return _j.dumps(r)
 
     elif name == "check_price_momentum":
         r = {"symbol":sym,"trend_10d":"unknown","rsi_14":None,"pct_from_52w_high":None,"pct_from_52w_low":None,"status":"unknown"}
@@ -599,8 +607,12 @@ def _build_llm_user_message(candidates, spy_pct, qqq_pct, num_signals):
         sec=c.get("sector") or ""; pct=c.get("pct_today")
         pct_str=f"{pct:+.2f}%" if isinstance(pct,(int,float)) and pct is not None else "unknown"
         lines.append(f"- {c['symbol']} prob={c['probability']:.4f} today={pct_str} sector={sec or 'unknown'}")
+        if c.get("factor_composite") is not None:
+            lines.append(f"    FACTOR_OVERLAY: composite={float(c.get('factor_composite') or 0):.3f} momentum={float(c.get('factor_momentum') or 0):.3f} low_vol={float(c.get('factor_low_vol') or 0):.3f} quality={float(c.get('factor_quality') or 0):.3f}")
+        if c.get("options_diagnostics"):
+            lines.append(f"    OPTIONS_DIAGNOSTICS: {c.get('options_diagnostics')}")
         for h in c.get("headlines",[]): lines.append(f"    NEWS: {h}")
-    lines.append(""); lines.append("For each symbol: run all 6 tools, complete all 5 phases, then return JSON.")
+    lines.append(""); lines.append("For each symbol: run all tools, classify event_type/event_confidence, complete all phases, then return JSON.")
     return "\n".join(lines)
 
 
@@ -750,6 +762,15 @@ def _apply_llm_decisions(signals, decisions):
         decision = str(d.get("decision", "reduce_half")).lower().strip()
         reason = str(d.get("reason", "")).strip()[:120]
         confidence = str(d.get("confidence", "medium")).lower().strip()
+        event_type = str(d.get("event_type", "none")).lower().strip()[:40] or "none"
+        try:
+            event_confidence = max(0.0, min(1.0, float(d.get("event_confidence", 0.0) or 0.0)))
+        except Exception:
+            event_confidence = 0.0
+        try:
+            expected_hold_days = int(d.get("expected_hold_days") or s.get("hold_days") or HOLD_DAYS)
+        except Exception:
+            expected_hold_days = int(s.get("hold_days") or HOLD_DAYS)
         if decision == "skip":
             print(f"LLM {sym}: skip [{confidence}] — {reason}", flush=True)
             continue
@@ -758,12 +779,18 @@ def _apply_llm_decisions(signals, decisions):
             s["llm_decision"] = "reduce_half"
             s["llm_reason"] = reason
             s["llm_confidence"] = confidence
+            s["event_type"] = event_type
+            s["event_confidence"] = round(event_confidence, 4)
+            s["llm_expected_hold_days"] = expected_hold_days
             print(f"LLM {sym}: reduce_half [{confidence}] — {reason}", flush=True)
             out.append(s)
             continue
         s["llm_decision"] = "proceed"
         s["llm_reason"] = reason
         s["llm_confidence"] = confidence
+        s["event_type"] = event_type
+        s["event_confidence"] = round(event_confidence, 4)
+        s["llm_expected_hold_days"] = expected_hold_days
         print(f"LLM {sym}: proceed [{confidence}] — {reason}", flush=True)
         out.append(s)
     for i, s in enumerate(out, 1):
@@ -1151,11 +1178,22 @@ def main():
     classes = list(getattr(model, "classes_", [0, 1]))
     pos_idx = classes.index(1) if 1 in classes else proba.shape[1]-1
     live["probability"] = proba[:, pos_idx]
-    qualified = live[live["probability"] >= SIG_THRESHOLD].sort_values("probability", ascending=False)
+    factor_report = {"enabled": False, "status": "not_run"}
+    rank_col = "probability"
+    try:
+        from factor_overlay import apply_factor_overlay
+
+        live, factor_report = apply_factor_overlay(live)
+        if "factor_rank_score" in live.columns:
+            rank_col = "factor_rank_score"
+    except Exception as exc:
+        factor_report = {"enabled": False, "status": "error", "error": str(exc)[:180]}
+        print(f"WARN factor overlay failed: {exc}", flush=True)
+    qualified = live[live["probability"] >= SIG_THRESHOLD].sort_values(rank_col, ascending=False)
     pre_cap = len(qualified)
     try:
-        score_cols = [c for c in ["symbol", "probability", "price", "entry_price", "adv20_dollar_vol", "pct_today", "feature_date"] if c in live.columns]
-        score_rows = live[score_cols].sort_values("probability", ascending=False).to_dict(orient="records")
+        score_cols = [c for c in ["symbol", "probability", "factor_rank_score", "factor_composite", "factor_momentum", "factor_low_vol", "factor_quality", "factor_value", "price", "entry_price", "adv20_dollar_vol", "pct_today", "feature_date"] if c in live.columns]
+        score_rows = live[score_cols].sort_values(rank_col, ascending=False).to_dict(orient="records")
         for idx, row in enumerate(score_rows, 1):
             row["ml_rank"] = idx
             if row.get("probability") is not None:
@@ -1167,6 +1205,8 @@ def main():
             "top_n": SIG_TOP_N,
             "scored_universe_count": int(len(live)),
             "qualified_count": int(pre_cap),
+            "rank_column": rank_col,
+            "factor_overlay": factor_report,
             "scores": score_rows,
         }, indent=2), encoding="utf-8")
     except Exception as exc:
@@ -1245,6 +1285,12 @@ def main():
             "stop_loss_price": round(entry * (1 - STOP_LOSS_PCT / 100), 4),
             "expected_exit_date": expected_exit_date, "hold_days": HOLD_DAYS,
             "feature_date": str(r.get("feature_date", r.get("date", "unknown"))),
+            "factor_composite": round(float(r.get("factor_composite", 0.5) or 0.5), 6),
+            "factor_rank_score": round(float(r.get("factor_rank_score", r.get("probability", 0)) or 0), 6),
+            "factor_momentum": round(float(r.get("factor_momentum", 0.5) or 0.5), 6),
+            "factor_low_vol": round(float(r.get("factor_low_vol", 0.5) or 0.5), 6),
+            "factor_quality": round(float(r.get("factor_quality", 0.5) or 0.5), 6),
+            "factor_value": round(float(r.get("factor_value", 0.5) or 0.5), 6),
         })
 
     if LLM_FILTER_ENABLED and signals:
@@ -1261,7 +1307,28 @@ def main():
                         pct_today = float(val)
                 sector = get_sector(sym) or ""
                 headlines = fetch_news(sym, signal_date)
-                candidates.append({"symbol": sym, "probability": s["probability"], "pct_today": pct_today, "sector": sector, "headlines": headlines})
+                opt_diag = {}
+                try:
+                    from options_vol_diagnostics import cached_or_fetch
+
+                    opt_diag = cached_or_fetch(sym, row_match.iloc[0].to_dict() if len(row_match) > 0 else None)
+                    if opt_diag.get("iv_pct"):
+                        _per_symbol_iv[sym.upper()] = float(opt_diag["iv_pct"])
+                    s["options_diagnostics"] = {k: opt_diag.get(k) for k in ("status", "iv_pct", "iv_rank_proxy", "iv_vs_realized", "put_call_ratio", "skew_proxy", "flags")}
+                except Exception as exc:
+                    s["options_diagnostics"] = {"status": "error", "error": str(exc)[:120]}
+                candidates.append({
+                    "symbol": sym,
+                    "probability": s["probability"],
+                    "pct_today": pct_today,
+                    "sector": sector,
+                    "headlines": headlines,
+                    "factor_composite": s.get("factor_composite"),
+                    "factor_momentum": s.get("factor_momentum"),
+                    "factor_low_vol": s.get("factor_low_vol"),
+                    "factor_quality": s.get("factor_quality"),
+                    "options_diagnostics": s.get("options_diagnostics"),
+                })
             _save_news_cache()
             _save_sector_cache()
             print(f"LLM FILTER: scoring {len(candidates)} candidates with {LLM_MODEL}", flush=True)
@@ -1272,6 +1339,16 @@ def main():
             print(f"LLM FILTER: unexpected error ({e}); keeping all signals", flush=True)
     elif not LLM_FILTER_ENABLED:
         print("LLM FILTER: disabled via LLM_FILTER_ENABLED=0", flush=True)
+
+    try:
+        from options_vol_diagnostics import write_report as write_options_report
+
+        write_options_report([
+            {**(s.get("options_diagnostics") or {"status": "not_checked"}), "symbol": s.get("symbol")}
+            for s in signals
+        ])
+    except Exception as exc:
+        print(f"WARN options diagnostics report failed: {exc}", flush=True)
 
 
     # ── SPY Regime Gate ──────────────────────────────────────────────────────
@@ -1301,11 +1378,28 @@ def main():
         "threshold": SIG_THRESHOLD,
         "scored_universe_count": int(len(live)),
         "allowed_universe_count": int(len(allowed)),
+        "rank_column": rank_col,
+        "factor_overlay": factor_report,
         "profit_target_pct": PROFIT_TARGET_PCT,
         "stop_loss_pct": STOP_LOSS_PCT,
         "hold_days": HOLD_DAYS,
         "signals": signals,
     }
+    try:
+        from model_health import write_signal_health_report
+
+        payload["model_health"] = write_signal_health_report(
+            live=live,
+            signals=signals,
+            features=features,
+            model_path=model_path,
+            threshold=SIG_THRESHOLD,
+            top_n=SIG_TOP_N,
+            extra={"rank_column": rank_col, "factor_overlay": factor_report},
+        )
+    except Exception as exc:
+        payload["model_health"] = {"status": "error", "error": str(exc)[:180]}
+        print(f"WARN model health report failed: {exc}", flush=True)
     print(f"SIGNAL DATE {signal_date}")
     print(f"MODEL {model_path}")
     print(f"UNIVERSE scored={len(live)} allowed={len(allowed)}")

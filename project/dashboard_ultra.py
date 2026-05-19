@@ -51,6 +51,21 @@ SCORES = [
     BASE / "reports/fixed_return_daily_scores.json",
     BASE / "project/reports/fixed_return_daily_scores.json",
 ]
+MODEL_HEALTH = [
+    ROOT / "reports/model_health.json",
+    BASE / "reports/model_health.json",
+    BASE / "project/reports/model_health.json",
+]
+UNIFIED_RISK = [
+    ROOT / "reports/unified_risk_state.json",
+    BASE / "reports/unified_risk_state.json",
+    BASE / "project/reports/unified_risk_state.json",
+]
+SL_DECISIONS = [
+    ROOT / "reports/sl_decisions.json",
+    BASE / "reports/sl_decisions.json",
+    BASE / "project/reports/sl_decisions.json",
+]
 TRADES = list(
     dict.fromkeys(
         Path(p).resolve()
@@ -393,6 +408,7 @@ def open_positions():
                 "unrealized_pnl": round(pnl, 2),
                 "unrealized_pnl_pct": round(ret, 2),
                 "confidence": num(pos.get("probability") or pos.get("confidence")),
+                "sl_grace": pos.get("sl_grace") if isinstance(pos.get("sl_grace"), dict) else None,
             }
         )
     for key, val in (broker.get("positions", {}) if isinstance(broker, dict) else {}).items():
@@ -419,6 +435,7 @@ def open_positions():
                 "unrealized_pnl": round((current - entry) * qty, 2),
                 "unrealized_pnl_pct": round(ret, 2),
                 "confidence": 0.0,
+                "sl_grace": None,
             }
         )
     return sorted(rows, key=lambda row: row["days_held"], reverse=True)
@@ -1120,6 +1137,7 @@ def filter_pipeline_payload():
 def risk_payload():
     positions = open_positions()
     nse = nse_payload()
+    unified = read_json(UNIFIED_RISK, {})
     us_exposures = sorted([num(row.get("position_pct")) for row in positions], reverse=True)
     nse_exposures = sorted([num(row.get("current_value_inr") or row.get("notional_inr")) for row in nse.get("positions", [])], reverse=True)
     nse_notional = sum(nse_exposures)
@@ -1132,6 +1150,9 @@ def risk_payload():
             "unrealized_pnl": round(us_unrealized, 2),
             "losers": len([row for row in positions if num(row.get("unrealized_pnl")) < 0]),
             "near_stop": len([row for row in positions if num(row.get("current_price")) <= num(row.get("stop_loss_price")) * 1.015]),
+            "sl_grace": len([row for row in positions if row.get("sl_grace")]),
+            "unified_state": unified.get("state") if isinstance(unified, dict) else None,
+            "unified_messages": unified.get("messages", []) if isinstance(unified, dict) else [],
         },
         "nse": {
             "gross_notional_inr": round(nse_notional, 2),
@@ -1152,6 +1173,11 @@ def alerts_payload():
         stop = num(row.get("stop_loss_price"))
         target = num(row.get("profit_target_price"))
         ret = num(row.get("unrealized_pnl_pct"))
+        grace = row.get("sl_grace") if isinstance(row.get("sl_grace"), dict) else None
+        if grace:
+            verdict = grace.get("last_verdict") or "verifying"
+            reason = grace.get("llm_reason") or grace.get("key_signal") or "below soft stop"
+            alerts.append({"scope": "US", "level": "warn", "text": f"{sym} in SL verification: {verdict} - {reason}"})
         if stop and current <= stop * 1.015:
             alerts.append({"scope": "US", "level": "danger", "text": f"{sym} is within 1.5% of stop"})
         if target and current >= target * 0.985:
@@ -1230,6 +1256,9 @@ def operator_payload():
     alerts = alerts_payload()
     p = portfolio()
     nse = nse_payload()
+    health = read_json(MODEL_HEALTH, {})
+    sl_log = read_json(SL_DECISIONS, [])
+    sl_count = len(sl_log if isinstance(sl_log, list) else sl_log.get("decisions", [])) if sl_log else 0
     summary = [
         "US cron active" if engine["cron_active"] else "US cron not confirmed",
         f"US next MTM {clock['next_us_intraday']}",
@@ -1238,6 +1267,8 @@ def operator_payload():
         f"NSE next daily {clock['next_nse_daily']}",
         f"US open positions {p.get('open_positions_count', 0)}",
         f"NSE open positions {nse.get('metrics', {}).get('positions', 0)}",
+        f"model health {health.get('status', 'pending') if isinstance(health, dict) else 'pending'}",
+        f"SL decisions {sl_count}",
         f"alerts {len(alerts)}",
     ]
     return {
@@ -1248,6 +1279,7 @@ def operator_payload():
         "risk": risk,
         "alerts": alerts,
         "reality": reality_payload(),
+        "model_health": health,
         "nse_shadow": nse_shadow_payload(),
         "summary": summary,
         "refresh": {"default_seconds": 30, "server_time": datetime.now(UTC).isoformat()},
@@ -1570,6 +1602,7 @@ function updateChromeRegime(){
 }
 document.querySelectorAll('.tab').forEach(btn=>btn.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));btn.classList.add('active');$(btn.dataset.view).classList.add('active');activeRegion=btn.dataset.view==='nse'?'nse':'us';updateChromeRegime()});
 const age=s=>s==null?'--':s<60?s+'s ago':s<3600?Math.round(s/60)+'m ago':Math.round(s/3600)+'h ago';
+function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(ch){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]})}
 function kv(rows){return rows.map(r=>`<div class=stackRow><span>${r[0]}</span><b class="${r[2]||''}">${r[1]}</b></div>`).join('')}
 function dot(on,bad=false){return `<span class="statusDot ${bad?'bad':on?'on':'warn'}"></span>`}
 function renderAlerts(id,rows){$(id).innerHTML=rows.length?rows.map(a=>`<div class="alertItem ${a.level||''}"><b>${a.scope}</b> ${a.text}</div>`).join(''):'<div class="alertItem good">No active flags</div>'}
@@ -1701,7 +1734,8 @@ async function loadOperator(){
  const actions=o.actions||[]; $('actionCount').textContent=actions.length+' events'; $('actionLog').innerHTML=actions.length?actions.map(x=>`<div class=event><b>${x.source}</b><span>${x.text}<br><small>${age(x.age_seconds)}</small></span></div>`).join(''):'<div class=empty>No recent events</div>';
  const usF=f.us||{}, nseF=f.nse||{}, usR=r.us||{}, nseR=r.nse||{}, usReal=real.us||{};
  $('usFilter').innerHTML=kv([['accepted signals', usF.raw_signals||0,'blue'],['open positions', usF.open_positions||0,'blue'],['capacity left', usF.capacity_left||0,'green'],['note', usF.note||'--','']]);
- $('usRisk').innerHTML=kv([['gross exposure', (usR.gross_exposure_pct||0).toFixed(2)+'%','blue'],['top 5 exposure', (usR.top5_exposure_pct||0).toFixed(2)+'%','blue'],['biggest position', (usR.biggest_position_pct||0).toFixed(2)+'%','amber'],['near stop', usR.near_stop||0,(usR.near_stop||0)>0?'red':'green'],['open losers', usR.losers||0,(usR.losers||0)>0?'amber':'green']]);
+ const riskState=usR.unified_state||'normal', riskTone=(riskState==='normal'||riskState==='ok')?'green':'amber';
+ $('usRisk').innerHTML=kv([['gross exposure', (usR.gross_exposure_pct||0).toFixed(2)+'%','blue'],['top 5 exposure', (usR.top5_exposure_pct||0).toFixed(2)+'%','blue'],['biggest position', (usR.biggest_position_pct||0).toFixed(2)+'%','amber'],['near stop', usR.near_stop||0,(usR.near_stop||0)>0?'red':'green'],['SL verify', usR.sl_grace||0,(usR.sl_grace||0)>0?'amber':'green'],['risk state', riskState,riskTone],['open losers', usR.losers||0,(usR.losers||0)>0?'amber':'green']]);
  $('usReality').innerHTML=kv([['live WR', usReal.live_win_rate==null?'--':Number(usReal.live_win_rate).toFixed(1)+'%','blue'],['backtest WR', '60.6%','blue'],['live closed P&L', money(usReal.live_closed_pnl||0),(usReal.live_closed_pnl||0)>=0?'green':'red'],['PT hit rate', usReal.pt_hit_rate==null?'--':Number(usReal.pt_hit_rate).toFixed(1)+'%','blue'],['closed sample', usReal.sample_trades||0,'amber']]);
  $('nseShadow').innerHTML=kv([['state', (sh.state||'--').toUpperCase(),'blue'],['gate fired', sh.gate_fired?'YES':'NO',sh.gate_fired?'red':'green'],['narrow score', sh.narrow_score==null?'--':Number(sh.narrow_score).toFixed(3),'amber'],['VIX', sh.vix==null?'--':Number(sh.vix).toFixed(2),'blue'],['Nifty 60d', sh.nifty_ret60==null?'--':Number(sh.nifty_ret60).toFixed(2)+'%',(sh.nifty_ret60||0)>=0?'green':'red']]);
  $('nseFilter').innerHTML=kv([['pre gate', nseF.pre_gate||0,'blue'],['gate blocked', nseF.gate_blocked||0,(nseF.gate_blocked||0)>0?'red':'green'],['post gate', nseF.post_gate||0,'blue'],['execution filtered', nseF.execution_filtered||0,(nseF.execution_filtered||0)>0?'amber':'green'],['post filter', nseF.post_filter||0,'green']]);
@@ -1718,7 +1752,7 @@ async function loadUS(){
  $('dd').textContent=pct(p.drawdown_from_peak_pct); tone($('dd'),-Number(p.drawdown_from_peak_pct||0));
  updateChromeRegime(); $('spy').textContent=Number(r.spy_realized_vol||0).toFixed(2)+'%'; $('reg').textContent=r.vol_regime||'--'; $('mul').textContent=(r.vol_multiplier||'--')+'x'; $('desc').textContent=r.description||''; $('updated').textContent='updated '+new Date().toLocaleTimeString();
  $('sd').textContent=s.signal_date||'--'; const sig=s.signals||[]; $('sig').innerHTML=sig.length?sig.map(x=>`<tr><td>${x.rank}</td><td><b>${x.symbol}</b></td><td>${Number(x.probability||0).toFixed(3)}</td><td>${money(x.entry_price)}</td><td class=green>${money(x.profit_target_price)}</td><td class=red>${money(x.stop_loss_price)}</td></tr>`).join(''):'<tr><td colspan=6 class=empty>No signals</td></tr>';
- const pos=p.positions||[]; $('pb').textContent=pos.length+' open'; window.__lastPositions=pos; window.__lastPositions=pos; $('pos').innerHTML=pos.length?pos.map(x=>{let c=Number(x.unrealized_pnl||0)>=0?'green':'red',prog=Math.min(100,(Number(x.days_held||0)/8)*100);return `<tr><td><b>${x.symbol}</b></td><td>${money(x.entry_price)}</td><td>${money(x.current_price)}</td><td class=green>${money(x.profit_target_price)}</td><td class=red>${money(x.stop_loss_price)}</td><td>${x.days_held}d</td><td><div class=bar><div class=fill style="width:${prog}%"></div></div></td><td class=${c}>${money(x.unrealized_pnl)}</td><td class=${c}>${pct(x.unrealized_pnl_pct)}</td><td>${Number(x.confidence||0).toFixed(3)}</td></tr>`}).join(''):'<tr><td colspan=10 class=empty>No open positions</td></tr>';
+ const pos=p.positions||[]; $('pb').textContent=pos.length+' open'; window.__lastPositions=pos; $('pos').innerHTML=pos.length?pos.map(x=>{let c=Number(x.unrealized_pnl||0)>=0?'green':'red',prog=Math.min(100,(Number(x.days_held||0)/8)*100),g=x.sl_grace||null,gb=g?` <span class=badge title="${esc(g.llm_reason||g.key_signal||'SL verification active')}">SL</span>`:'';return `<tr><td><b>${esc(x.symbol)}</b>${gb}</td><td>${money(x.entry_price)}</td><td>${money(x.current_price)}</td><td class=green>${money(x.profit_target_price)}</td><td class=red>${money(x.stop_loss_price)}</td><td>${x.days_held}d</td><td><div class=bar><div class=fill style="width:${prog}%"></div></div></td><td class=${c}>${money(x.unrealized_pnl)}</td><td class=${c}>${pct(x.unrealized_pnl_pct)}</td><td>${Number(x.confidence||0).toFixed(3)}</td></tr>`}).join(''):'<tr><td colspan=10 class=empty>No open positions</td></tr>';
  const ua=snap.unrealized_attribution||{}, ul=ua.losers||[], uw=ua.winners||[], urows=[...ul,...uw].slice(0,16);$('usAttrBadge').textContent=`net ${money(ua.net_unrealized_pnl||0)}`;$('usAttribution').innerHTML=urows.length?urows.map(x=>{const pnl=Number(x.pnl||0),ret=Number(x.return_pct||0);return `<tr><td><b>${x.symbol}</b></td><td>${Number(x.position_pct||0).toFixed(3)}%</td><td>${money(x.entry_price)}</td><td>${money(x.current_price)}</td><td class="${ret>=0?'green':'red'}">${pct(ret)}</td><td class="${pnl>=0?'green':'red'}">${money(pnl)}</td><td>${pnl<0?Number(x.gross_loss_share_pct||0).toFixed(1)+'%':'--'}</td></tr>`}).join(''):'<tr><td colspan=7 class=empty>No open P&L attribution yet</td></tr>';
  const tr=a.trades||[]; $('cb').textContent=(a.closed_trades||0)+' closed'; $('tr').innerHTML=tr.length?tr.map(x=>{let c=Number(x.pnl||0)>=0?'green':'red';return `<tr><td>${x.exit_date||'--'}</td><td><b>${x.symbol}</b></td><td>${x.quantity!=null?x.quantity.toFixed(0)+'sh':'--'}</td><td>${money(x.entry_price)}</td><td>${money(x.exit_price)}</td><td class=${c}>${pct(x.return_pct)}</td><td class=${c}>${money(x.pnl)}</td><td>${x.exit_reason||'--'}</td></tr>`}).join(''):'<tr><td colspan=9 class=empty>No closed trades</td></tr>';
  const up=pos.filter(x=>Number(x.unrealized_pnl||0)>0).length, down=pos.filter(x=>Number(x.unrealized_pnl||0)<0).length, total=pos.reduce((z,x)=>z+Number(x.unrealized_pnl||0),0); $('outBadge').textContent=(a.closed_trades||0)+' closed'; $('summaryBox').innerHTML=`<div class=metricLine><span class=label>Open Winners</span><b class=green>${up}</b></div><div class=metricLine><span class=label>Open Losers</span><b class=red>${down}</b></div><div class=metricLine><span class=label>Unrealized</span><b class="${total>=0?'green':'red'}">${money(total)}</b></div><div class=metricLine><span class=label>PT Hit Rate</span><b>${a.profit_target_hit_rate==null?'--':Number(a.profit_target_hit_rate).toFixed(1)+'%'}</b></div>`;

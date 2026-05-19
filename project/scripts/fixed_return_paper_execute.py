@@ -10,6 +10,14 @@ try:
 except ImportError:
     ALPACA_ENABLED = False
     print("ALPACA BRIDGE: alpaca_bridge not found, orders skipped")
+try:
+    import sl_verifier
+except Exception:
+    sl_verifier = None
+try:
+    import portfolio_risk
+except Exception:
+    portfolio_risk = None
 
 SIGNALS_PATH = Path(os.getenv("FR_SIGNALS_PATH", "reports/fixed_return_daily_signals.json"))
 POSITIONS_PATH = Path(os.getenv("FR_POSITIONS_PATH", "reports/fixed_return_open_positions.json"))
@@ -170,9 +178,16 @@ def main():
         exit_price = None
         stop_price = float(pos["stop_loss_price"])
         target_price = float(pos["profit_target_price"])
+        stop_hit = px["low"] <= stop_price or px["close"] <= stop_price
+        if stop_hit and sl_verifier and sl_verifier.should_skip_mechanical_stop(pos, px, today):
+            pos["last_price"] = px["close"]
+            pos["last_price_date"] = px["date"]
+            pos["sl_mechanical_stop_skipped"] = datetime.now(timezone.utc).isoformat()
+            still_open.append(pos)
+            continue
         if px["low"] <= stop_price and px["high"] >= target_price:
             reason, exit_price = "both_hit_stop_first", stop_price
-        elif px["low"] <= stop_price or px["close"] <= stop_price:
+        elif stop_hit:
             reason, exit_price = "stop_loss", stop_price
         elif px["high"] >= target_price or px["close"] >= target_price:
             reason, exit_price = "profit_target", float(pos["profit_target_price"])
@@ -211,17 +226,28 @@ def main():
             continue
         if len(still_open) + len(new_positions) >= MAX_OPEN:
             break
-        new_positions.append({
+        candidate_position = {
             "symbol": sym, "entry_date": today, "entry_price": float(sig["entry_price"]),
             "profit_target_price": float(sig["profit_target_price"]),
             "stop_loss_price": float(sig["stop_loss_price"]),
             "exit_date": sig["expected_exit_date"],
             "position_pct": float(sig["position_pct"]),
             "probability": float(sig["probability"]),
+            "llm_decision": sig.get("llm_decision"),
+            "llm_reason": sig.get("llm_reason"),
+            "event_type": sig.get("event_type"),
+            "event_confidence": sig.get("event_confidence"),
+            "factor_composite": sig.get("factor_composite"),
             "hold_days": int(sig["hold_days"]),
             "status": "open",
             "source": "fixed_return_h8_pt5_volscale",
-        })
+        }
+        if portfolio_risk:
+            ok, risk_reason, _risk_state = portfolio_risk.approve_new_signal(sig, still_open, new_positions)
+            if not ok:
+                print(f"SKIP risk blocked {sym}: {risk_reason}")
+                continue
+        new_positions.append(candidate_position)
 
     updated = [p for p in positions if p.get("status") != "open"] + still_open + new_positions
     out = {"updated_at": datetime.now(timezone.utc).isoformat(), "positions": updated}
@@ -242,6 +268,11 @@ def main():
     if ALPACA_ENABLED:
         for p in new_positions:
             safe_alpaca_buy(p)
+    if portfolio_risk:
+        try:
+            portfolio_risk.build_risk_state(updated)
+        except Exception as exc:
+            print(f"WARN risk state write failed: {exc}")
     print(f"POSITIONS WRITTEN TO {POSITIONS_PATH}")
 
 if __name__ == "__main__":

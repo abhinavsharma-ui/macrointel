@@ -233,9 +233,10 @@ def write_history(positions: list[dict], stamp_now: datetime, quotes: dict[str, 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Intraday US fixed-return mark-to-market from yfinance.")
+    parser = argparse.ArgumentParser(description="Intraday US fixed-return mark-to-market from Alpaca.")
     parser.add_argument("--interval", default="30m")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--no-sl-verify", action="store_true", help="Update MTM only; skip intelligent stop-loss verification.")
     args = parser.parse_args()
 
     stamp_now = now_ny()
@@ -260,6 +261,14 @@ def main() -> int:
     quotes = download_quotes(symbols, args.interval)
 
     updated = [update_position(dict(p), quotes.get(norm_symbol(p.get("symbol"))), stamp_now, args.interval) for p in positions]
+    sl_events = []
+    if not args.no_sl_verify:
+        try:
+            from sl_verifier import process_positions
+
+            updated, sl_events = process_positions(updated, quotes, stamp_now)
+        except Exception as exc:
+            sl_events = [{"action": "sl_verify_error", "error": str(exc)[:240]}]
     history_row = write_history(updated, stamp_now, quotes)
     write_shadow_scores(quotes, stamp_now, args.interval)
     write_json(POSITIONS_PATH, {"updated_at": stamp_now.astimezone(timezone.utc).isoformat(), "positions": updated})
@@ -270,6 +279,7 @@ def main() -> int:
         "symbols": symbols,
         "quotes": quotes,
         "summary": history_row,
+        "sl_events": sl_events,
     })
 
     print(json.dumps({
@@ -279,6 +289,7 @@ def main() -> int:
         "open_positions": history_row["open_positions"],
         "unrealized_pnl": history_row["unrealized_pnl"],
         "portfolio_value_est": history_row["portfolio_value_est"],
+        "sl_events": sl_events,
     }, indent=2))
     return 0
 

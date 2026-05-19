@@ -288,6 +288,36 @@ def position_pct(symbol: str, probability: float, vol_multiplier: float) -> floa
     return round(max(sig.BASE_POSITION_PCT * 0.25, min(sig.BASE_POSITION_PCT * 2.0, raw)), 6)
 
 
+def factor_overlay_for_row(symbol: str, probability: float, row: dict) -> dict:
+    try:
+        import pandas as pd
+        from factor_overlay import apply_factor_overlay
+
+        frame = pd.DataFrame([{**row, "symbol": symbol, "probability": probability}])
+        scored, report = apply_factor_overlay(frame)
+        out = scored.iloc[0].to_dict()
+        return {
+            "status": report.get("status", "ok"),
+            "factor_composite": compact_float(out.get("factor_composite"), 6),
+            "factor_rank_score": compact_float(out.get("factor_rank_score"), 6),
+            "momentum": compact_float(out.get("factor_momentum"), 6),
+            "low_vol": compact_float(out.get("factor_low_vol"), 6),
+            "quality": compact_float(out.get("factor_quality"), 6),
+            "value": compact_float(out.get("factor_value"), 6),
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)[:180]}
+
+
+def options_diagnostics_for_row(symbol: str, row: dict) -> dict:
+    try:
+        from options_vol_diagnostics import cached_or_fetch
+
+        return cached_or_fetch(symbol, row=row)
+    except Exception as exc:
+        return {"symbol": symbol, "status": "error", "error": str(exc)[:180]}
+
+
 def quick_allowed_universe(symbol: str, row: dict) -> tuple[bool, str]:
     try:
         if sig.RUNTIME_STATE.exists():
@@ -956,6 +986,8 @@ def build_diagnostics(
             "position_pct_display": round(num(signal.get("position_pct")) * 100.0, 4),
             "vol_multiplier": vol_mult,
         },
+        "factor_overlay": signal.get("factor_composite") if signal.get("factor_composite") is not None else None,
+        "options_diagnostics": signal.get("options_diagnostics"),
         "market": {
             "sector": sector,
             "regime": regime,
@@ -991,6 +1023,10 @@ def diagnose_symbol(
     row, feature_meta = latest_symbol_row(symbol, path, features)
     probability = predict_probability(model, features, row)
     row["probability"] = probability
+    factor_context = factor_overlay_for_row(symbol, probability, row)
+    option_context = options_diagnostics_for_row(symbol, row)
+    if option_context.get("iv_pct"):
+        sig._per_symbol_iv[symbol.upper()] = float(option_context["iv_pct"])
 
     allowed_universe_pass, allowed_reason = quick_allowed_universe(symbol, row)
     sector = sig.get_sector(symbol) or ""
@@ -1039,6 +1075,9 @@ def diagnose_symbol(
         "expected_exit_date": expected_exit_date,
         "hold_days": sig.HOLD_DAYS,
         "feature_date": feature_meta["feature_date"],
+        "factor_composite": factor_context.get("factor_composite"),
+        "factor_rank_score": factor_context.get("factor_rank_score"),
+        "options_diagnostics": {k: option_context.get(k) for k in ("status", "iv_pct", "iv_rank_proxy", "iv_vs_realized", "put_call_ratio", "skew_proxy", "flags")},
     }
 
     pre_llm_gate_names = {
@@ -1106,6 +1145,8 @@ def diagnose_symbol(
         "pre_llm_failed_gates": pre_llm_failed,
         "friend_context": friend_context,
         "diagnostics": diagnostics,
+        "factor_overlay": factor_context,
+        "options_diagnostics": option_context,
         "earnings_features": earnings_features,
         "earnings_calendar": earnings_calendar,
         "llm": llm,
