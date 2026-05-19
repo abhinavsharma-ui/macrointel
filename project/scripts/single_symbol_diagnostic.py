@@ -257,13 +257,41 @@ def quick_allowed_universe(symbol: str, row: dict) -> tuple[bool, str]:
 
 
 def universe_rank(symbol: str, probability: float) -> dict:
-    """Fast dashboard context from the latest saved daily report.
-
-    The full daily cron rescans thousands of files. A dashboard button should not
-    repeat that inside a web request, so this compares the searched symbol with
-    the latest produced signal list and reports the method honestly.
-    """
+    """Fast dashboard context from the latest actual cron score cache."""
     try:
+        scores_path = getattr(sig, "SCORES_JSON", Path("reports/fixed_return_daily_scores.json"))
+        if scores_path.exists():
+            data = json.loads(scores_path.read_text(encoding="utf-8"))
+            scores = data.get("scores", []) if isinstance(data, dict) else []
+            probs = [num(s.get("probability")) for s in scores if isinstance(s, dict)]
+            symbols = {sig.norm_sym(s.get("symbol", "")) for s in scores if isinstance(s, dict)}
+            sorted_probs = sorted(probs + ([] if symbol in symbols else [probability]), reverse=True)
+            if symbol in symbols:
+                match = next((s for s in scores if sig.norm_sym(s.get("symbol", "")) == symbol), {})
+                all_rank = int(match.get("ml_rank") or 0) or None
+            else:
+                all_rank = sum(1 for p in probs if p > probability) + 1
+            final_cutoff = None
+            final_symbols = set()
+            if sig.OUT_JSON.exists():
+                final = json.loads(sig.OUT_JSON.read_text(encoding="utf-8"))
+                final_signals = final.get("signals", []) if isinstance(final, dict) else []
+                final_probs = [num(s.get("probability")) for s in final_signals if isinstance(s, dict)]
+                final_symbols = {sig.norm_sym(s.get("symbol", "")) for s in final_signals if isinstance(s, dict)}
+                final_cutoff = min(final_probs) if final_probs else None
+            would_clear_cutoff = probability >= final_cutoff if final_cutoff is not None else probability >= sig.SIG_THRESHOLD
+            return {
+                "ok": True,
+                "method": "latest_actual_cron_score_cache",
+                "exact_full_rescore": True,
+                "scored_universe_count": data.get("scored_universe_count") or len(scores),
+                "rank": all_rank,
+                "qualified_count": data.get("qualified_count"),
+                "top_n": data.get("top_n") or sig.SIG_TOP_N,
+                "selected_by_top_n": symbol in final_symbols or would_clear_cutoff,
+                "top_n_cutoff_probability": final_cutoff,
+                "latest_report_symbols": sorted(final_symbols),
+            }
         if not sig.OUT_JSON.exists():
             return {
                 "ok": True,
@@ -279,8 +307,7 @@ def universe_rank(symbol: str, probability: float) -> dict:
         signals = data.get("signals", []) if isinstance(data, dict) else []
         probs = [num(s.get("probability")) for s in signals if isinstance(s, dict)]
         selected_symbols = {sig.norm_sym(s.get("symbol", "")) for s in signals if isinstance(s, dict)}
-        sorted_probs = sorted(probs + [probability], reverse=True)
-        all_rank = sorted_probs.index(probability) + 1 if probability in sorted_probs else None
+        all_rank = next((i + 1 for i, s in enumerate(signals) if sig.norm_sym(s.get("symbol", "")) == symbol), None)
         cutoff = None
         if probs:
             cutoff = min(probs)
@@ -338,7 +365,11 @@ def earnings_calendar_gate(symbol: str) -> dict:
 def run_llm(symbol: str, signal: dict, row: dict, signal_date: str) -> dict:
     if not sig.LLM_FILTER_ENABLED:
         return {"ran": False, "status": "disabled"}
-    if not sig.LLM_API_KEYS:
+    search_keys = list(getattr(sig, "LLM_SEARCH_API_KEYS", []) or [])
+    if not search_keys:
+        raw = [k.strip() for k in os.getenv("GROQ_API_KEY", "").split(",") if k.strip()]
+        search_keys = raw[-1:] if raw else []
+    if not search_keys:
         return {"ran": False, "status": "keys_missing"}
     spy_pct, qqq_pct = sig.market_context_pct()
     sector = sig.get_sector(symbol) or ""
@@ -351,9 +382,26 @@ def run_llm(symbol: str, signal: dict, row: dict, signal_date: str) -> dict:
         "headlines": headlines,
     }
     started = time.time()
-    decisions = sig.call_llm_filter([candidate], spy_pct, qqq_pct, 1)
-    sig._save_news_cache()
-    sig._save_sector_cache()
+    old_keys = sig.LLM_API_KEYS
+    old_index = getattr(sig, "_llm_key_index", 0)
+    old_dead = set(getattr(sig, "_llm_dead_key_indices", set()))
+    old_sleep = os.environ.get("LLM_TOOL_SLEEP_SECONDS")
+    try:
+        sig.LLM_API_KEYS = search_keys
+        sig._llm_key_index = 0
+        sig._llm_dead_key_indices = set()
+        os.environ["LLM_TOOL_SLEEP_SECONDS"] = os.getenv("SYMBOL_DIAG_LLM_TOOL_SLEEP_SECONDS", "0.35")
+        decisions = sig.call_llm_filter([candidate], spy_pct, qqq_pct, 1)
+        sig._save_news_cache()
+        sig._save_sector_cache()
+    finally:
+        sig.LLM_API_KEYS = old_keys
+        sig._llm_key_index = old_index
+        sig._llm_dead_key_indices = old_dead
+        if old_sleep is None:
+            os.environ.pop("LLM_TOOL_SLEEP_SECONDS", None)
+        else:
+            os.environ["LLM_TOOL_SLEEP_SECONDS"] = old_sleep
     decision = decisions.get(symbol) or decisions.get(symbol.upper()) or {}
     if not decision:
         return {
@@ -458,8 +506,21 @@ def diagnose_symbol(symbol: str, refresh: bool = True, run_llm_filter: bool = Tr
         "feature_date": feature_meta["feature_date"],
     }
 
-    should_run_llm = run_llm_filter and blocklist_pass and feature_meta["rows"] >= 260 and price_pass
-    llm = run_llm(symbol, signal, row, signal_date) if should_run_llm else {"ran": False, "status": "pre_llm_gate_failed"}
+    pre_llm_gate_names = {
+        "blocklist", "data", "freshness", "price", "liquidity", "allowed_universe",
+        "sector", "ml_threshold", "top_n", "earnings_features", "earnings_calendar",
+    }
+    pre_llm_failed = [g["name"] for g in gates if g["name"] in pre_llm_gate_names and not g.get("passed")]
+    should_run_llm = run_llm_filter and not pre_llm_failed
+    llm = (
+        run_llm(symbol, signal, row, signal_date)
+        if should_run_llm
+        else {
+            "ran": False,
+            "status": "not_run_actual_pipeline_failed_" + (pre_llm_failed[0] if pre_llm_failed else "llm_disabled"),
+            "failed_pre_llm_gates": pre_llm_failed,
+        }
+    )
     verdict, would_trade = final_verdict(gates, llm)
 
     payload = {
@@ -482,6 +543,7 @@ def diagnose_symbol(symbol: str, refresh: bool = True, run_llm_filter: bool = Tr
         "sector": sector,
         "rank": rank,
         "gates": gates,
+        "pre_llm_failed_gates": pre_llm_failed,
         "earnings_features": earnings_features,
         "earnings_calendar": earnings_calendar,
         "llm": llm,
