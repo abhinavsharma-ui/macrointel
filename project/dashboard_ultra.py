@@ -1587,7 +1587,6 @@ const $=id=>document.getElementById(id);
 const money=n=>{const v=Number(n);return n==null||isNaN(v)?'--':(v<0?'-':'')+'$'+Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});};
 const stopMoney=x=>Number(x&&x.stop_loss_enabled!==false?x.stop_loss_price:0)>0?money(x.stop_loss_price):'OFF';
 const pct=n=>n==null||isNaN(n)?'--':(Number(n)>0?'+':'')+Number(n).toFixed(2)+'%';
-const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const inr=n=>'Rs '+Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:0});
 function tone(el,n){el.classList.remove('green','red','amber'); if(n>0)el.classList.add('green'); if(n<0)el.classList.add('red')}
 function css(name){return getComputedStyle(document.documentElement).getPropertyValue(name).trim()}
