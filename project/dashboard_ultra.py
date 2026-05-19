@@ -5,12 +5,13 @@ import json
 import math
 import os
 import subprocess
+import sys
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -1303,6 +1304,29 @@ def api_run_signals():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/symbol_diagnostic", methods=["POST"])
+def api_symbol_diagnostic():
+    data = request.get_json(silent=True) or {}
+    symbol = str(data.get("symbol") or "").strip().upper()
+    if not symbol:
+        return jsonify({"ok": False, "error": "symbol required"}), 400
+    try:
+        scripts_dir = str(ROOT / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from single_symbol_diagnostic import diagnose_symbol
+
+        payload = diagnose_symbol(
+            symbol,
+            refresh=bool(data.get("refresh", True)),
+            run_llm_filter=bool(data.get("run_llm", True)),
+            history_days=int(data.get("history_days") or 950),
+        )
+        return jsonify(payload), 200 if payload.get("ok") else 400
+    except Exception as exc:
+        return jsonify({"ok": False, "symbol": symbol, "error": str(exc)}), 500
+
+
 HTML = r"""
 <!doctype html>
 <html data-theme="dark">
@@ -1348,6 +1372,8 @@ tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--hover))}
 .swatch{width:20px;height:20px;border-radius:999px;border:1px solid var(--line);cursor:pointer;background:var(--sw);box-shadow:inset 0 0 0 2px rgba(255,255,255,.10);transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease}
 .swatch:hover{transform:translateY(-1px)}
 .swatch.active{border-color:var(--ink);box-shadow:0 0 0 3px color-mix(in srgb,var(--sw) 28%,transparent),0 0 18px color-mix(in srgb,var(--sw) 34%,transparent)}
+.symbolSearch{display:grid;gap:10px}.searchRow{display:grid;grid-template-columns:minmax(120px,220px) auto auto 1fr;gap:8px;align-items:center}.searchInput{height:36px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--ink);font:800 14px ui-monospace,SFMono-Regular,Consolas,monospace;padding:0 11px;text-transform:uppercase}.checkLabel{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:750}.diagHero{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.diagCell{background:color-mix(in srgb,var(--accent) 6%,var(--panel2));border:1px solid color-mix(in srgb,var(--accent) 16%,var(--soft));border-radius:8px;padding:10px}.diagCell strong{display:block;font:800 18px ui-monospace,SFMono-Regular,Consolas,monospace;margin-top:5px}.gateGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.gatePill{border:1px solid var(--soft);border-radius:8px;padding:8px;background:var(--panel2)}.gatePill b{display:block;font:800 11px ui-monospace,SFMono-Regular,Consolas,monospace}.gatePill span{display:block;color:var(--muted);font-size:11px;margin-top:4px;overflow:hidden;text-overflow:ellipsis}.diagText{line-height:1.45;color:var(--muted);word-break:break-word}
+@media(max-width:1200px){.diagHero,.gateGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.searchRow{grid-template-columns:1fr auto auto}}@media(max-width:720px){.diagHero,.gateGrid,.searchRow{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -1370,6 +1396,7 @@ tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--hover))}
 <div class="card kpi"><div class="label">Win Rate</div><div class="value" id="wr">--</div><div class="sub" id="tc">backtest 60.6%</div></div>
 <div class="card kpi"><div class="label">Drawdown</div><div class="value" id="dd">0%</div><div class="sub">from peak</div></div>
 </div>
+<div class="card symbolSearch" style="margin-bottom:12px"><div class="titleRow"><div><div class="title">Stock Diagnostic</div><div class="sub">single-symbol model, gates and LLM judgment</div></div><div class="badge" id="diagBadge">idle</div></div><div class="searchRow"><input class="searchInput" id="diagSymbol" placeholder="AAPL" autocomplete="off"><button class="softBtn" id="diagRun" type="button" onclick="runSymbolDiagnostic()">RUN CHECK</button><label class="checkLabel"><input id="diagLlm" type="checkbox" checked> LLM</label><span class="sub" id="diagStatus">ready</span></div><div id="diagResult" class="diagText">No symbol checked yet.</div></div>
 <div class="grid mainGrid" style="margin-bottom:12px">
 <div class="card"><div class="titleRow"><div><div class="title">Cumulative P&L</div><div class="sub">realized profit curve</div></div><div class="badge" id="pnlBadge">--</div></div><div class="chartBox"><canvas id="pnlChart"></canvas></div></div>
 <div class="card"><div class="titleRow"><div><div class="title">Portfolio Value</div><div class="sub">paper equity path</div></div><div class="badge" id="portBadge">--</div></div><div class="chartBox"><canvas id="portChart"></canvas></div></div>
@@ -1435,6 +1462,7 @@ tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--hover))}
 const $=id=>document.getElementById(id);
 const money=n=>{const v=Number(n);return n==null||isNaN(v)?'--':(v<0?'-':'')+'$'+Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});};
 const pct=n=>n==null||isNaN(n)?'--':(Number(n)>0?'+':'')+Number(n).toFixed(2)+'%';
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const inr=n=>'Rs '+Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:0});
 function tone(el,n){el.classList.remove('green','red','amber'); if(n>0)el.classList.add('green'); if(n<0)el.classList.add('red')}
 function css(name){return getComputedStyle(document.documentElement).getPropertyValue(name).trim()}
@@ -1459,6 +1487,40 @@ const age=s=>s==null?'--':s<60?s+'s ago':s<3600?Math.round(s/60)+'m ago':Math.ro
 function kv(rows){return rows.map(r=>`<div class=stackRow><span>${r[0]}</span><b class="${r[2]||''}">${r[1]}</b></div>`).join('')}
 function dot(on,bad=false){return `<span class="statusDot ${bad?'bad':on?'on':'warn'}"></span>`}
 function renderAlerts(id,rows){$(id).innerHTML=rows.length?rows.map(a=>`<div class="alertItem ${a.level||''}"><b>${a.scope}</b> ${a.text}</div>`).join(''):'<div class="alertItem good">No active flags</div>'}
+function renderSymbolDiagnostic(d){
+ if(!d||!d.ok){$('diagResult').innerHTML=`<div class="alertItem danger">${esc(d&&d.error?d.error:'diagnostic failed')}</div>`;$('diagBadge').textContent='failed';return}
+ const sig=d.signal||{}, rank=d.rank||{}, llm=d.llm||{}, feature=d.feature||{}, source=d.source||{};
+ const verdict=d.verdict||'--', ok=!!d.would_trade;
+ $('diagBadge').textContent=ok?'allowed':'blocked';
+ $('diagResult').innerHTML=[
+  `<div class=diagHero>`,
+  `<div class=diagCell><div class=label>Verdict</div><strong class="${ok?'green':'red'}">${esc(verdict)}</strong></div>`,
+  `<div class=diagCell><div class=label>Probability</div><strong class="${Number(sig.probability||0)>=Number((d.model||{}).threshold||0)?'green':'red'}">${Number(sig.probability||0).toFixed(3)}</strong></div>`,
+  `<div class=diagCell><div class=label>Rank</div><strong>${rank.rank||'--'} / ${rank.scored_universe_count||'--'}</strong></div>`,
+  `<div class=diagCell><div class=label>Entry</div><strong>${money(sig.entry_price)}</strong></div>`,
+  `<div class=diagCell><div class=label>Source</div><strong>${source.source==='fetched_from_alpaca'?'ALPACA':'SYSTEM'}</strong></div>`,
+  `</div>`,
+  `<div class=gateGrid>${(d.gates||[]).map(g=>`<div class=gatePill><b class="${g.passed?'green':'red'}">${g.passed?'PASS':'FAIL'} ${esc(g.name)}</b><span>${esc(g.value!=null?g.value+' - '+(g.detail||''):g.detail||'')}</span></div>`).join('')}</div>`,
+  `<div class=stackRows>`,
+  `${kv([['threshold',(d.model||{}).threshold,'blue'],['top N',(d.model||{}).top_n,'blue'],['top N cutoff',rank.top_n_cutoff_probability==null?'--':Number(rank.top_n_cutoff_probability).toFixed(3),'amber'],['feature rows',feature.rows||0,'blue'],['feature date',feature.feature_date||'--','blue'],['LLM',llm.ran?(llm.decision||llm.status||'ran'):(llm.status||'not run'),llm.decision==='skip'?'red':llm.ran?'green':'amber']])}`,
+  `</div>`,
+  `<div class="alertItem ${llm.decision==='skip'?'danger':llm.ran?'good':'warn'}"><b>LLM</b> ${esc(llm.reason||llm.status||'no LLM decision')}</div>`
+ ].join('');
+}
+async function runSymbolDiagnostic(){
+ const sym=($('diagSymbol').value||'').trim().toUpperCase();
+ if(!sym){$('diagStatus').textContent='enter a symbol';return}
+ const btn=$('diagRun'); btn.disabled=true; btn.textContent='RUNNING...'; $('diagBadge').textContent='working'; $('diagStatus').textContent='fetching and scoring '+sym; $('diagResult').innerHTML='<div class=empty>Running full diagnostic...</div>';
+ try{
+  const r=await fetch('/api/symbol_diagnostic',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym,refresh:true,run_llm:$('diagLlm').checked})});
+  const d=await r.json(); renderSymbolDiagnostic(d); $('diagStatus').textContent=r.ok?'done':'failed';
+ }catch(e){
+  renderSymbolDiagnostic({ok:false,error:String(e)}); $('diagStatus').textContent='failed';
+ }finally{
+  btn.disabled=false; btn.textContent='RUN CHECK';
+ }
+}
+if($('diagSymbol')){$('diagSymbol').addEventListener('keydown',e=>{if(e.key==='Enter')runSymbolDiagnostic()})}
 async function loadOperator(){
  const o=await (await fetch('/api/operator?ts='+Date.now())).json(); const c=o.clock||{}, e=o.engine||{}, f=o.filters||{}, r=o.risk||{}, real=o.reality||{}, sh=o.nse_shadow||{};
  $('operatorSummary').innerHTML=(o.summary||[]).map(x=>`<span class=badge>${x}</span>`).join('');
