@@ -14,7 +14,12 @@ try:
 
     _here = Path(__file__).resolve()
     _seen_env_paths = set()
-    for _env_path in (_here.parent.parent / ".env", _here.parent.parent.parent / ".env"):
+    for _env_path in (
+        _here.parent.parent / ".env",
+        _here.parent.parent / ".env.example",
+        _here.parent.parent.parent / ".env",
+        _here.parent.parent.parent / ".env.example",
+    ):
         _env_path = _env_path.resolve()
         if _env_path in _seen_env_paths:
             continue
@@ -40,8 +45,8 @@ OUT_JSON = Path(os.getenv("SIG_OUT_JSON", "reports/fixed_return_daily_signals.js
 OUT_CSV = Path(os.getenv("SIG_OUT_CSV", "reports/fixed_return_daily_signals.csv"))
 SCORES_JSON = Path(os.getenv("SIG_SCORES_JSON", "reports/fixed_return_daily_scores.json"))
 
-SIG_THRESHOLD = float(os.getenv("SIG_THRESHOLD", "0.55"))
-SIG_TOP_N = int(os.getenv("SIG_TOP_N", "5"))
+SIG_THRESHOLD = float(os.getenv("SIG_THRESHOLD", "0.61"))
+SIG_TOP_N = int(os.getenv("SIG_TOP_N", "30"))
 BASE_POSITION_PCT = float(os.getenv("SIG_POSITION_PCT", "0.0075"))
 MIN_PRICE = float(os.getenv("SIG_MIN_PRICE", "5"))
 MIN_ADV = float(os.getenv("SIG_MIN_ADV20_DOLLAR_VOL", "5000000"))
