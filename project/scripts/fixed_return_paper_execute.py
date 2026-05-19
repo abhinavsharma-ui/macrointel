@@ -5,6 +5,12 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(".env"), override=False)
+    load_dotenv(Path(".env.example"), override=False)
+except Exception:
+    pass
+try:
     from alpaca_bridge import submit_buy_at_open, submit_sell as alpaca_sell
     ALPACA_ENABLED = True
 except ImportError:
@@ -30,6 +36,7 @@ SYMBOL_BLOCKLIST_FILES = [
     Path(os.getenv("SIG_LEVERAGED_ETF_BLACKLIST", "data/leveraged_etf_blacklist.txt")),
 ]
 MAX_OPEN = int(os.getenv("FR_MAX_OPEN_POSITIONS", "50"))
+FR_DISABLE_STOP_LOSS = os.getenv("FR_DISABLE_STOP_LOSS", "0").lower() in {"1", "true", "yes", "on"} or float(os.getenv("SIG_STOP_LOSS_PCT", "3") or 0) <= 0
 NY = ZoneInfo("America/New_York")
 
 def die(msg):
@@ -176,16 +183,18 @@ def main():
             continue
         reason = None
         exit_price = None
-        stop_price = float(pos["stop_loss_price"])
+        entry_price = float(pos.get("entry_price") or 0)
+        stop_price = float(pos.get("stop_loss_price") or 0)
         target_price = float(pos["profit_target_price"])
-        stop_hit = px["low"] <= stop_price or px["close"] <= stop_price
+        stop_enabled = (not FR_DISABLE_STOP_LOSS) and stop_price > 0 and (entry_price <= 0 or stop_price < entry_price)
+        stop_hit = stop_enabled and (px["low"] <= stop_price or px["close"] <= stop_price)
         if stop_hit and sl_verifier and sl_verifier.should_skip_mechanical_stop(pos, px, today):
             pos["last_price"] = px["close"]
             pos["last_price_date"] = px["date"]
             pos["sl_mechanical_stop_skipped"] = datetime.now(timezone.utc).isoformat()
             still_open.append(pos)
             continue
-        if px["low"] <= stop_price and px["high"] >= target_price:
+        if stop_enabled and px["low"] <= stop_price and px["high"] >= target_price:
             reason, exit_price = "both_hit_stop_first", stop_price
         elif stop_hit:
             reason, exit_price = "stop_loss", stop_price
@@ -229,7 +238,8 @@ def main():
         candidate_position = {
             "symbol": sym, "entry_date": today, "entry_price": float(sig["entry_price"]),
             "profit_target_price": float(sig["profit_target_price"]),
-            "stop_loss_price": float(sig["stop_loss_price"]),
+            "stop_loss_price": float(sig.get("stop_loss_price") or 0),
+            "stop_loss_enabled": (not FR_DISABLE_STOP_LOSS) and bool(sig.get("stop_loss_enabled", float(sig.get("stop_loss_price") or 0) > 0)),
             "exit_date": sig["expected_exit_date"],
             "position_pct": float(sig["position_pct"]),
             "probability": float(sig["probability"]),
@@ -258,7 +268,8 @@ def main():
     print(f"OPEN POSITIONS AFTER {len(still_open) + len(new_positions)}")
     print(f"RUNNING CLOSED PNL CONTRIBUTION PCT {sum(float(x.get('pnl_contribution_pct',0) or 0) for x in closed_today):.4f}")
     for p in new_positions:
-        print(f"OPEN {p['symbol']} entry={p['entry_price']:.2f} PT={p['profit_target_price']:.2f} SL={p['stop_loss_price']:.2f} pos={p['position_pct']:.4f}")
+        sl_text = f"{p['stop_loss_price']:.2f}" if p.get("stop_loss_enabled") else "OFF"
+        print(f"OPEN {p['symbol']} entry={p['entry_price']:.2f} PT={p['profit_target_price']:.2f} SL={sl_text} pos={p['position_pct']:.4f}")
 
     if args.dry_run:
         print("DRY RUN: no files written")

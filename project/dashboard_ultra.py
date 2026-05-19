@@ -284,6 +284,8 @@ def signal_payload():
         trade = signal.get("result", {}).get("trade", {}) if isinstance(signal.get("result"), dict) else {}
         meta = trade.get("metadata", {}) if isinstance(trade, dict) else {}
         price = num(signal.get("entry_price") or signal.get("price") or signal.get("close") or trade.get("reference_price") or trade.get("fill_price"))
+        raw_stop = signal.get("stop_loss_price")
+        stop_loss_price = num(raw_stop) if raw_stop is not None else price * 0.97
         rows.append(
             {
                 "rank": int(signal.get("rank") or index),
@@ -292,7 +294,8 @@ def signal_payload():
                 "entry_price": price,
                 "position_pct": round(num(signal.get("position_pct") or meta.get("position_pct")) * 100.0, 4),
                 "profit_target_price": num(signal.get("profit_target_price") or price * 1.05),
-                "stop_loss_price": num(signal.get("stop_loss_price") or price * 0.97),
+                "stop_loss_price": stop_loss_price,
+                "stop_loss_enabled": bool(signal.get("stop_loss_enabled", stop_loss_price > 0)),
                 "expected_exit_date": str(signal.get("expected_exit_date") or ""),
             }
         )
@@ -393,6 +396,8 @@ def open_positions():
         entry_dt = parse_dt(pos.get("entry_date")) or datetime.now()
         qty = num(pos.get("quantity"))
         pos_pct = num(pos.get("position_pct"))
+        raw_stop = pos.get("stop_loss_price")
+        stop_loss_price = num(raw_stop) if raw_stop is not None else entry * 0.97
         ret = ((current / entry) - 1.0) * 100.0 if entry else 0.0
         pnl = (current - entry) * qty if qty else INITIAL * pos_pct * ret / 100.0
         rows.append(
@@ -402,7 +407,8 @@ def open_positions():
                 "entry_price": round(entry, 4),
                 "current_price": round(current, 4),
                 "profit_target_price": round(num(pos.get("profit_target_price") or entry * 1.05), 4),
-                "stop_loss_price": round(num(pos.get("stop_loss_price") or entry * 0.97), 4),
+                "stop_loss_price": round(stop_loss_price, 4),
+                "stop_loss_enabled": bool(pos.get("stop_loss_enabled", stop_loss_price > 0)),
                 "days_held": business_days(entry_dt.date(), date.today()),
                 "position_pct": round(pos_pct * 100.0, 4),
                 "unrealized_pnl": round(pnl, 2),
@@ -1149,7 +1155,7 @@ def risk_payload():
             "biggest_position_pct": round(us_exposures[0], 2) if us_exposures else 0,
             "unrealized_pnl": round(us_unrealized, 2),
             "losers": len([row for row in positions if num(row.get("unrealized_pnl")) < 0]),
-            "near_stop": len([row for row in positions if num(row.get("current_price")) <= num(row.get("stop_loss_price")) * 1.015]),
+            "near_stop": len([row for row in positions if num(row.get("stop_loss_price")) > 0 and num(row.get("current_price")) <= num(row.get("stop_loss_price")) * 1.015]),
             "sl_grace": len([row for row in positions if row.get("sl_grace")]),
             "unified_state": unified.get("state") if isinstance(unified, dict) else None,
             "unified_messages": unified.get("messages", []) if isinstance(unified, dict) else [],
@@ -1579,6 +1585,7 @@ tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--hover))}
 <script>
 const $=id=>document.getElementById(id);
 const money=n=>{const v=Number(n);return n==null||isNaN(v)?'--':(v<0?'-':'')+'$'+Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});};
+const stopMoney=x=>Number(x&&x.stop_loss_enabled!==false?x.stop_loss_price:0)>0?money(x.stop_loss_price):'OFF';
 const pct=n=>n==null||isNaN(n)?'--':(Number(n)>0?'+':'')+Number(n).toFixed(2)+'%';
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const inr=n=>'Rs '+Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:0});
@@ -1751,8 +1758,8 @@ async function loadUS(){
  $('wr').textContent=a.win_rate==null?'--':Number(a.win_rate).toFixed(1)+'%'; $('tc').textContent=(a.closed_trades||0)+' closed - backtest 60.6%';
  $('dd').textContent=pct(p.drawdown_from_peak_pct); tone($('dd'),-Number(p.drawdown_from_peak_pct||0));
  updateChromeRegime(); $('spy').textContent=Number(r.spy_realized_vol||0).toFixed(2)+'%'; $('reg').textContent=r.vol_regime||'--'; $('mul').textContent=(r.vol_multiplier||'--')+'x'; $('desc').textContent=r.description||''; $('updated').textContent='updated '+new Date().toLocaleTimeString();
- $('sd').textContent=s.signal_date||'--'; const sig=s.signals||[]; $('sig').innerHTML=sig.length?sig.map(x=>`<tr><td>${x.rank}</td><td><b>${x.symbol}</b></td><td>${Number(x.probability||0).toFixed(3)}</td><td>${money(x.entry_price)}</td><td class=green>${money(x.profit_target_price)}</td><td class=red>${money(x.stop_loss_price)}</td></tr>`).join(''):'<tr><td colspan=6 class=empty>No signals</td></tr>';
- const pos=p.positions||[]; $('pb').textContent=pos.length+' open'; window.__lastPositions=pos; $('pos').innerHTML=pos.length?pos.map(x=>{let c=Number(x.unrealized_pnl||0)>=0?'green':'red',prog=Math.min(100,(Number(x.days_held||0)/8)*100),g=x.sl_grace||null,gb=g?` <span class=badge title="${esc(g.llm_reason||g.key_signal||'SL verification active')}">SL</span>`:'';return `<tr><td><b>${esc(x.symbol)}</b>${gb}</td><td>${money(x.entry_price)}</td><td>${money(x.current_price)}</td><td class=green>${money(x.profit_target_price)}</td><td class=red>${money(x.stop_loss_price)}</td><td>${x.days_held}d</td><td><div class=bar><div class=fill style="width:${prog}%"></div></div></td><td class=${c}>${money(x.unrealized_pnl)}</td><td class=${c}>${pct(x.unrealized_pnl_pct)}</td><td>${Number(x.confidence||0).toFixed(3)}</td></tr>`}).join(''):'<tr><td colspan=10 class=empty>No open positions</td></tr>';
+ $('sd').textContent=s.signal_date||'--'; const sig=s.signals||[]; $('sig').innerHTML=sig.length?sig.map(x=>`<tr><td>${x.rank}</td><td><b>${x.symbol}</b></td><td>${Number(x.probability||0).toFixed(3)}</td><td>${money(x.entry_price)}</td><td class=green>${money(x.profit_target_price)}</td><td class=red>${stopMoney(x)}</td></tr>`).join(''):'<tr><td colspan=6 class=empty>No signals</td></tr>';
+ const pos=p.positions||[]; $('pb').textContent=pos.length+' open'; window.__lastPositions=pos; $('pos').innerHTML=pos.length?pos.map(x=>{let c=Number(x.unrealized_pnl||0)>=0?'green':'red',prog=Math.min(100,(Number(x.days_held||0)/8)*100),g=x.sl_grace||null,gb=g?` <span class=badge title="${esc(g.llm_reason||g.key_signal||'SL verification active')}">SL</span>`:'';return `<tr><td><b>${esc(x.symbol)}</b>${gb}</td><td>${money(x.entry_price)}</td><td>${money(x.current_price)}</td><td class=green>${money(x.profit_target_price)}</td><td class=red>${stopMoney(x)}</td><td>${x.days_held}d</td><td><div class=bar><div class=fill style="width:${prog}%"></div></div></td><td class=${c}>${money(x.unrealized_pnl)}</td><td class=${c}>${pct(x.unrealized_pnl_pct)}</td><td>${Number(x.confidence||0).toFixed(3)}</td></tr>`}).join(''):'<tr><td colspan=10 class=empty>No open positions</td></tr>';
  const ua=snap.unrealized_attribution||{}, ul=ua.losers||[], uw=ua.winners||[], urows=[...ul,...uw].slice(0,16);$('usAttrBadge').textContent=`net ${money(ua.net_unrealized_pnl||0)}`;$('usAttribution').innerHTML=urows.length?urows.map(x=>{const pnl=Number(x.pnl||0),ret=Number(x.return_pct||0);return `<tr><td><b>${x.symbol}</b></td><td>${Number(x.position_pct||0).toFixed(3)}%</td><td>${money(x.entry_price)}</td><td>${money(x.current_price)}</td><td class="${ret>=0?'green':'red'}">${pct(ret)}</td><td class="${pnl>=0?'green':'red'}">${money(pnl)}</td><td>${pnl<0?Number(x.gross_loss_share_pct||0).toFixed(1)+'%':'--'}</td></tr>`}).join(''):'<tr><td colspan=7 class=empty>No open P&L attribution yet</td></tr>';
  const tr=a.trades||[]; $('cb').textContent=(a.closed_trades||0)+' closed'; $('tr').innerHTML=tr.length?tr.map(x=>{let c=Number(x.pnl||0)>=0?'green':'red';return `<tr><td>${x.exit_date||'--'}</td><td><b>${x.symbol}</b></td><td>${x.quantity!=null?x.quantity.toFixed(0)+'sh':'--'}</td><td>${money(x.entry_price)}</td><td>${money(x.exit_price)}</td><td class=${c}>${pct(x.return_pct)}</td><td class=${c}>${money(x.pnl)}</td><td>${x.exit_reason||'--'}</td></tr>`}).join(''):'<tr><td colspan=9 class=empty>No closed trades</td></tr>';
  const up=pos.filter(x=>Number(x.unrealized_pnl||0)>0).length, down=pos.filter(x=>Number(x.unrealized_pnl||0)<0).length, total=pos.reduce((z,x)=>z+Number(x.unrealized_pnl||0),0); $('outBadge').textContent=(a.closed_trades||0)+' closed'; $('summaryBox').innerHTML=`<div class=metricLine><span class=label>Open Winners</span><b class=green>${up}</b></div><div class=metricLine><span class=label>Open Losers</span><b class=red>${down}</b></div><div class=metricLine><span class=label>Unrealized</span><b class="${total>=0?'green':'red'}">${money(total)}</b></div><div class=metricLine><span class=label>PT Hit Rate</span><b>${a.profit_target_hit_rate==null?'--':Number(a.profit_target_hit_rate).toFixed(1)+'%'}</b></div>`;

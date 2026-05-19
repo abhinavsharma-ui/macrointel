@@ -9,6 +9,13 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(".env"), override=False)
+    load_dotenv(Path(".env.example"), override=False)
+except Exception:
+    pass
+
 
 REPORT_PATH = Path(os.getenv("SL_DECISIONS_PATH", "reports/sl_decisions.json"))
 TRADES_CSV = Path(os.getenv("FR_TRADES_CSV", "reports/fixed_return_paper_trades.csv"))
@@ -418,6 +425,8 @@ def close_position(pos: dict, exit_price: float, reason: str, stamp_now: datetim
 
 
 def should_skip_mechanical_stop(pos: dict, px: dict, today: str | None = None) -> bool:
+    if SOFT_STOP_PCT <= 0:
+        return False
     grace = pos.get("sl_grace")
     if not isinstance(grace, dict):
         return False
@@ -433,6 +442,8 @@ def should_skip_mechanical_stop(pos: dict, px: dict, today: str | None = None) -
 
 
 def evaluate_position(pos: dict, quote: dict | None, stamp_now: datetime) -> tuple[dict, dict | None]:
+    if SOFT_STOP_PCT <= 0:
+        return pos, None
     if str(pos.get("status", "open")).lower() not in {"open", "active"}:
         return pos, None
     sym = norm_sym(pos.get("symbol"))
@@ -535,7 +546,7 @@ def evaluate_position(pos: dict, quote: dict | None, stamp_now: datetime) -> tup
 
 
 def process_positions(positions: list[dict], quotes: dict[str, dict] | None, stamp_now: datetime) -> tuple[list[dict], list[dict]]:
-    if os.getenv("SL_VERIFY_ENABLED", "1") == "0":
+    if os.getenv("SL_VERIFY_ENABLED", "1") == "0" or SOFT_STOP_PCT <= 0:
         return positions, []
     out = []
     events = []

@@ -48,6 +48,8 @@ SCORES_JSON = Path(os.getenv("SIG_SCORES_JSON", "reports/fixed_return_daily_scor
 SIG_THRESHOLD = float(os.getenv("SIG_THRESHOLD", "0.61"))
 SIG_TOP_N = int(os.getenv("SIG_TOP_N", "30"))
 BASE_POSITION_PCT = float(os.getenv("SIG_POSITION_PCT", "0.0075"))
+SIG_FIXED_POSITION_SIZE = os.getenv("SIG_FIXED_POSITION_SIZE", os.getenv("SIG_DISABLE_DYNAMIC_SIZING", "0")).lower() in {"1", "true", "yes", "on"}
+SIG_USE_VOL_SCALING = os.getenv("SIG_USE_VOL_SCALING", "1").lower() in {"1", "true", "yes", "on"}
 MIN_PRICE = float(os.getenv("SIG_MIN_PRICE", "5"))
 MIN_ADV = float(os.getenv("SIG_MIN_ADV20_DOLLAR_VOL", "5000000"))
 ADV_CUT = float(os.getenv("SIG_RUNTIME_UNIVERSE_ADV_CUT", "0.30"))
@@ -1262,15 +1264,22 @@ def main():
     _TARGET_IV      = 30.0  # % — "normal" IV anchor
 
     def _kelly_vol_pos(prob, pt_pct, sl_pct, iv_sym, base, vol_mult):
-        edge       = prob * (pt_pct / 100.0) - (1 - prob) * (sl_pct / 100.0)
+        if SIG_FIXED_POSITION_SIZE:
+            return round(base, 6)
+        sl_for_sizing = max(float(sl_pct or 0), 0.0)
+        if sl_for_sizing <= 0:
+            return round(base, 6)
+        eff_vol_mult = vol_mult if SIG_USE_VOL_SCALING else 1.0
+        edge       = prob * (pt_pct / 100.0) - (1 - prob) * (sl_for_sizing / 100.0)
         kelly_f    = edge / (pt_pct / 100.0) if pt_pct > 0 else 0.5
         half_kelly = kelly_f * 0.5
         kelly_mult = max(0.25, min(2.0, half_kelly / _REF_HALF_KELLY))
         vol_scalar = max(0.5, min(2.0, _TARGET_IV / iv_sym)) if (iv_sym and iv_sym > 5) else 1.0
-        raw        = base * kelly_mult * vol_scalar * vol_mult
+        raw        = base * kelly_mult * vol_scalar * eff_vol_mult
         return round(max(base * 0.25, min(base * 2.0, raw)), 6)
 
-    eff_pos = BASE_POSITION_PCT * mult  # baseline kept for output JSON metadata
+    eff_pos = BASE_POSITION_PCT if (SIG_FIXED_POSITION_SIZE or not SIG_USE_VOL_SCALING) else BASE_POSITION_PCT * mult
+    stop_loss_enabled = STOP_LOSS_PCT > 0
     signals = []
     for rank, (_, r) in enumerate(picks.iterrows(), 1):
         entry = float(r.get("entry_price", r.get("price", r.get("close", 0))) or 0)
@@ -1282,7 +1291,8 @@ def main():
                 _per_symbol_iv.get(str(r.symbol).upper()), BASE_POSITION_PCT, mult), 6),
             "base_position_pct": BASE_POSITION_PCT, "vol_multiplier": mult,
             "profit_target_price": round(entry * (1 + PROFIT_TARGET_PCT / 100), 4),
-            "stop_loss_price": round(entry * (1 - STOP_LOSS_PCT / 100), 4),
+            "stop_loss_price": round(entry * (1 - STOP_LOSS_PCT / 100), 4) if stop_loss_enabled else 0.0,
+            "stop_loss_enabled": stop_loss_enabled,
             "expected_exit_date": expected_exit_date, "hold_days": HOLD_DAYS,
             "feature_date": str(r.get("feature_date", r.get("date", "unknown"))),
             "factor_composite": round(float(r.get("factor_composite", 0.5) or 0.5), 6),
@@ -1382,6 +1392,9 @@ def main():
         "factor_overlay": factor_report,
         "profit_target_pct": PROFIT_TARGET_PCT,
         "stop_loss_pct": STOP_LOSS_PCT,
+        "stop_loss_enabled": stop_loss_enabled,
+        "fixed_position_size": SIG_FIXED_POSITION_SIZE,
+        "use_vol_scaling": SIG_USE_VOL_SCALING,
         "hold_days": HOLD_DAYS,
         "signals": signals,
     }
@@ -1405,7 +1418,8 @@ def main():
     print(f"UNIVERSE scored={len(live)} allowed={len(allowed)}")
     print(f"VOL {regime} spy_realized_vol={vol:.2f}% multiplier={mult}")
     for s in signals:
-        print(f"{s['rank']} {s['symbol']} prob={s['probability']:.4f} entry={s['entry_price']:.2f} PT={s['profit_target_price']:.2f} SL={s['stop_loss_price']:.2f} pos={s['position_pct']:.4f}")
+        sl_text = f"{s['stop_loss_price']:.2f}" if s.get("stop_loss_enabled") else "OFF"
+        print(f"{s['rank']} {s['symbol']} prob={s['probability']:.4f} entry={s['entry_price']:.2f} PT={s['profit_target_price']:.2f} SL={sl_text} pos={s['position_pct']:.4f}")
     if args.dry_run:
         print("DRY RUN: no files written")
         return
