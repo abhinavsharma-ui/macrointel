@@ -559,9 +559,29 @@ class MetaDecisionEngine:
     TAKE_THRESHOLD = 0.40
 
     def __init__(self):
+        def _env_float(*names: str) -> Optional[float]:
+            for name in names:
+                raw = os.getenv(name)
+                if raw is None or str(raw).strip() == "":
+                    continue
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        configured_take_threshold = _env_float("META_MODEL_TAKE_THRESHOLD")
+        runtime_take_threshold = _env_float("META_MODEL_RUNTIME_THRESHOLD")
+        base_take_threshold = (
+            configured_take_threshold
+            if configured_take_threshold is not None
+            else runtime_take_threshold
+            if runtime_take_threshold is not None
+            else self.TAKE_THRESHOLD
+        )
         self._take_threshold = min(
             0.99,
-            max(0.01, float(os.getenv("META_MODEL_RUNTIME_THRESHOLD", str(self.TAKE_THRESHOLD)))),
+            max(0.01, float(base_take_threshold)),
         )
         self._min_edge_pct = max(
             0.0,
@@ -579,10 +599,27 @@ class MetaDecisionEngine:
             0.0,
             float(os.getenv("META_MODEL_RUNTIME_MIN_CONVICTION", "3.0")),
         )
+        def _lane_threshold(*names: str) -> float:
+            value = _env_float(*names)
+            if value is None:
+                value = self._take_threshold
+            if configured_take_threshold is not None:
+                value = min(value, configured_take_threshold)
+            return min(0.99, max(0.01, float(value)))
+
         self._lane_take_threshold_caps = {
-            "normal": min(0.99, max(0.01, float(os.getenv("META_MODEL_RUNTIME_NORMAL_THRESHOLD", "0.48")))),
-            "day": min(0.99, max(0.01, float(os.getenv("META_MODEL_RUNTIME_DAY_THRESHOLD", "0.40")))),
-            "crypto": min(0.99, max(0.01, float(os.getenv("META_MODEL_RUNTIME_CRYPTO_THRESHOLD", "0.28")))),
+            "normal": _lane_threshold(
+                "META_MODEL_RUNTIME_NORMAL_THRESHOLD",
+                "NORMAL_LANE_MIN_TAKE_PROBABILITY",
+            ),
+            "day": _lane_threshold(
+                "META_MODEL_RUNTIME_DAY_THRESHOLD",
+                "DAY_LANE_MIN_TAKE_PROBABILITY",
+            ),
+            "crypto": _lane_threshold(
+                "META_MODEL_RUNTIME_CRYPTO_THRESHOLD",
+                "CRYPTO_LANE_MIN_TAKE_PROBABILITY",
+            ),
         }
         self._lane_min_convictions = {
             "normal": max(0.0, float(os.getenv("META_MODEL_RUNTIME_NORMAL_MIN_CONVICTION", "0.90"))),
@@ -632,6 +669,27 @@ class MetaDecisionEngine:
         ranked = []
         feature_rows = feature_rows or {}
         multiframe_data = multiframe_data or {}
+
+        # ── Market-wide regime: cross-sectional median of vol_regime_stressed
+        # across all today's symbols. Used by predict_from_dict's regime gate
+        # to block trades when most of the market is in stress. Mirrors the
+        # training-time daily_stress_median computation.
+        try:
+            stress_values = []
+            for _fr in feature_rows.values():
+                if _fr is None:
+                    continue
+                _v = _fr.get("vol_regime_stressed", 0.0) if hasattr(_fr, "get") else 0.0
+                try:
+                    stress_values.append(float(_v))
+                except Exception:
+                    pass
+            self._current_market_stress_regime = (
+                float(np.median(stress_values) >= 0.5) if stress_values else 0.0
+            )
+        except Exception:
+            self._current_market_stress_regime = 0.0
+
 
         for symbol, signal in signals.items():
             if not isinstance(signal, dict):
@@ -917,26 +975,49 @@ class MetaDecisionEngine:
         if self._trained_model is not None and feature_row is not None and direction != "neutral":
             try:
                 model_features = MetaFeatureBuilder.build(symbol, signal, feature_row)
+                # Override per-row default with the market-wide median computed
+                # at the top of evaluate_universe — this is what predict_from_dict's
+                # regime gate reads.
+                model_features["market_stress_regime"] = float(
+                    getattr(self, "_current_market_stress_regime", 0.0)
+                )
                 trained = self._trained_model.predict_from_dict(model_features)
-                take_prob = (take_prob * 0.35) + (float(trained["take_probability"]) * 0.65)
-                expected_edge_pct = (expected_edge_pct * 0.35) + (float(trained["expected_edge_pct"]) * 0.65)
-                expected_drawdown_pct = max(
-                    0.1,
-                    (expected_drawdown_pct * 0.35) + (float(trained["expected_drawdown_pct"]) * 0.65),
-                )
-                edge_ratio = expected_edge_pct / max(expected_drawdown_pct, 0.25)
-                rank_score = (
-                    take_prob * 0.46
-                    + max(edge_ratio, -2.0) * 0.34
-                    + float(signal.get("confidence", 0.0) or 0.0) * 0.12
-                    + float(signal.get("model_agreement", 0.0) or 0.0) * 0.08
-                )
-                size_multiplier = float(np.clip(0.50 + max(edge_ratio, -0.5) * 0.55, 0.0, 1.8))
-                decision_source = "trained_blend"
+                if bool(trained.get("regime_gated", False)):
+                    # Hard regime gate: walk-forward shows the model has no
+                    # edge in stressed regimes (folds 7-8: ~50% hit, 0.19-0.32x
+                    # edge/draw). Fully suppress the trade rather than blending
+                    # with the heuristic (which has no regime awareness and
+                    # would partially undo the gate).
+                    take_prob = 0.0
+                    expected_edge_pct = 0.0
+                    expected_drawdown_pct = max(expected_drawdown_pct, 0.5)
+                    edge_ratio = 0.0
+                    rank_score = 0.0
+                    size_multiplier = 0.0
+                    decision_source = "regime_gate"
+                    reason = "regime_gated_stress"
+                else:
+                    take_prob = (take_prob * 0.35) + (float(trained["take_probability"]) * 0.65)
+                    expected_edge_pct = (expected_edge_pct * 0.35) + (float(trained["expected_edge_pct"]) * 0.65)
+                    expected_drawdown_pct = max(
+                        0.1,
+                        (expected_drawdown_pct * 0.35) + (float(trained["expected_drawdown_pct"]) * 0.65),
+                    )
+                    edge_ratio = expected_edge_pct / max(expected_drawdown_pct, 0.25)
+                    rank_score = (
+                        take_prob * 0.46
+                        + max(edge_ratio, -2.0) * 0.34
+                        + float(signal.get("confidence", 0.0) or 0.0) * 0.12
+                        + float(signal.get("model_agreement", 0.0) or 0.0) * 0.08
+                    )
+                    size_multiplier = float(np.clip(0.50 + max(edge_ratio, -0.5) * 0.55, 0.0, 1.8))
+                    decision_source = "trained_blend"
                 trained_threshold = float(trained.get("decision_threshold", self._take_threshold) or self._take_threshold)
                 trained_min_edge = float(trained.get("min_expected_edge_pct", 0.10) or 0.10)
                 trained_min_ratio = float(trained.get("min_edge_ratio", 0.12) or 0.12)
-                if take_prob < trained_threshold:
+                if reason == "regime_gated_stress":
+                    pass  # preserve regime gate reason
+                elif take_prob < trained_threshold:
                     reason = "trained_low_take_probability"
                 elif expected_edge_pct < trained_min_edge:
                     reason = "trained_negative_expected_edge"

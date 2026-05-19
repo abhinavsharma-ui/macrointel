@@ -1,0 +1,134 @@
+<script>
+const $=x=>document.getElementById(x), M=n=>n==null||isNaN(n)?'--':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}), P=n=>n==null||isNaN(n)?'--':(Number(n)>0?'+':'')+Number(n).toFixed(2)+'%';let eqc,outc;
+function cls(e,n){e.classList.remove('pos','neg','warn'); if(n>0)e.classList.add('pos'); if(n<0)e.classList.add('neg')}
+function charts(p,a){return;}
+function render(d){let p=d.portfolio||{},s=d.signals||{},r=d.regime||{},a=d.analytics||{};$('pv').textContent=M(p.portfolio_value);cls($('pv'),p.total_return_pct);$('ret').textContent=P(p.total_return_pct);$('cash').textContent=M(p.cash);$('dd').textContent=P(p.drawdown_from_peak_pct);$('dd').className='val '+(p.drawdown_from_peak_pct>7.23?'neg':p.drawdown_from_peak_pct>5?'warn':'');$('cpnl').textContent=M(a.closed_pnl);cls($('cpnl'),a.closed_pnl);$('wr').textContent=a.win_rate==null?'--':Number(a.win_rate).toFixed(1)+'%';$('tc').textContent=(a.closed_trades||0)+' closed trades · backtest 60.6%';$('oc').textContent=p.open_positions_count||0;$('volchip').textContent='VOL '+(r.vol_regime||'--')+' '+(r.vol_multiplier||'--')+'x';$('spy').textContent=(r.spy_realized_vol||0).toFixed(2)+'%';$('reg').textContent=r.vol_regime||'--';$('mul').textContent=(r.vol_multiplier||'--')+'x';$('desc').textContent=r.description||'';$('refresh').textContent='updated '+new Date().toLocaleTimeString();let sig=s.signals||[];$('sd').textContent=s.signal_date||'--';$('sig').innerHTML=sig.length?sig.slice(0,10).map(x=>`<tr><td>${x.rank}</td><td><b>${x.symbol}</b></td><td>${Number(x.probability||0).toFixed(3)}</td><td>${M(x.entry_price)}</td><td>${Number(x.position_pct||0).toFixed(3)}%</td><td class=pos>${M(x.profit_target_price)}</td><td class=neg>${M(x.stop_loss_price)}</td><td>${x.expected_exit_date||'--'}</td></tr>`).join(''):`<tr><td colspan=8 class=empty>No signals yet</td></tr>`;let pos=p.positions||[];$('pb').textContent=pos.length+' open';$('pos').innerHTML=pos.length?pos.map(x=>{let c=Number(x.unrealized_pnl||0)>=0?'pos':'neg',prog=Math.min(100,(Number(x.days_held||0)/8)*100);return `<tr><td><b>${x.symbol}</b></td><td>${M(x.entry_price)}</td><td>${M(x.current_price)}</td><td class=pos>${M(x.profit_target_price)}</td><td class=neg>${M(x.stop_loss_price)}</td><td>${x.days_held}d</td><td><div class=bar><div class='fill ${x.days_held>=7?'red':x.days_held>=5?'yellow':'green'}' style='width:${prog}%'></div></div></td><td class=${c}>${M(x.unrealized_pnl)}</td><td class=${c}>${P(x.unrealized_pnl_pct)}</td><td>${Number(x.confidence||0).toFixed(3)}</td></tr>`}).join(''):`<tr><td colspan=10 class=empty>No open positions</td></tr>`;let tr=a.trades||[];$('cb').textContent=(a.closed_trades||0)+' closed';$('ob').textContent=(a.closed_trades||0)+' trades';$('tr').innerHTML=tr.length?tr.map(x=>{let c=Number(x.pnl||0)>=0?'pos':'neg';return `<tr><td>${x.exit_date||'--'}</td><td><b>${x.symbol}</b></td><td>${M(x.entry_price)}</td><td>${M(x.exit_price)}</td><td>${x.hold_days||0}d</td><td class=${c}>${P(x.return_pct)}</td><td class=${c}>${M(x.pnl)}</td><td>${x.exit_reason||'--'}</td></tr>`}).join(''):`<tr><td colspan=8 class=empty>No closed trades yet</td></tr>`;$('spnl').textContent=M(a.closed_pnl);cls($('spnl'),a.closed_pnl);$('swr').textContent=a.win_rate==null?'--':Number(a.win_rate).toFixed(1)+'%';$('spt').textContent=a.profit_target_hit_rate==null?'--':Number(a.profit_target_hit_rate).toFixed(1)+'%';$('sh').textContent=a.avg_hold_days==null?'--':Number(a.avg_hold_days).toFixed(1)+'d';$('sw').textContent=a.avg_winner_pct==null?'--':P(a.avg_winner_pct);$('sl').textContent=a.avg_loser_pct==null?'--':P(a.avg_loser_pct);charts(p,a)}
+async function load(){try{let r=await fetch('/api/snapshot?ts='+Date.now());render(await r.json())}catch(e){console.error(e)}}if(window.__SNAPSHOT__){render(window.__SNAPSHOT__)};load();setInterval(load,5000);
+
+(async()=>{
+  try{
+    const r=await fetch("/api/pnl");const d=await r.json();
+    if(d.insufficient||!d.labels.length){
+      const pe=document.getElementById("pnlEmpty");const oe=document.getElementById("portEmpty");
+      if(pe)pe.style.display="flex";if(oe)oe.style.display="flex";
+      const pc=document.getElementById("pnlChart");const oc=document.getElementById("portChart");
+      if(pc)pc.style.display="none";if(oc)oc.style.display="none";
+      const pb=document.getElementById("pnlBadge");const ob=document.getElementById("portBadge");
+      if(pb)pb.textContent="No data";if(ob)ob.textContent="No data";
+      return;
+    }
+    const lp=d.cumulative_pnl[d.cumulative_pnl.length-1];
+    const lv=d.portfolio_value[d.portfolio_value.length-1];
+    const col=lp>=0?"#00e676":"#ff4757";
+    document.getElementById("pnlBadge").textContent=(lp>=0?"+":"")+"$"+lp.toLocaleString("en-US",{minimumFractionDigits:2});
+    document.getElementById("portBadge").textContent="$"+lv.toLocaleString("en-US",{minimumFractionDigits:2});
+    const cfg=(label,data,color)=>({type:"line",data:{labels:d.labels,datasets:[{label,data,borderColor:color,backgroundColor:color+"22",borderWidth:2,pointRadius:data.length>80?0:3,pointHoverRadius:5,fill:true,tension:0.3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{mode:"index",intersect:false,callbacks:{label:ctx=>label+": $"+ctx.raw.toLocaleString("en-US",{minimumFractionDigits:2})}}},scales:{x:{ticks:{color:"#8899aa",maxTicksLimit:7,maxRotation:0,font:{size:10}},grid:{color:"rgba(255,255,255,0.12)"}},y:{ticks:{color:"#8899aa",font:{size:10},callback:v=>"$"+v.toLocaleString()},grid:{color:"rgba(255,255,255,0.12)"}}}}});
+    new Chart(document.getElementById("pnlChart"),cfg("Cumulative P&L",d.cumulative_pnl,col));
+    new Chart(document.getElementById("portChart"),cfg("Portfolio Value",d.portfolio_value,"#4f8ef7"));
+  }catch(e){console.warn("pnl chart error",e);}
+})();
+
+
+// ── Breakdown cards ──────────────────────────────────────────────
+function fillBreakdown(d) {
+  const a = d.analytics || {};
+  const pos = (d.portfolio || {}).positions || [];
+
+  // ── Closed Outcomes ──
+  const outBadge = document.getElementById("outBadge");
+  const outDiv   = document.getElementById("outBreakdown");
+  const n = a.closed_trades || 0;
+  if (outBadge) outBadge.textContent = n + " trades";
+  if (outDiv) {
+    if (n > 0) {
+      const wr   = Number(a.win_rate || 0);
+      const wins = Math.round(wr * n / 100);
+      const loss = n - wins;
+      const pt   = a.profit_target_hit_rate != null ? Number(a.profit_target_hit_rate).toFixed(1) : "--";
+      const targetPct = 60.6;
+      outDiv.innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px">
+          <div style="background:var(--p2);border-radius:6px;padding:10px 8px;text-align:center">
+            <div class="label" style="margin-bottom:5px">&#9650; Wins</div>
+            <div style="font:700 22px Consolas;color:var(--g)">${wins}</div>
+          </div>
+          <div style="background:var(--p2);border-radius:6px;padding:10px 8px;text-align:center">
+            <div class="label" style="margin-bottom:5px">&#9660; Losses</div>
+            <div style="font:700 22px Consolas;color:var(--r)">${loss}</div>
+          </div>
+          <div style="background:var(--p2);border-radius:6px;padding:10px 8px;text-align:center">
+            <div class="label" style="margin-bottom:5px">PT Hit</div>
+            <div style="font:700 22px Consolas;color:var(--t)">${pt}%</div>
+          </div>
+        </div>
+        <div style="border-top:1px solid var(--l);padding-top:12px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+            <span class="label">Win rate</span>
+            <span style="font:11px Consolas;color:var(--mut)">${wr.toFixed(1)}% <span style="color:var(--lo)">vs ${targetPct}% target</span></span>
+          </div>
+          <div class="bar">
+            <div class="fill green" style="width:${Math.min(wr,100)}%;position:relative">
+              <div style="position:absolute;right:${Math.max(0,(wr-targetPct)/wr*100).toFixed(1)}%;top:-2px;bottom:-2px;width:2px;background:var(--a);opacity:.8;border-radius:1px"></div>
+            </div>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:10px;color:var(--lo)">
+            <span>0%</span><span style="color:var(--a)">&#9650; ${targetPct}% target</span><span>100%</span>
+          </div>
+        </div>`;
+    } else {
+      outDiv.innerHTML = '<div class="empty">No closed trades yet</div>';
+    }
+  }
+
+  // ── Unrealized P&L Breakdown ──
+  const obBadge = document.getElementById("ob");
+  const posDiv  = document.getElementById("posBreakdown");
+  if (obBadge) obBadge.textContent = pos.length + " open";
+  if (posDiv) {
+    if (pos.length > 0) {
+      const winners = pos.filter(x => Number(x.unrealized_pnl||0) > 0);
+      const losers  = pos.filter(x => Number(x.unrealized_pnl||0) < 0);
+      const flat    = pos.filter(x => Number(x.unrealized_pnl||0) === 0);
+      const total   = pos.reduce((s,x) => s + Number(x.unrealized_pnl||0), 0);
+      const winPct  = (winners.length / pos.length * 100).toFixed(0);
+      const sign    = total >= 0 ? "+" : "";
+      const col     = total >= 0 ? "var(--g)" : "var(--r)";
+      posDiv.innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px">
+          <div style="background:var(--p2);border-radius:6px;padding:10px 8px;text-align:center">
+            <div class="label" style="margin-bottom:5px">&#9650; Up</div>
+            <div style="font:700 22px Consolas;color:var(--g)">${winners.length}</div>
+          </div>
+          <div style="background:var(--p2);border-radius:6px;padding:10px 8px;text-align:center">
+            <div class="label" style="margin-bottom:5px">&#9660; Down</div>
+            <div style="font:700 22px Consolas;color:var(--r)">${losers.length}</div>
+          </div>
+          <div style="background:var(--p2);border-radius:6px;padding:10px 8px;text-align:center">
+            <div class="label" style="margin-bottom:5px">Flat</div>
+            <div style="font:700 22px Consolas;color:var(--mut)">${flat.length}</div>
+          </div>
+        </div>
+        <div style="border-top:1px solid var(--l);padding-top:12px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+            <span class="label">Winners vs losers</span>
+            <span style="font:11px Consolas;color:var(--mut)">${winners.length} / ${pos.length}</span>
+          </div>
+          <div class="bar">
+            <div class="fill green" style="width:${winPct}%"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+            <span class="label">Total unrealized P&L</span>
+            <span style="font:700 18px Consolas;color:${col}">${sign}$${Math.abs(total).toFixed(2)}</span>
+          </div>
+        </div>`;
+    } else {
+      posDiv.innerHTML = '<div class="empty">No open positions</div>';
+    }
+  }
+}
+
+const __origRender = render;
+render = function(d) { __origRender(d); try { fillBreakdown(d); } catch(e) { console.warn("breakdown err", e); } };
+
+
+</script></body></html>

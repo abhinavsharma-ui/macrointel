@@ -8,6 +8,9 @@ Aggregates predictions from:
 
 Uses weighted averaging with agreement filtering.
 Optionally uses AdaptiveEnsembleRouter for dynamic, regime-aware weights.
+
+Legacy `stacking_ensemble.pkl` loading has been removed. This module now
+expects the runtime to use the dedicated joblib-based stacking inference path.
 """
 
 import logging
@@ -63,15 +66,10 @@ class SignalAggregator:
         self._xgb_model = None
         self._meta_model = None
 
-        stacking_path = MODELS_DIR / "stacking_ensemble.pkl"
-        if stacking_path.exists():
-            try:
-                import pickle
-                with open(stacking_path, "rb") as f:
-                    self._stacking_model = pickle.load(f)
-                logger.info("SignalAggregator: Stacking model loaded")
-            except Exception as e:
-                logger.warning(f"SignalAggregator: Failed to load stacking: {e}")
+        logger.info(
+            "SignalAggregator: legacy stacking_ensemble.pkl loading disabled; "
+            "use core.stacking_inference joblib checkpoints instead"
+        )
 
         self._models_loaded = True
 

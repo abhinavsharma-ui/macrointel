@@ -43,8 +43,24 @@ TIINGO_BULK_EOD_BASE = "https://api.tiingo.com/tiingo/daily"
 TIINGO_BULK_BATCH_SIZE = max(100, int(os.getenv("TIINGO_BULK_BATCH_SIZE", "1000")))
 
 DEFAULT_UNIVERSE_MODE = os.getenv("UNIVERSE_MODE", "full").strip().lower() or "full"
+if DEFAULT_UNIVERSE_MODE == "normal":
+    DEFAULT_UNIVERSE_MODE = "us"
 if DEFAULT_UNIVERSE_MODE not in {"core", "full", "us", "nse"}:
     DEFAULT_UNIVERSE_MODE = "full"
+
+
+def _resolve_universe_mode() -> str:
+    """Re-read UNIVERSE_MODE from the environment at call time (not at module load time).
+
+    This avoids stale module-level defaults when dotenv is loaded *after* this
+    module is first imported (e.g. in standalone dashboard/app.py launch mode).
+    """
+    mode = os.getenv("UNIVERSE_MODE", "full").strip().lower() or "full"
+    if mode == "normal":
+        mode = "us"
+    if mode not in {"core", "full", "us", "nse"}:
+        mode = "full"
+    return mode
 
 PRICE_PROVIDER_ORDER = [
     name.strip().lower()
@@ -766,7 +782,10 @@ class MultiSourcePriceFetcher:
 
 class PriceDataPipeline:
     def __init__(self, symbols: Optional[List[str]] = None):
-        self.symbols = symbols or get_universe(DEFAULT_UNIVERSE_MODE)
+        # Re-read the universe mode from env at instantiation time so that
+        # callers that omit `symbols` still respect UNIVERSE_MODE even when
+        # this module was imported before dotenv ran (Issue #1 fix).
+        self.symbols = symbols or get_universe(_resolve_universe_mode())
         self.fetcher = MultiSourcePriceFetcher()
         self._cache = _SHARED_PRICE_CACHE
         self._recent_cache = _SHARED_RECENT_CACHE

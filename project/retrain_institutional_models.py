@@ -100,6 +100,14 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     logger = logging.getLogger("retrain")
+    market_scope = os.getenv("INSTITUTIONAL_RETRAIN_MARKET", "all").strip().lower() or "all"
+    logger.info(
+        "Retrain env: INSTITUTIONAL_RETRAIN_MARKET=%s SKIP_XGB_RETRAIN=%s META_MODEL_BUILD_WORKERS=%s XGB_RETRAIN_FEATURE_DIR=%s",
+        market_scope,
+        os.getenv("SKIP_XGB_RETRAIN", "0"),
+        os.getenv("META_MODEL_BUILD_WORKERS", ""),
+        os.getenv("XGB_RETRAIN_FEATURE_DIR", ""),
+    )
     sources = _feature_store_sources()
     logger.info("Loading retrain feature store from %s", ", ".join(str(path) for path in sources) or "<none>")
     feature_matrices, source_stats = load_feature_store()
@@ -128,6 +136,7 @@ def main():
         meta_take_threshold=float(os.getenv("META_MODEL_TAKE_THRESHOLD", "0.52")),
         meta_walk_forward_folds=max(3, int(os.getenv("META_MODEL_WALKFORWARD_FOLDS", "6"))),
         meta_min_train_days=max(90, int(os.getenv("META_MODEL_MIN_TRAIN_DAYS", "200"))),
+        market_scope=market_scope,
     )
     logger.info("Starting institutional retraining pipeline")
     report = trainer.train_all(

@@ -6,18 +6,23 @@ XGBoost model expects. Handles name mismatches between training and inference.
 """
 
 import logging
-import pickle
+import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
-from models.xgboost_model import add_regime_interactions
+from models.xgboost_model import (
+    add_advanced_features,
+    add_regime_conditional_features,
+    add_regime_interactions,
+)
 
 logger = logging.getLogger(__name__)
 
 CHECKPOINTS_DIR = Path(__file__).parent.parent / "models" / "checkpoints"
+STACKING_META_JSON_PATH = CHECKPOINTS_DIR / "stacking_meta.json"
 
 COLUMN_MAP = {
     "macd_diff":     "macd_hist",
@@ -44,26 +49,56 @@ COLUMN_MAP = {
 class FeatureBridge:
     def __init__(self):
         self._feature_cols = None
-        self._scaler = None
+        self._feature_source = None
         self._load()
+
+    @staticmethod
+    def _normalize_feature_list(value) -> Optional[list[str]]:
+        if not isinstance(value, (list, tuple)):
+            return None
+        features = [str(item).strip() for item in value if str(item).strip()]
+        return features or None
+
+    def _load_feature_cols(self) -> Optional[list[str]]:
+        if not STACKING_META_JSON_PATH.exists():
+            return None
+        try:
+            payload = json.loads(STACKING_META_JSON_PATH.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Feature bridge: failed reading %s: %s", STACKING_META_JSON_PATH.name, exc)
+            return None
+        features = self._normalize_feature_list(payload.get("features"))
+        if features:
+            self._feature_source = STACKING_META_JSON_PATH.name
+        return features
 
     def _load(self):
         try:
-            cols_path = CHECKPOINTS_DIR / "feature_cols.pkl"
-            scaler_path = CHECKPOINTS_DIR / "scaler.pkl"
-            if cols_path.exists():
-                with open(cols_path, "rb") as f:
-                    self._feature_cols = pickle.load(f)
-                logger.info(f"Feature bridge: {len(self._feature_cols)} features loaded")
-            if scaler_path.exists():
-                with open(scaler_path, "rb") as f:
-                    self._scaler = pickle.load(f)
-                logger.info("Feature bridge: scaler loaded")
+            self._feature_cols = self._load_feature_cols()
+            if self._feature_cols:
+                logger.info(
+                    "Feature bridge: %d features loaded from %s",
+                    len(self._feature_cols),
+                    self._feature_source or "unknown",
+                )
+            else:
+                logger.warning(
+                    "Feature bridge: no stacking feature metadata found; "
+                    "expected %s with a features list",
+                    STACKING_META_JSON_PATH.name,
+                )
         except Exception as e:
             logger.error(f"Feature bridge load error: {e}")
 
-    def prepare_latest(self, features: pd.DataFrame, ohlcv: Optional[pd.DataFrame] = None) -> Optional[np.ndarray]:
-        if self._feature_cols is None:
+    def prepare_latest(
+        self,
+        features: pd.DataFrame,
+        ohlcv: Optional[pd.DataFrame] = None,
+        *,
+        target_feature_cols: Optional[Sequence[str]] = None,
+    ) -> Optional[np.ndarray]:
+        active_feature_cols = list(target_feature_cols) if target_feature_cols else self._feature_cols
+        if active_feature_cols is None:
             return None
 
         row = features.iloc[-1].copy() if len(features) > 0 else None
@@ -82,7 +117,7 @@ class FeatureBridge:
             base["price_above_sma_200"] = 1.0 if base["close_vs_sma_200"] > 0 else 0.0
 
         needed_raw = set()
-        for col in self._feature_cols:
+        for col in active_feature_cols:
             needed_raw.add(col)
             mapped = COLUMN_MAP.get(col)
             if mapped:
@@ -98,9 +133,11 @@ class FeatureBridge:
 
         prepared = pd.DataFrame([base]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         prepared = add_regime_interactions(prepared)
+        prepared = add_advanced_features(prepared)
+        prepared = add_regime_conditional_features(prepared)
 
         result = {}
-        for col in self._feature_cols:
+        for col in active_feature_cols:
             if col in prepared.columns and pd.notna(prepared.iloc[0][col]):
                 result[col] = float(prepared.iloc[0][col])
                 continue
@@ -110,18 +147,8 @@ class FeatureBridge:
                 continue
             result[col] = 0.0
 
-        X = np.array([[result[c] for c in self._feature_cols]], dtype=float)
+        X = np.array([[result[c] for c in active_feature_cols]], dtype=float)
         X = np.nan_to_num(X, nan=0, posinf=0, neginf=0)
-
-        if self._scaler is not None:
-            try:
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    X = self._scaler.transform(X)
-            except Exception as e:
-                logger.warning(f"Scaler transform failed: {e}")
-
         return X
 
     def _compute_inline(self, col: str, ohlcv: pd.DataFrame) -> Optional[float]:
@@ -137,6 +164,11 @@ class FeatureBridge:
             if col == "close":  return float(close.iloc[-1])
             if col == "volume": return float(volume.iloc[-1])
             if col == "sma_20": return float(close.rolling(20).mean().iloc[-1])
+            if col == "close_vs_sma_9":
+                sma_9 = close.rolling(9).mean().iloc[-1]
+                if pd.isna(sma_9) or abs(float(sma_9)) < 1e-12:
+                    return None
+                return float((close.iloc[-1] / sma_9) - 1.0)
             if col == "sma_50": return float(close.rolling(50).mean().iloc[-1])
             if col == "ema_12": return float(close.ewm(span=12, adjust=False).mean().iloc[-1])
             if col == "ema_26": return float(close.ewm(span=26, adjust=False).mean().iloc[-1])
@@ -159,10 +191,10 @@ class FeatureBridge:
 def diagnose_feature_mismatch():
     bridge = FeatureBridge()
     if bridge._feature_cols is None:
-        print("ERROR: feature_cols.pkl not found in models/checkpoints/")
+        print("ERROR: stacking feature metadata not found in models/checkpoints/")
         return
 
-    print(f"Model expects {len(bridge._feature_cols)} features:")
+    print(f"Model expects {len(bridge._feature_cols)} features from {bridge._feature_source}:")
     print(bridge._feature_cols)
 
     from pipeline.price_collector import PriceDataPipeline

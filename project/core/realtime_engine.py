@@ -631,11 +631,23 @@ class BybitPublicDepthWebSocket:
         self._bybit_ping_interval = max(0.0, float(os.getenv("BYBIT_WS_PING_INTERVAL_SECONDS", "45") or 45))
         self._bybit_ping_timeout = max(0.0, float(os.getenv("BYBIT_WS_PING_TIMEOUT_SECONDS", "90") or 90))
         self._bybit_app_ping_seconds = max(10.0, float(os.getenv("BYBIT_WS_APP_PING_SECONDS", "20") or 20))
+        self._bybit_subscribe_pause_seconds = max(
+            0.05,
+            float(os.getenv("BYBIT_WS_SUBSCRIBE_PAUSE_SECONDS", "0.15") or 0.15),
+        )
         self._reconnect_base_delay_seconds = float(os.getenv("BYBIT_WS_RECONNECT_BASE_DELAY_SECONDS", "3"))
         self._reconnect_max_delay_seconds = float(os.getenv("BYBIT_WS_RECONNECT_MAX_DELAY_SECONDS", "60"))
-        self._stale_seconds = float(os.getenv("BYBIT_WS_STALE_SECONDS", "30"))
+        self._connect_jitter_seconds = max(0.0, float(os.getenv("BYBIT_WS_CONNECT_JITTER_SECONDS", "1.5") or 1.5))
+        self._rate_limit_backoff_seconds = max(
+            5.0,
+            float(os.getenv("BYBIT_WS_RATE_LIMIT_BACKOFF_SECONDS", "20") or 20),
+        )
+        # Increased from 30s → 90s: 30s was too aggressive and caused ~10k false reconnects
+        # when the server sends no data (quiet market periods are normal, not stale)
+        self._stale_seconds = float(os.getenv("BYBIT_WS_STALE_SECONDS", "90"))
         self._last_message_ts = 0.0
         self._watchdog_thread: Optional[threading.Thread] = None
+        self._next_connect_not_before = 0.0
 
     def _ws_url(self) -> str:
         return self.TESTNET_WS_BASE if self.testnet else self.WS_BASE
@@ -664,16 +676,20 @@ class BybitPublicDepthWebSocket:
             self.ws.close()
 
     def _watchdog_loop(self):
+        # Wait for the connection to establish before starting staleness checks
+        time.sleep(15)
         while self._running:
-            time.sleep(5)
+            time.sleep(10)
             if not self._running or self._stale_seconds <= 0:
                 continue
             last_ts = float(self._last_message_ts or 0.0)
             if last_ts <= 0:
+                # Never received a message yet — don't force reconnect during startup
                 continue
-            if time.time() - last_ts > float(self._stale_seconds):
+            stale_for = time.time() - last_ts
+            if stale_for > float(self._stale_seconds):
                 logger.warning(
-                    f"Bybit WebSocket stale for >{int(self._stale_seconds)}s; forcing reconnect"
+                    f"Bybit WebSocket stale for {stale_for:.0f}s (>{int(self._stale_seconds)}s threshold); forcing reconnect"
                 )
                 try:
                     if self.ws:
@@ -684,7 +700,12 @@ class BybitPublicDepthWebSocket:
     def _run_forever(self):
         delay = max(0.5, float(self._reconnect_base_delay_seconds))
         max_delay = max(delay, float(self._reconnect_max_delay_seconds))
+        if self._connect_jitter_seconds > 0:
+            time.sleep(random.uniform(0.0, self._connect_jitter_seconds))
         while self._running:
+            wait_for_slot = self._next_connect_not_before - time.time()
+            if wait_for_slot > 0:
+                time.sleep(wait_for_slot)
             start_ts = time.time()
             try:
                 self.ws = websocket.WebSocketApp(
@@ -714,27 +735,41 @@ class BybitPublicDepthWebSocket:
                     delay = min(max_delay, delay * 2.0)
                 else:
                     delay = max(0.5, float(self._reconnect_base_delay_seconds))
-                time.sleep(min(max_delay, delay) + random.random())
+                sleep_for = min(max_delay, delay) + random.random()
+                wait_for_slot = self._next_connect_not_before - time.time()
+                if wait_for_slot > 0:
+                    sleep_for = max(sleep_for, wait_for_slot)
+                time.sleep(sleep_for)
 
     def _ping_loop(self):
-        while self._running and self.ws is not None:
+        """Send Bybit app-level pings to keep the connection alive.
+
+        The loop captures the ws reference at start so it exits cleanly when the
+        connection is replaced during a reconnect (the new _on_open starts a fresh
+        ping thread for the new ws instance).
+        """
+        ws_ref = self.ws
+        while self._running and ws_ref is not None and ws_ref is self.ws:
             try:
-                self.ws.send(json.dumps({"op": "ping"}))
+                if ws_ref.sock and ws_ref.sock.connected:
+                    ws_ref.send(json.dumps({"op": "ping"}))
             except Exception:
-                return
+                return  # ws is gone, exit — _on_open will spawn a new ping thread
             time.sleep(self._bybit_app_ping_seconds)
 
     def _on_open(self, ws):
         # Reset reconnect backoff on successful connect
         self._reconnect_delay = 3.0
+        self._next_connect_not_before = 0.0
+        self._last_message_ts = time.time()
+        self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+        self._ping_thread.start()
         topics = self._subscribe_topics()
         for idx in range(0, len(topics), self._topics_per_subscribe):
             chunk = topics[idx : idx + self._topics_per_subscribe]
             ws.send(json.dumps({"op": "subscribe", "args": chunk}))
             # Avoid rate-limit bursts on large topic sets.
-            time.sleep(0.05)
-        self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
-        self._ping_thread.start()
+            time.sleep(self._bybit_subscribe_pause_seconds)
         logger.info(
             f"Bybit public depth WebSocket connected | topics={len(topics)} | "
             f"chunk_size={self._topics_per_subscribe}"
@@ -866,6 +901,10 @@ class BybitPublicDepthWebSocket:
             self._apply_trade(symbol, payload)
 
     def _on_error(self, ws, error):
+        message = str(error or "")
+        if "429" in message or "too many requests" in message.lower():
+            backoff_seconds = self._rate_limit_backoff_seconds + random.uniform(0.0, max(1.0, self._rate_limit_backoff_seconds * 0.25))
+            self._next_connect_not_before = max(self._next_connect_not_before, time.time() + backoff_seconds)
         logger.warning(f"Bybit public depth WebSocket error: {error}")
 
     def _on_close(self, ws, *args):
@@ -2151,6 +2190,7 @@ class PollingFallback:
                                     volume=int(vol_row.get(symbol, 0) if hasattr(vol_row, "get") else 0),
                                     timestamp=datetime.now(timezone.utc),
                                     market="IN" if symbol.endswith(".NS") else "US",
+                                    source="yfinance_1m",
                                 )
                                 self.buffer.push(tick)
                         except Exception:

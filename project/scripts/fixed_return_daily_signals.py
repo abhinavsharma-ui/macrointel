@@ -9,6 +9,26 @@ import numpy as np
 import pandas as pd
 from pandas.tseries.offsets import BDay
 
+try:
+    from dotenv import dotenv_values, load_dotenv
+
+    _here = Path(__file__).resolve()
+    _seen_env_paths = set()
+    for _env_path in (_here.parent.parent / ".env", _here.parent.parent.parent / ".env"):
+        _env_path = _env_path.resolve()
+        if _env_path in _seen_env_paths:
+            continue
+        _seen_env_paths.add(_env_path)
+        if _env_path.exists():
+            load_dotenv(_env_path, override=False)
+            _env_values = dotenv_values(_env_path)
+            if _env_values.get("GROQ_API_KEY"):
+                os.environ["GROQ_API_KEY"] = _env_values["GROQ_API_KEY"]
+        if os.getenv("SIG_THRESHOLD"):
+            break
+except Exception as exc:
+    print(f"WARN dotenv load skipped: {exc}", flush=True)
+
 MODEL_CANDIDATES = [
     Path("models/checkpoints/fixed_return_h10_model.joblib"),
     Path("models/fixed_return_h10_model.joblib"),
@@ -41,7 +61,24 @@ SECTOR_CACHE_PATH = Path("data/sector_cache.json")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 LLM_FILTER_ENABLED = os.getenv("LLM_FILTER_ENABLED", "1") != "0"
-LLM_MODEL = os.getenv("LLM_FILTER_MODEL", "llama-3.3-70b-versatile")
+# ── SPY Market Regime Gate ────────────────────────────────────────────────────
+SIG_REGIME_FILTER_ENABLED = os.getenv("SIG_REGIME_FILTER", "0") != "0"
+SIG_REGIME_SPY_MA_DAYS    = int(os.getenv("SIG_REGIME_SPY_MA_DAYS", "50"))
+SIG_REGIME_RETURN_FLOOR   = float(os.getenv("SIG_REGIME_RETURN_FLOOR", "-5.0"))
+SIG_REGIME_RETURN_DAYS    = int(os.getenv("SIG_REGIME_RETURN_DAYS", "20"))
+SIG_REGIME_SOFT_HALF      = os.getenv("SIG_REGIME_SOFT_HALF", "0") != "0"
+# ─────────────────────────────────────────────────────────────────────────────
+
+LLM_MODEL = os.getenv("LLM_FILTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+LLM_API_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEY","").split(",") if k.strip()]
+_llm_key_index = 0
+LLM_FALLBACK_MODELS = [
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-4-27b-it:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "deepseek/deepseek-v4-flash:free",
+]
 LLM_NEWS_CACHE_PATH = Path("data/llm_news_cache.json")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
@@ -244,70 +281,154 @@ def market_context_pct():
 
 
 LLM_SYSTEM_PROMPT = """
-════════════════════════════════════════════════════════
-NULL HYPOTHESIS: DEFAULT = REDUCE_HALF
-Burden of proof is on PROCEED. Clear positive case = PROCEED.
-Ambiguity = REDUCE_HALF. Only hard evidence of harm = SKIP.
-════════════════════════════════════════════════════════
+You are a portfolio manager at a quantitative equity fund filtering US equity trade signals.
+ML model baseline: 57% win rate (26-year Monte Carlo backtest). Trade structure: 8% PT / 3% SL.
+Break-even win rate: 43.0%. Your job is ACCURACY, not conservatism.
+A missed good trade costs exactly as much as a bad trade taken.
 
-You are a skeptical senior equity-trading risk officer.
-Trade: 10-day long momentum/mean-reversion, entry at next open,
-profit target 8%, stop loss 6%.
+=== DECISIONS ===
+PROCEED     = execute at full position size
+REDUCE_HALF = execute at 50% position size
+SKIP        = remove from signals, do not trade
 
-PHASE 1 - PRE-MORTEM
-Before calling any tool, assume this trade hits its stop loss on
-Day 3. Write 2-3 bullets explaining WHY it failed using only
-information already visible (symbol, today move, sector, headlines).
-Label: PRE-MORTEM: <bullets>
+=== NULL HYPOTHESIS ===
+Default assumption = REDUCE_HALF.
+Require POSITIVE EVIDENCE to upgrade to PROCEED.
+Require HARD EVIDENCE to downgrade to SKIP.
+Unknown or missing data = REDUCE_HALF. Never default unknown to SKIP or PROCEED.
 
-PHASE 2 - TOOL INVESTIGATION (ReAct)
-You MUST call all 6 tools exactly once, in any order.
-After EACH tool returns, write one THOUGHT sentence before calling next.
-Format: THOUGHT: <one sentence interpreting data just returned>
-UNKNOWN PROTOCOL: empty/null tool result = UNKNOWN, never assume clean.
+=== HARD KILL SWITCHES (checked first, non-rebuttable) ===
 
-PHASE 3 - DETERMINISTIC CHECKLIST
-After all 6 tools, answer each gate TRUE/FALSE:
-  [ ] G1 Short interest < 25% of float
-  [ ] G2 Options IV < 80% (no options chain = REDUCE_HALF not SKIP)
-  [ ] G3 10-day price trend not in confirmed downtrend
-  [ ] G4 Sector ETF 5-day return > -2%
-  [ ] G5 No hard-stop news (FDA rejection, fraud, going-concern,
-         earnings collapse >10%, mass exec departure)
-  [ ] G6 RSI-14 not > 75
-If ANY gate FALSE or UNKNOWN -> SKIP or REDUCE_HALF.
+HK1 EARNINGS PROXIMITY
+Trigger: analyze_news_risk returns any headline mentioning earnings, EPS, guidance, revenue
+miss/beat, quarterly results, forecast cut, or analyst estimate revision.
+-> REDUCE_HALF minimum (IV will spike around earnings, spread widens)
+-> SKIP if the earnings date is within 3 calendar days
+Rule: Do not argue past HK1. Any earnings-adjacent news = REDUCE_HALF or worse.
 
-PHASE 4 - STEELMAN + REBUTTAL
-Write strongest argument FOR skipping. Then rebut it.
-If cannot rebut -> SKIP.
-  STEELMAN_SKIP: <best skip argument>
-  REBUTTAL: <counter, or "Cannot rebut.">
+HK2 NO OPTIONS CHAIN
+Trigger: check_options_iv returns no chain, N/A, unavailable, or any error.
+-> REDUCE_HALF (cannot be upgraded to PROCEED)
+Reason: Unknown IV is structural uncertainty. The ML model outputs micro-caps. Most have
+no options chain. REDUCE_HALF is correct and expected behavior for these symbols.
+Do not penalize the signal further than REDUCE_HALF for lacking an options chain.
 
-PHASE 5 - FINAL DECISION
-SKIP       -> G5 hard-stop news OR G1>40% OR G2>100% OR cannot rebut steelman
-REDUCE_HALF -> G1 25-40% OR G2 60-100% OR unknown options chain OR G6 RSI 70-80
-REDUCE_HALF -> G1 borderline (25-40%) OR G2 borderline (60-80%) OR
-               no options chain OR sector -1% to -2%
-PROCEED    -> all 6 gates TRUE, rebuttal holds, pre-mortem priced in
+HK3 EXTREME SHORT INTEREST
+Trigger: check_short_interest returns short float > 40%.
+-> SKIP immediately
+Reason: Institutional short conviction at this level reflects information asymmetry
+you cannot model. Squeeze risk is also unquantifiable. Do not rationalize past this.
 
-INVALID reasons for PROCEED:
-  - "News is neutral"
-  - "Probability score is high"
-  - "No red flags found"
-  - "Market is broadly positive" (alone)
+HK4 CATASTROPHIC IV
+Trigger: check_options_iv returns ATM 30-day IV > 100%.
+-> SKIP immediately
+Reason: Options market is pricing a binary event (FDA, merger vote, earnings blowup).
+This is not a normal directional trade. Exit analysis and SKIP.
 
-EMPTY DATA: empty tool result = UNKNOWN not CLEAN.
-Three or more UNKNOWN -> auto REDUCE_HALF (not SKIP — unknown != bad).
+=== MANDATORY TOOL SEQUENCE ===
+You MUST call all 7 tools before forming any conclusion. No exceptions.
 
-OUTPUT: return ONLY valid JSON, no prose, no fences:
-{
-  "SYMBOL": {
-    "decision": "proceed|skip|reduce_half",
-    "reason": "<15 words citing decisive gate or factor>",
-    "scratchpad": "<pre-mortem + key THOUGHTs + checklist + steelman>"
-  }
-}
-One entry per input symbol. Include every symbol passed in.
+Call order:
+1. check_short_interest(symbol)      -> feeds G1, HK3
+2. check_options_iv(symbol)          -> feeds G2, HK2, HK4
+3. check_price_momentum(symbol)      -> feeds G3, G6
+4. check_sector_performance(symbol)  -> feeds G4
+5. analyze_news_risk(symbol)         -> feeds G5, HK1
+6. assess_trade_setup(symbol, ...)   -> feeds synthesis score
+7. check_catalyst_events(symbol)     -> feeds pre-news score; if pre_news_score>=0.5 this is POSITIVE EVIDENCE, upgrade toward PROCEED; if 0=0.5 upgrade one level toward PROCEED. If event_count=0 treat as UNKNOWN (no penalty).
+
+After EACH tool response write exactly:
+THOUGHT: [1-2 sentences: what this data means, which gate or HK it affects, how it changes your view]
+
+Tool failure / no data: treat as UNKNOWN for that gate = caution-level.
+2 or more UNKNOWN gates across any combination = REDUCE_HALF, regardless of other results.
+
+=== GATE TABLE ===
+Gate  Metric              CLEAN                       CAUTION                  FAIL
+G1    Short float %       < 25%                       25% to 40%               > 40% (HK3)
+G2    ATM IV 30-day       < 60%                       60% to 100%              > 100% (HK4)
+G3    10-day price trend  uptrend or flat              sideways / ambiguous     confirmed downtrend
+G4    Sector 5-day ret    > -1%                        -1% to -2%               < -2%
+G5    News risk           NEUTRAL or POSITIVE         ELEVATED                 HARD_STOP
+G6    RSI-14              <= 75                        75 to 80                 > 80
+
+Scoring logic:
+0 caution gates, 0 fail gates -> eligible for PROCEED (still requires steelman rebuttal)
+1 or more caution gates       -> REDUCE_HALF
+1 or more fail gates          -> SKIP
+Any HK fired                  -> apply HK rule above, override gate score
+
+=== GRAPH-OF-THOUGHT SYNTHESIS ===
+After completing all 6 tool calls and THOUGHT steps, reason across three independent nodes:
+
+NODE A TECHNICAL MOMENTUM
+Synthesize: 10-day trend direction, RSI-14 level, distance from 52-week high/low.
+Is price action consistent with a breakout or is momentum already exhausted?
+Gates: G3, G6
+
+NODE B STRUCTURAL RISK
+Synthesize: short float, ATM IV, news classification.
+Is there any signal that institutional money is positioned against this trade?
+Gates: G1, G2, G5 and HK1, HK2, HK3, HK4
+
+NODE C MACRO AND SECTOR CONTEXT
+Synthesize: sector ETF 5-day return, assess_trade_setup score, market regime.
+Is the sector environment favorable, neutral, or hostile to new long exposure?
+Gate: G4, setup score
+
+After three nodes, write:
+NODE A VERDICT: [clean / caution / fail + one sentence]
+NODE B VERDICT: [clean / caution / fail + one sentence]
+NODE C VERDICT: [clean / caution / fail + one sentence]
+SYNTHESIS: [one sentence combining all three verdicts into overall assessment]
+
+Important: Nodes are INDEPENDENT. A clean Node A does NOT offset a failing Node B.
+All three nodes must be at least caution-level for PROCEED to remain eligible.
+
+=== STEELMAN + REBUTTAL ===
+After GoT synthesis, write:
+
+STEELMAN: In 2 sentences, state the strongest bear case for this trade.
+Use the single most dangerous data point from your tool calls. Be specific.
+
+REBUTTAL: Counter with specific numbers from your tool calls.
+Cite actual values, not general market knowledge or assumptions.
+If you cannot produce a data-backed rebuttal, you cannot PROCEED.
+"The data does not contradict the bear case" = REDUCE_HALF.
+
+=== EXAMPLE: PROCEED ===
+Inputs: RSI 42, sector +0.8% 5d, short float 8.1%, IV 52%, news NEUTRAL, setup score 71
+Gate check: G1 clean, G2 clean, G3 uptrend clean, G4 clean, G5 clean, G6 clean
+No HKs fired. 0 caution gates. Setup score 71 > 55.
+Steelman: "Vol is elevated relative to sector peers suggesting hidden risk."
+Rebuttal: "IV 52% is below G2 caution threshold of 60%, sector outperforming +0.8%."
+Decision: PROCEED
+
+=== EXAMPLE: REDUCE_HALF (borderline gate) ===
+Inputs: RSI 58, sector -0.4%, short float 13%, IV 74%, no hard news, setup score 55
+Gate check: G2 caution (74%), G4 borderline (-0.4%) -> 1 confirmed caution gate
+Gate scoring rule: 1 caution gate = REDUCE_HALF, even if steelman is rebuttable.
+Decision: REDUCE_HALF, reason: "G2 caution: IV 74%, G4 borderline: sector -0.4%"
+
+=== EXAMPLE: REDUCE_HALF (no options chain) ===
+Inputs: Micro-cap, check_options_iv returns "no options chain available"
+HK2 fires immediately.
+Decision: REDUCE_HALF, reason: "HK2: no options chain, IV unknown, structural uncertainty"
+
+=== EXAMPLE: SKIP ===
+Inputs: short float 43%, IV 67%, uptrend, sector +0.5%, news NEUTRAL, setup 62
+HK3 fires (short float > 40%).
+Decision: SKIP, reason: "HK3: short float 43% exceeds 40% threshold, institutional short conviction"
+
+=== FINAL OUTPUT FORMAT ===
+After completing all analysis, output ONLY the following JSON.
+No text before or after. No markdown. No explanation outside the JSON.
+Must be valid Python json.loads() parseable.
+
+{"SYMBOL": {"decision": "proceed|reduce_half|skip", "reason": "one sentence with specific data values cited", "gates": {"G1": "value:status", "G2": "value:status", "G3": "value:status", "G4": "value:status", "G5": "value:status", "G6": "value:status"}, "hk_fired": "none|HK1|HK2|HK3|HK4", "setup_score": 0}}
+
+Replace SYMBOL with the actual ticker. decision must be exactly one of: proceed / reduce_half / skip
+
 """
 
 
@@ -317,8 +438,10 @@ TOOLS = [
     {"type":"function","function":{"name":"check_price_momentum","description":"Return 10-day trend (up/down/flat), RSI-14, pct from 52w high/low. Gates G3 and G6.","parameters":{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}}},
     {"type":"function","function":{"name":"check_sector_performance","description":"Return 5-day return of sector ETF. Gate G4: >-2% required.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"sector":{"type":"string"}},"required":["symbol","sector"]}}},
     {"type":"function","function":{"name":"analyze_news_risk","description":"Classify headlines: HARD_STOP / ELEVATED / NEUTRAL / POSITIVE_CATALYST. Gate G5: no HARD_STOP.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"headlines":{"type":"array","items":{"type":"string"}}},"required":["symbol","headlines"]}}},
-    {"type":"function","function":{"name":"assess_trade_setup","description":"Holistic setup score 0-100. <40 lean SKIP, 40-65 REDUCE_HALF, >65 PROCEED.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"probability":{"type":"number"},"pct_today":{"type":"number"},"spy_pct":{"type":"number"},"qqq_pct":{"type":"number"},"sector":{"type":"string"}},"required":["symbol","probability"]}}}
+    {"type":"function","function":{"name":"assess_trade_setup","description":"Holistic setup score 0-100. <40 lean SKIP, 40-65 REDUCE_HALF, >65 PROCEED.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"probability":{"type":"number"},"pct_today":{"type":"number"},"spy_pct":{"type":"number"},"qqq_pct":{"type":"number"},"sector":{"type":"string"}},"required":["symbol","probability"]}}},
+    {"type":"function","function":{"name":"check_catalyst_events","description":"Return pre-news catalyst evidence for SYMBOL: insider clusters, 8-Ks, 13D activist filings, biotech trial diffs, gov contracts, unusual options volume. Returns event_count and pre_news_score (0..1). High pre_news_score (>=0.5) means informed money is positioning ahead of a catalyst — strong buy signal.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"days":{"type":"integer","default":30}},"required":["symbol"]}}},
 ]
+_per_symbol_iv = {}  # symbol -> iv_pct; populated by check_options_iv
 
 
 def _handle_tool_call(name, args):
@@ -352,6 +475,7 @@ def _handle_tool_call(name, args):
                     if spot and not ch.calls.empty:
                         atm = ch.calls.iloc[(ch.calls["strike"]-spot).abs().argsort()[:1]]
                         r["iv_pct"] = round(float(atm["impliedVolatility"].iloc[0])*100,1)
+                        if r["iv_pct"]: _per_symbol_iv[sym] = r["iv_pct"]
                     if not ch.calls.empty and not ch.puts.empty:
                         r["put_call_ratio"] = round(ch.puts["openInterest"].sum()/max(ch.calls["openInterest"].sum(),1),2)
                     r["status"] = "ok" if r["iv_pct"] else "no_data"
@@ -405,20 +529,22 @@ def _handle_tool_call(name, args):
             cl.append({"headline":h[:100],"category":cat})
         return _j.dumps({"symbol":sym,"classifications":cl,"hard_stop_count":hsc,"gate_G5_pass":hsc==0,"status":"ok"})
 
+
     elif name == "assess_trade_setup":
-        prob=float(args.get("probability",0.5)); pd_=float(args.get("pct_today",0) or 0)
+        prob=float(args.get("probability",0.5)); pd=float(args.get("pct_today",0) or 0)
         sp=float(args.get("spy_pct",0) or 0); qp=float(args.get("qqq_pct",0) or 0)
         score=50+(prob-0.5)*80
-        if pd_>3: score-=10
-        if pd_<-5: score+=5
-        mkt=(sp+qp)/2
-        if mkt>0.5: score+=8
-        if mkt<-0.5: score-=8
-        if mkt<-1: score-=8
+        if pd<-1: score-=15
+        if sp<-1: score-=10
+        if qp<-1: score-=10
         score=max(0,min(100,score))
-        lean="SKIP" if score<40 else ("REDUCE_HALF" if score<65 else "PROCEED")
-        return _j.dumps({"symbol":sym,"setup_score":round(score,1),"lean":lean,"status":"ok"})
-
+        return _j.dumps({"score":round(score,1),"status":"ok"})
+    elif name == "check_catalyst_events":
+        import sys as _sys
+        if "/home/abhinavsharma1359/macrointel-catalyst" not in _sys.path:
+            _sys.path.insert(0, "/home/abhinavsharma1359/macrointel-catalyst")
+        from tools import check_catalyst_events as _cce
+        return _cce(args["symbol"], days=args.get("days", 30))
     return '{"status":"unknown_tool"}'
 
 
@@ -435,8 +561,8 @@ def _build_llm_user_message(candidates, spy_pct, qqq_pct, num_signals):
     return "\n".join(lines)
 
 
-def call_llm_filter(candidates, spy_pct, qqq_pct, num_signals):
-    if not GROQ_API_KEY:
+def _call_llm_filter_single(candidates, spy_pct, qqq_pct, num_signals):
+    if not LLM_API_KEYS:
         print("LLM FILTER: key not set; skipping",flush=True); return {}
     try:
         import requests as _req, json as _j
@@ -444,13 +570,32 @@ def call_llm_filter(candidates, spy_pct, qqq_pct, num_signals):
         return {}
     try:
         messages=[{"role":"system","content":LLM_SYSTEM_PROMPT},{"role":"user","content":_build_llm_user_message(candidates,spy_pct,qqq_pct,num_signals)}]
-        headers={"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json","HTTP-Referer":"https://macro-intelligence.local","X-Title":"MacroIntelligence"}
+        headers={"Authorization":f"Bearer {LLM_API_KEYS[0]}","Content-Type":"application/json","HTTP-Referer":"https://macro-intelligence.local","X-Title":"MacroIntelligence"}
         tool_calls_made=0
         for _round in range(14):
-            body={"model":LLM_MODEL,"messages":messages,"tools":TOOLS,"tool_choice":"required" if tool_calls_made<6 else "auto","temperature":0.1}
-            resp=_req.post("https://openrouter.ai/api/v1/chat/completions",headers=headers,json=body,timeout=60)
-            resp.raise_for_status()
-            choice=resp.json()["choices"][0]; msg=choice["message"]; finish=choice.get("finish_reason","")
+            body={"model":LLM_MODEL,"messages":messages,"tools":TOOLS,"tool_choice":"required" if tool_calls_made<7 else "auto","temperature":0.1}
+            _models_to_try = [body["model"]] + [m for m in LLM_FALLBACK_MODELS if m != body["model"]]
+            resp = None
+            for _try_model in _models_to_try:
+                for _ki, _key in enumerate(LLM_API_KEYS):
+                    try:
+                        body["model"] = _try_model
+                        headers["Authorization"] = f"Bearer {_key}"
+                        resp=_req.post("https://openrouter.ai/api/v1/chat/completions",headers=headers,json=body,timeout=60)
+                        if resp.status_code == 429:
+                            print(f"  429 on {_try_model} key[{_ki}], trying next key", flush=True)
+                            resp = None
+                            continue
+                        resp.raise_for_status()
+                        break
+                    except Exception as _fe:
+                        print(f"  {_try_model} key[{_ki}] failed: {_fe}", flush=True)
+                        resp = None
+                        continue
+                if resp is not None:
+                    break
+            if resp is None: raise Exception("all fallback models and keys exhausted")
+            choice=resp.json()["choices"][0]; msg=choice["message"]; finish=choice.get("finish_reason",""); print(f"  ROUND {_round} finish={repr(finish)} has_tools={bool(msg.get('tool_calls'))} content_len={len(msg.get('content') or '')}", flush=True)
             messages.append(msg)
             if msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
@@ -464,12 +609,25 @@ def call_llm_filter(candidates, spy_pct, qqq_pct, num_signals):
                         sym=fa.get("symbol","").upper(); cm=next((c for c in candidates if c["symbol"].upper()==sym),{})
                         fa.setdefault("sector",cm.get("sector",""))
                     tr=_handle_tool_call(fn,fa)
-                    print(f"  TOOL {fn}({fa.get('symbol','')}) -> {tr[:80]}",flush=True)
+                    tr_str=tr if isinstance(tr,str) else _j.dumps(tr)
+                    print(f"  TOOL {fn}({fa.get('symbol','')}) -> {tr_str[:80]}",flush=True)
                     tool_calls_made+=1
-                    messages.append({"role":"tool","tool_call_id":tc["id"],"content":tr})
+                    import time as _t; _t.sleep(5)
+                    messages.append({"role":"tool","tool_call_id":tc["id"],"content":tr_str})
                 continue
             if finish in ("stop","end_turn",""):
-                text=(msg.get("content") or "").strip()
+                text=(msg.get("content") or msg.get("reasoning") or "").strip()
+                # Also check reasoning_details for models that put answer there
+                if not text or len(text) < 10:
+                    import re as _re2
+                    _rd = msg.get("reasoning_details") or []
+                    for _rb in _rd:
+                        if isinstance(_rb, dict) and _rb.get("text"): text = _rb["text"]; break
+                print(f"  LLM RAW TEXT (first 300): {repr(text[:300])}", flush=True)
+                if not text or len(text) < 5:
+                    print("  LLM returned empty content — forcing JSON request", flush=True)
+                    messages.append({"role":"user","content":"Now output ONLY the final JSON decision object. No text, no markdown, no reasoning. Just the raw JSON."})
+                    continue
                 if text.startswith("```"):
                     parts=text.split("```"); text=parts[1] if len(parts)>1 else text
                     if text.lstrip().lower().startswith("json"): text=text.lstrip()[4:]
@@ -486,12 +644,23 @@ def call_llm_filter(candidates, spy_pct, qqq_pct, num_signals):
 
 
 
+
+def call_llm_filter(candidates, spy_pct=0.0, qqq_pct=0.0, num_signals=5):
+    """Process each candidate individually to avoid hitting round limits."""
+    all_decisions = {}
+    for cand in candidates:
+        sym = cand["symbol"]
+        print(f"LLM FILTER: evaluating {sym}", flush=True)
+        result = _call_llm_filter_single([cand], spy_pct=spy_pct, qqq_pct=qqq_pct, num_signals=num_signals)
+        all_decisions.update(result)
+    return all_decisions
+
 def _apply_llm_decisions(signals, decisions):
     out = []
     for s in signals:
         sym = s["symbol"]
         d = decisions.get(sym) or decisions.get(sym.upper()) or {}
-        decision = str(d.get("decision", "proceed")).lower().strip()
+        decision = str(d.get("decision", "reduce_half")).lower().strip()
         reason = str(d.get("reason", "")).strip()[:120]
         confidence = str(d.get("confidence", "medium")).lower().strip()
         if decision == "skip":
@@ -834,6 +1003,8 @@ def latest_rows(features, allowed):
     print(f"FRESHNESS: {fresh_count} fresh, {stale_count} stale, scoring fresh only", flush=True)
     if EXCLUDE_SECTORS:
         print(f"SECTOR FILTER: excluded={sector_filtered} sectors={EXCLUDE_SECTORS}", flush=True)
+
+
     _save_sector_cache()
     if fresh_count < 50:
         print(f"WARN only {fresh_count} fresh symbols available", flush=True)
@@ -841,6 +1012,37 @@ def latest_rows(features, allowed):
         raise SystemExit("no fresh feature rows available; refusing to score stale data")
     return pd.DataFrame(rows)
 
+
+
+def _check_spy_regime():
+    """Returns (is_stressed: bool, spy_return_pct: float).
+    Stressed = SPY N-day return < floor  OR  SPY below MA.
+    On any error returns (False, 0.0) so trading is never blocked by a bug.
+    """
+    try:
+        import yfinance as yf
+        lookback = SIG_REGIME_SPY_MA_DAYS + SIG_REGIME_RETURN_DAYS + 10
+        spy = yf.download("SPY", period=f"{lookback}d",
+                          interval="1d", progress=False, auto_adjust=True)
+        # yfinance MultiIndex fix (newer versions return MultiIndex columns)
+        if isinstance(spy.columns, pd.MultiIndex):
+            spy = spy.droplevel(1, axis=1)
+        if len(spy) < SIG_REGIME_RETURN_DAYS + 1:
+            print("[REGIME] Not enough SPY history — gate disabled", flush=True)
+            return False, 0.0
+        close   = float(spy["Close"].iloc[-1])
+        close_n = float(spy["Close"].iloc[-(SIG_REGIME_RETURN_DAYS + 1)])
+        ma      = float(spy["Close"].tail(SIG_REGIME_SPY_MA_DAYS).mean())
+        ret_pct = (close / close_n - 1) * 100
+        below_ma = close < ma
+        stressed = (ret_pct < SIG_REGIME_RETURN_FLOOR) or below_ma
+        print(f"[REGIME] SPY={close:.2f}  {SIG_REGIME_RETURN_DAYS}d_ret={ret_pct:+.1f}%  "
+              f"MA{SIG_REGIME_SPY_MA_DAYS}={ma:.2f}  below_ma={below_ma}  stressed={stressed}",
+              flush=True)
+        return stressed, ret_pct
+    except Exception as exc:
+        print(f"[REGIME] check error: {exc} — gate disabled", flush=True)
+        return False, 0.0
 
 def main():
     ap = argparse.ArgumentParser()
@@ -904,13 +1106,31 @@ def main():
     _save_sector_cache()
     signal_date = datetime.now().date().isoformat()
     expected_exit_date = (pd.Timestamp(signal_date) + BDay(HOLD_DAYS)).date().isoformat()
-    eff_pos = BASE_POSITION_PCT * mult
+    # ── Level 3: Half-Kelly × IV-vol sizing ─────────────────────────────────
+    # At prob=0.65, PT=10%, SL=3%: half-Kelly = 0.2725 (reference = 1.0x size)
+    # Vol scalar: target_iv/realized_iv — sizes down in high-IV, up in low-IV
+    _REF_HALF_KELLY = 0.2725
+    _TARGET_IV      = 30.0  # % — "normal" IV anchor
+
+    def _kelly_vol_pos(prob, pt_pct, sl_pct, iv_sym, base, vol_mult):
+        edge       = prob * (pt_pct / 100.0) - (1 - prob) * (sl_pct / 100.0)
+        kelly_f    = edge / (pt_pct / 100.0) if pt_pct > 0 else 0.5
+        half_kelly = kelly_f * 0.5
+        kelly_mult = max(0.25, min(2.0, half_kelly / _REF_HALF_KELLY))
+        vol_scalar = max(0.5, min(2.0, _TARGET_IV / iv_sym)) if (iv_sym and iv_sym > 5) else 1.0
+        raw        = base * kelly_mult * vol_scalar * vol_mult
+        return round(max(base * 0.25, min(base * 2.0, raw)), 6)
+
+    eff_pos = BASE_POSITION_PCT * mult  # baseline kept for output JSON metadata
     signals = []
     for rank, (_, r) in enumerate(picks.iterrows(), 1):
         entry = float(r.get("entry_price", r.get("price", r.get("close", 0))) or 0)
         signals.append({
             "rank": rank, "symbol": str(r.symbol), "probability": round(float(r.probability), 6),
-            "entry_price": round(entry, 4), "position_pct": round(eff_pos, 6),
+            "entry_price": round(entry, 4),
+            "position_pct": round(_kelly_vol_pos(
+                float(r.probability), PROFIT_TARGET_PCT, STOP_LOSS_PCT,
+                _per_symbol_iv.get(str(r.symbol).upper()), BASE_POSITION_PCT, mult), 6),
             "base_position_pct": BASE_POSITION_PCT, "vol_multiplier": mult,
             "profit_target_price": round(entry * (1 + PROFIT_TARGET_PCT / 100), 4),
             "stop_loss_price": round(entry * (1 - STOP_LOSS_PCT / 100), 4),
@@ -937,15 +1157,28 @@ def main():
             _save_sector_cache()
             print(f"LLM FILTER: scoring {len(candidates)} candidates with {LLM_MODEL}", flush=True)
             decisions = call_llm_filter(candidates, spy_pct, qqq_pct, len(candidates))
-            if decisions:
-                signals = _apply_llm_decisions(signals, decisions)
-                print(f"LLM FILTER: kept {len(signals)} signals after judgment", flush=True)
-            else:
-                print("LLM FILTER: no decisions returned; keeping all signals", flush=True)
+            signals = _apply_llm_decisions(signals, decisions)
+            print(f"LLM FILTER: kept {len(signals)} signals after judgment", flush=True)
         except Exception as e:
             print(f"LLM FILTER: unexpected error ({e}); keeping all signals", flush=True)
     elif not LLM_FILTER_ENABLED:
         print("LLM FILTER: disabled via LLM_FILTER_ENABLED=0", flush=True)
+
+
+    # ── SPY Regime Gate ──────────────────────────────────────────────────────
+    if SIG_REGIME_FILTER_ENABLED and signals:
+        _stressed, _spy_ret = _check_spy_regime()
+        if _stressed:
+            if SIG_REGIME_SOFT_HALF:
+                for _s in signals:
+                    _s["position_pct"] = _s.get("position_pct", BASE_POSITION_PCT) * 0.5
+                print(f"[REGIME] SOFT: SPY {_spy_ret:+.1f}% — halving positions, {len(signals)} signals remain", flush=True)
+            else:
+                print(f"[REGIME] STRESSED: SPY {_spy_ret:+.1f}% — blocking all {len(signals)} signals", flush=True)
+                signals = []
+        else:
+            print(f"[REGIME] CLEAR: SPY {_spy_ret:+.1f}% — {len(signals)} signals pass through", flush=True)
+    # ─────────────────────────────────────────────────────────────────────────
 
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),

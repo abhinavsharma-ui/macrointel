@@ -1,6 +1,56 @@
+# Secrets / local environments
 .env
-.venv
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+
+# Python/runtime caches
 __pycache__/
-.env
-.venv
-__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local agent/workspace scratch
+.claude/
+.codex_tmp/
+.pycache_tmp/
+.tmp.driveupload/
+catboost_info/
+macrointel-main/
+
+# Runtime logs and process output
+*.log
+*.out
+nohup.out
+logs/
+project/logs/
+dashboard_probe.*.log
+run_verify.*.log
+
+# Generated reports and temporary handoffs
+reports/
+project/reports/
+
+# Heavy/generated market data and model binaries
+*.parquet
+*.joblib
+*.pkl
+*.h5
+*.zip
+project/data/features/
+project/data/prices_full/
+project/data/prices_10yr/
+project/data/prices_survivorship_free/
+project/data/altdata/
+project/data/backups/
+project/core/realtime_engine.zip
+project/data/models/
+
+# VM backup files
+*.bak
+*.bak_*
+*.backup
+*.backup_*

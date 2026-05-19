@@ -1,0 +1,79 @@
+test_accuracy: 0.3697
+dead_constant_features (27):
+  compound_score
+  weighted_compound_score
+  media_sentiment
+  official_sentiment
+  filing_sentiment
+  filing_change_score
+  filing_fresh_language_score
+  new_risk_factors
+  earnings_tone_signal
+  earnings_call_count
+  article_count
+  media_article_count
+  official_article_count
+  filing_article_count
+  press_release_count
+  official_event_hit
+  filing_event_hit
+  source_quality_score
+  sentiment_zscore
+  sentiment_velocity
+  earnings_tone_velocity
+  weighted_sentiment_zscore
+  news_volume_spike
+  source_quality_signal
+  media_sentiment_signal
+  travel_activity_level
+  travel_activity_change
+
+TOP 25 PERM IMPORTANCE:
+                feature  perm_importance_mean  perm_importance_std
+                atr_pct              0.037333             0.004000
+       vol_regime_ratio              0.018333             0.005667
+                 rsi_14              0.015667             0.001667
+          zscore_vs_60d              0.010667             0.000667
+              obv_trend              0.010000             0.001333
+           vol_ratio_20              0.010000             0.002000
+           alpha_signal              0.009667             0.001667
+           momentum_60d              0.008333             0.004333
+                    mfi              0.006667             0.001333
+             vol_regime              0.006333             0.000333
+                 roc_20              0.006000             0.000667
+                 rsi_21              0.006000             0.000000
+close_reversal_strength              0.005667             0.001667
+             upper_wick              0.005333             0.002000
+            hist_vol_30              0.005333             0.001333
+    vol_regime_stressed              0.004667             0.001333
+    event_move_strength              0.004333             0.002333
+       realized_vol_21d              0.004000             0.005333
+             lower_wick              0.003667             0.002333
+     price_acceleration              0.003667             0.006333
+               bb_width              0.003667             0.000333
+                stoch_k              0.002667             0.002000
+     momentum_composite              0.001667             0.003000
+             returns_1d              0.001000             0.000333
+        close_vs_sma_50              0.000667             0.006000
+
+BOTTOM 15 PERM IMPORTANCE:
+                      feature  perm_importance_mean  perm_importance_std
+earnings_propagation_strength              0.000000             0.000000
+            event_day_extreme              0.000000             0.000000
+     peer_earnings_breadth_7d              0.000000             0.000000
+       peer_earnings_shock_7d              0.000000             0.000000
+                        roc_5             -0.000333             0.003000
+                       roc_10             -0.000333             0.001000
+                       gap_up             -0.000333             0.004333
+                    vol_ratio             -0.001000             0.003667
+        close_reversal_signal             -0.001667             0.002333
+                        rsi_9             -0.001667             0.001000
+                  hist_vol_10             -0.001667             0.000333
+                       bb_pct             -0.002333             0.002333
+                  candle_body             -0.004000             0.000667
+                   vol_zscore             -0.006000             0.004000
+                   williams_r             -0.007000             0.003667
+
+CORRELATION CLUSTERS (|r|>0.85) among top 25:
+  alpha_signal ~~ momentum_composite
+  close_reversal_strength ~~ event_move_strength

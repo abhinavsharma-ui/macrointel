@@ -1,0 +1,505 @@
+symbol,symbol_ns,company_name,sector,industry,series,isin,source
+360ONE,360ONE.NS,360 ONE WAM Ltd.,Financial Services,Financial Services,EQ,INE466L01038,nse_nifty500
+3MINDIA,3MINDIA.NS,3M India Ltd.,Diversified,Diversified,EQ,INE470A01017,nse_nifty500
+ABB,ABB.NS,ABB India Ltd.,Capital Goods,Capital Goods,EQ,INE117A01022,nse_nifty500
+ACC,ACC.NS,ACC Ltd.,Construction Materials,Construction Materials,EQ,INE012A01025,nse_nifty500
+ACMESOLAR,ACMESOLAR.NS,ACME Solar Holdings Ltd.,Power,Power,EQ,INE622W01025,nse_nifty500
+AIAENG,AIAENG.NS,AIA Engineering Ltd.,Capital Goods,Capital Goods,EQ,INE212H01026,nse_nifty500
+APLAPOLLO,APLAPOLLO.NS,APL Apollo Tubes Ltd.,Capital Goods,Capital Goods,EQ,INE702C01027,nse_nifty500
+AUBANK,AUBANK.NS,AU Small Finance Bank Ltd.,Financial Services,Financial Services,EQ,INE949L01017,nse_nifty500
+AWL,AWL.NS,AWL Agri Business Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE699H01024,nse_nifty500
+AADHARHFC,AADHARHFC.NS,Aadhar Housing Finance Ltd.,Financial Services,Financial Services,EQ,INE883F01010,nse_nifty500
+AARTIIND,AARTIIND.NS,Aarti Industries Ltd.,Chemicals,Chemicals,EQ,INE769A01020,nse_nifty500
+AAVAS,AAVAS.NS,Aavas Financiers Ltd.,Financial Services,Financial Services,EQ,INE216P01012,nse_nifty500
+ABBOTINDIA,ABBOTINDIA.NS,Abbott India Ltd.,Healthcare,Healthcare,EQ,INE358A01014,nse_nifty500
+ACE,ACE.NS,Action Construction Equipment Ltd.,Capital Goods,Capital Goods,EQ,INE731H01025,nse_nifty500
+ACUTAAS,ACUTAAS.NS,Acutaas Chemicals Ltd.,Healthcare,Healthcare,EQ,INE00FF01025,nse_nifty500
+ADANIENSOL,ADANIENSOL.NS,Adani Energy Solutions Ltd.,Power,Power,EQ,INE931S01010,nse_nifty500
+ADANIENT,ADANIENT.NS,Adani Enterprises Ltd.,Metals & Mining,Metals & Mining,EQ,INE423A01024,nse_nifty500
+ADANIGREEN,ADANIGREEN.NS,Adani Green Energy Ltd.,Power,Power,EQ,INE364U01010,nse_nifty500
+ADANIPORTS,ADANIPORTS.NS,Adani Ports and Special Economic Zone Ltd.,Services,Services,EQ,INE742F01042,nse_nifty500
+ADANIPOWER,ADANIPOWER.NS,Adani Power Ltd.,Power,Power,EQ,INE814H01029,nse_nifty500
+ATGL,ATGL.NS,Adani Total Gas Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE399L01023,nse_nifty500
+ABCAPITAL,ABCAPITAL.NS,Aditya Birla Capital Ltd.,Financial Services,Financial Services,EQ,INE674K01013,nse_nifty500
+ABFRL,ABFRL.NS,Aditya Birla Fashion and Retail Ltd.,Consumer Services,Consumer Services,EQ,INE647O01011,nse_nifty500
+ABLBL,ABLBL.NS,Aditya Birla Lifestyle Brands Ltd.,Consumer Services,Consumer Services,EQ,INE14LE01019,nse_nifty500
+ABREL,ABREL.NS,Aditya Birla Real Estate Ltd.,Realty,Realty,EQ,INE055A01016,nse_nifty500
+ABSLAMC,ABSLAMC.NS,Aditya Birla Sun Life AMC Ltd.,Financial Services,Financial Services,EQ,INE404A01024,nse_nifty500
+CPPLUS,CPPLUS.NS,Aditya Infotech Ltd.,Capital Goods,Capital Goods,EQ,INE819V01029,nse_nifty500
+AEGISLOG,AEGISLOG.NS,Aegis Logistics Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE208C01025,nse_nifty500
+AEGISVOPAK,AEGISVOPAK.NS,Aegis Vopak Terminals Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE0INX01018,nse_nifty500
+AFCONS,AFCONS.NS,Afcons Infrastructure Ltd.,Construction,Construction,EQ,INE101I01011,nse_nifty500
+AFFLE,AFFLE.NS,Affle 3i Ltd.,Information Technology,Information Technology,EQ,INE00WC01027,nse_nifty500
+AJANTPHARM,AJANTPHARM.NS,Ajanta Pharmaceuticals Ltd.,Healthcare,Healthcare,EQ,INE031B01049,nse_nifty500
+ALKEM,ALKEM.NS,Alkem Laboratories Ltd.,Healthcare,Healthcare,EQ,INE540L01014,nse_nifty500
+ABDL,ABDL.NS,Allied Blenders and Distillers Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE552Z01027,nse_nifty500
+ARE&M,ARE&M.NS,Amara Raja Energy & Mobility Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE885A01032,nse_nifty500
+AMBER,AMBER.NS,Amber Enterprises India Ltd.,Consumer Durables,Consumer Durables,EQ,INE371P01015,nse_nifty500
+AMBUJACEM,AMBUJACEM.NS,Ambuja Cements Ltd.,Construction Materials,Construction Materials,EQ,INE079A01024,nse_nifty500
+ANANDRATHI,ANANDRATHI.NS,Anand Rathi Wealth Ltd.,Financial Services,Financial Services,EQ,INE463V01026,nse_nifty500
+ANANTRAJ,ANANTRAJ.NS,Anant Raj Ltd.,Realty,Realty,EQ,INE242C01024,nse_nifty500
+ANGELONE,ANGELONE.NS,Angel One Ltd.,Financial Services,Financial Services,EQ,INE732I01021,nse_nifty500
+ANTHEM,ANTHEM.NS,Anthem Biosciences Ltd.,Healthcare,Healthcare,EQ,INE0CZ201020,nse_nifty500
+ANURAS,ANURAS.NS,Anupam Rasayan India Ltd.,Chemicals,Chemicals,EQ,INE930P01018,nse_nifty500
+APARINDS,APARINDS.NS,Apar Industries Ltd.,Capital Goods,Capital Goods,EQ,INE372A01015,nse_nifty500
+APOLLOHOSP,APOLLOHOSP.NS,Apollo Hospitals Enterprise Ltd.,Healthcare,Healthcare,EQ,INE437A01024,nse_nifty500
+APOLLOTYRE,APOLLOTYRE.NS,Apollo Tyres Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE438A01022,nse_nifty500
+APTUS,APTUS.NS,Aptus Value Housing Finance India Ltd.,Financial Services,Financial Services,EQ,INE852O01025,nse_nifty500
+ASAHIINDIA,ASAHIINDIA.NS,Asahi India Glass Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE439A01020,nse_nifty500
+ASHOKLEY,ASHOKLEY.NS,Ashok Leyland Ltd.,Capital Goods,Capital Goods,EQ,INE208A01029,nse_nifty500
+ASIANPAINT,ASIANPAINT.NS,Asian Paints Ltd.,Consumer Durables,Consumer Durables,EQ,INE021A01026,nse_nifty500
+ASTERDM,ASTERDM.NS,Aster DM Healthcare Ltd.,Healthcare,Healthcare,EQ,INE914M01019,nse_nifty500
+ASTRAL,ASTRAL.NS,Astral Ltd.,Capital Goods,Capital Goods,EQ,INE006I01046,nse_nifty500
+ATHERENERG,ATHERENERG.NS,Ather Energy Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE0LEZ01016,nse_nifty500
+ATUL,ATUL.NS,Atul Ltd.,Chemicals,Chemicals,EQ,INE100A01010,nse_nifty500
+AUROPHARMA,AUROPHARMA.NS,Aurobindo Pharma Ltd.,Healthcare,Healthcare,EQ,INE406A01037,nse_nifty500
+AIIL,AIIL.NS,Authum Investment & Infrastructure Ltd.,Financial Services,Financial Services,EQ,INE206F01022,nse_nifty500
+DMART,DMART.NS,Avenue Supermarts Ltd.,Consumer Services,Consumer Services,EQ,INE192R01011,nse_nifty500
+AXISBANK,AXISBANK.NS,Axis Bank Ltd.,Financial Services,Financial Services,EQ,INE238A01034,nse_nifty500
+BEML,BEML.NS,BEML Ltd.,Capital Goods,Capital Goods,EQ,INE258A01024,nse_nifty500
+BLS,BLS.NS,BLS International Services Ltd.,Consumer Services,Consumer Services,EQ,INE153T01027,nse_nifty500
+BSE,BSE.NS,BSE Ltd.,Financial Services,Financial Services,EQ,INE118H01025,nse_nifty500
+BAJAJ-AUTO,BAJAJ-AUTO.NS,Bajaj Auto Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE917I01010,nse_nifty500
+BAJFINANCE,BAJFINANCE.NS,Bajaj Finance Ltd.,Financial Services,Financial Services,EQ,INE296A01032,nse_nifty500
+BAJAJFINSV,BAJAJFINSV.NS,Bajaj Finserv Ltd.,Financial Services,Financial Services,EQ,INE918I01026,nse_nifty500
+BAJAJHLDNG,BAJAJHLDNG.NS,Bajaj Holdings & Investment Ltd.,Financial Services,Financial Services,EQ,INE118A01012,nse_nifty500
+BAJAJHFL,BAJAJHFL.NS,Bajaj Housing Finance Ltd.,Financial Services,Financial Services,EQ,INE377Y01014,nse_nifty500
+BALKRISIND,BALKRISIND.NS,Balkrishna Industries Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE787D01026,nse_nifty500
+BALRAMCHIN,BALRAMCHIN.NS,Balrampur Chini Mills Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE119A01028,nse_nifty500
+BANDHANBNK,BANDHANBNK.NS,Bandhan Bank Ltd.,Financial Services,Financial Services,EQ,INE545U01014,nse_nifty500
+BANKBARODA,BANKBARODA.NS,Bank of Baroda,Financial Services,Financial Services,EQ,INE028A01039,nse_nifty500
+BANKINDIA,BANKINDIA.NS,Bank of India,Financial Services,Financial Services,EQ,INE084A01016,nse_nifty500
+MAHABANK,MAHABANK.NS,Bank of Maharashtra,Financial Services,Financial Services,EQ,INE457A01014,nse_nifty500
+BATAINDIA,BATAINDIA.NS,Bata India Ltd.,Consumer Durables,Consumer Durables,EQ,INE176A01028,nse_nifty500
+BAYERCROP,BAYERCROP.NS,Bayer Cropscience Ltd.,Chemicals,Chemicals,EQ,INE462A01022,nse_nifty500
+BELRISE,BELRISE.NS,Belrise Industries Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE894V01022,nse_nifty500
+BERGEPAINT,BERGEPAINT.NS,Berger Paints India Ltd.,Consumer Durables,Consumer Durables,EQ,INE463A01038,nse_nifty500
+BDL,BDL.NS,Bharat Dynamics Ltd.,Capital Goods,Capital Goods,EQ,INE171Z01026,nse_nifty500
+BEL,BEL.NS,Bharat Electronics Ltd.,Capital Goods,Capital Goods,EQ,INE263A01024,nse_nifty500
+BHARATFORG,BHARATFORG.NS,Bharat Forge Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE465A01025,nse_nifty500
+BHEL,BHEL.NS,Bharat Heavy Electricals Ltd.,Capital Goods,Capital Goods,EQ,INE257A01026,nse_nifty500
+BPCL,BPCL.NS,Bharat Petroleum Corporation Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE029A01011,nse_nifty500
+BHARTIARTL,BHARTIARTL.NS,Bharti Airtel Ltd.,Telecommunication,Telecommunication,EQ,INE397D01024,nse_nifty500
+BHARTIHEXA,BHARTIHEXA.NS,Bharti Hexacom Ltd.,Telecommunication,Telecommunication,EQ,INE343G01021,nse_nifty500
+BIKAJI,BIKAJI.NS,Bikaji Foods International Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE00E101023,nse_nifty500
+GROWW,GROWW.NS,Billionbrains Garage Ventures Ltd.,Financial Services,Financial Services,EQ,INE0HOQ01053,nse_nifty500
+BIOCON,BIOCON.NS,Biocon Ltd.,Healthcare,Healthcare,EQ,INE376G01013,nse_nifty500
+BSOFT,BSOFT.NS,Birlasoft Ltd.,Information Technology,Information Technology,EQ,INE836A01035,nse_nifty500
+BLUEDART,BLUEDART.NS,Blue Dart Express Ltd.,Services,Services,EQ,INE233B01017,nse_nifty500
+BLUEJET,BLUEJET.NS,Blue Jet Healthcare Ltd.,Healthcare,Healthcare,EQ,INE0KBH01020,nse_nifty500
+BLUESTARCO,BLUESTARCO.NS,Blue Star Ltd.,Consumer Durables,Consumer Durables,EQ,INE472A01039,nse_nifty500
+BBTC,BBTC.NS,Bombay Burmah Trading Corporation Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE050A01025,nse_nifty500
+BOSCHLTD,BOSCHLTD.NS,Bosch Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE323A01026,nse_nifty500
+FIRSTCRY,FIRSTCRY.NS,Brainbees Solutions Ltd.,Consumer Services,Consumer Services,EQ,INE02RE01045,nse_nifty500
+BRIGADE,BRIGADE.NS,Brigade Enterprises Ltd.,Realty,Realty,EQ,INE791I01019,nse_nifty500
+BRITANNIA,BRITANNIA.NS,Britannia Industries Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE216A01030,nse_nifty500
+MAPMYINDIA,MAPMYINDIA.NS,C.E. Info Systems Ltd.,Information Technology,Information Technology,EQ,INE0BV301023,nse_nifty500
+CCL,CCL.NS,CCL Products (I) Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE421D01022,nse_nifty500
+CESC,CESC.NS,CESC Ltd.,Power,Power,EQ,INE486A01021,nse_nifty500
+CGPOWER,CGPOWER.NS,CG Power and Industrial Solutions Ltd.,Capital Goods,Capital Goods,EQ,INE067A01029,nse_nifty500
+CRISIL,CRISIL.NS,CRISIL Ltd.,Financial Services,Financial Services,EQ,INE007A01025,nse_nifty500
+CANFINHOME,CANFINHOME.NS,Can Fin Homes Ltd.,Financial Services,Financial Services,EQ,INE477A01020,nse_nifty500
+CANBK,CANBK.NS,Canara Bank,Financial Services,Financial Services,EQ,INE476A01022,nse_nifty500
+CANHLIFE,CANHLIFE.NS,Canara HSBC Life Insurance Company Ltd.,Financial Services,Financial Services,EQ,INE01TY01017,nse_nifty500
+CAPLIPOINT,CAPLIPOINT.NS,Caplin Point Laboratories Ltd.,Healthcare,Healthcare,EQ,INE475E01026,nse_nifty500
+CGCL,CGCL.NS,Capri Global Capital Ltd.,Financial Services,Financial Services,EQ,INE180C01042,nse_nifty500
+CARBORUNIV,CARBORUNIV.NS,Carborundum Universal Ltd.,Capital Goods,Capital Goods,EQ,INE120A01034,nse_nifty500
+CARTRADE,CARTRADE.NS,Cartrade Tech Ltd.,Consumer Services,Consumer Services,EQ,INE290S01011,nse_nifty500
+CASTROLIND,CASTROLIND.NS,Castrol India Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE172A01027,nse_nifty500
+CEATLTD,CEATLTD.NS,Ceat Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE482A01020,nse_nifty500
+CEMPRO,CEMPRO.NS,Cemindia Projects Ltd.,Construction,Construction,EQ,INE686A01026,nse_nifty500
+CENTRALBK,CENTRALBK.NS,Central Bank of India,Financial Services,Financial Services,EQ,INE483A01010,nse_nifty500
+CDSL,CDSL.NS,Central Depository Services (India) Ltd.,Financial Services,Financial Services,EQ,INE736A01011,nse_nifty500
+CHALET,CHALET.NS,Chalet Hotels Ltd.,Consumer Services,Consumer Services,EQ,INE427F01016,nse_nifty500
+CHAMBLFERT,CHAMBLFERT.NS,Chambal Fertilizers & Chemicals Ltd.,Chemicals,Chemicals,EQ,INE085A01013,nse_nifty500
+CHENNPETRO,CHENNPETRO.NS,Chennai Petroleum Corporation Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE178A01016,nse_nifty500
+CHOICEIN,CHOICEIN.NS,Choice International Ltd.,Financial Services,Financial Services,EQ,INE102B01014,nse_nifty500
+CHOLAHLDNG,CHOLAHLDNG.NS,Cholamandalam Financial Holdings Ltd.,Financial Services,Financial Services,EQ,INE149A01033,nse_nifty500
+CHOLAFIN,CHOLAFIN.NS,Cholamandalam Investment and Finance Company Ltd.,Financial Services,Financial Services,EQ,INE121A01024,nse_nifty500
+CIPLA,CIPLA.NS,Cipla Ltd.,Healthcare,Healthcare,EQ,INE059A01026,nse_nifty500
+CUB,CUB.NS,City Union Bank Ltd.,Financial Services,Financial Services,EQ,INE491A01021,nse_nifty500
+CLEAN,CLEAN.NS,Clean Science and Technology Ltd.,Chemicals,Chemicals,EQ,INE227W01023,nse_nifty500
+COALINDIA,COALINDIA.NS,Coal India Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE522F01014,nse_nifty500
+COCHINSHIP,COCHINSHIP.NS,Cochin Shipyard Ltd.,Capital Goods,Capital Goods,EQ,INE704P01025,nse_nifty500
+COFORGE,COFORGE.NS,Coforge Ltd.,Information Technology,Information Technology,EQ,INE591G01025,nse_nifty500
+COHANCE,COHANCE.NS,Cohance Lifesciences Ltd.,Healthcare,Healthcare,EQ,INE03QK01018,nse_nifty500
+COLPAL,COLPAL.NS,Colgate Palmolive (India) Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE259A01022,nse_nifty500
+CAMS,CAMS.NS,Computer Age Management Services Ltd.,Financial Services,Financial Services,EQ,INE596I01020,nse_nifty500
+CONCORDBIO,CONCORDBIO.NS,Concord Biotech Ltd.,Healthcare,Healthcare,EQ,INE338H01029,nse_nifty500
+CONCOR,CONCOR.NS,Container Corporation of India Ltd.,Services,Services,EQ,INE111A01025,nse_nifty500
+COROMANDEL,COROMANDEL.NS,Coromandel International Ltd.,Chemicals,Chemicals,EQ,INE169A01031,nse_nifty500
+CRAFTSMAN,CRAFTSMAN.NS,Craftsman Automation Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE00LO01017,nse_nifty500
+CREDITACC,CREDITACC.NS,CreditAccess Grameen Ltd.,Financial Services,Financial Services,EQ,INE741K01010,nse_nifty500
+CROMPTON,CROMPTON.NS,Crompton Greaves Consumer Electricals Ltd.,Consumer Durables,Consumer Durables,EQ,INE299U01018,nse_nifty500
+CUMMINSIND,CUMMINSIND.NS,Cummins India Ltd.,Capital Goods,Capital Goods,EQ,INE298A01020,nse_nifty500
+CYIENT,CYIENT.NS,Cyient Ltd.,Information Technology,Information Technology,EQ,INE136B01020,nse_nifty500
+DCMSHRIRAM,DCMSHRIRAM.NS,DCM Shriram Ltd.,Diversified,Diversified,EQ,INE499A01024,nse_nifty500
+DLF,DLF.NS,DLF Ltd.,Realty,Realty,EQ,INE271C01023,nse_nifty500
+DOMS,DOMS.NS,DOMS Industries Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE321T01012,nse_nifty500
+DABUR,DABUR.NS,Dabur India Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE016A01026,nse_nifty500
+DALBHARAT,DALBHARAT.NS,Dalmia Bharat Ltd.,Construction Materials,Construction Materials,EQ,INE00R701025,nse_nifty500
+DATAPATTNS,DATAPATTNS.NS,Data Patterns (India) Ltd.,Capital Goods,Capital Goods,EQ,INE0IX101010,nse_nifty500
+DEEPAKFERT,DEEPAKFERT.NS,Deepak Fertilisers & Petrochemicals Corp. Ltd.,Chemicals,Chemicals,EQ,INE501A01019,nse_nifty500
+DEEPAKNTR,DEEPAKNTR.NS,Deepak Nitrite Ltd.,Chemicals,Chemicals,EQ,INE288B01029,nse_nifty500
+DELHIVERY,DELHIVERY.NS,Delhivery Ltd.,Services,Services,EQ,INE148O01028,nse_nifty500
+DEVYANI,DEVYANI.NS,Devyani International Ltd.,Consumer Services,Consumer Services,EQ,INE872J01023,nse_nifty500
+DIVISLAB,DIVISLAB.NS,Divi's Laboratories Ltd.,Healthcare,Healthcare,EQ,INE361B01024,nse_nifty500
+DIXON,DIXON.NS,Dixon Technologies (India) Ltd.,Consumer Durables,Consumer Durables,EQ,INE935N01020,nse_nifty500
+LALPATHLAB,LALPATHLAB.NS,Dr. Lal Path Labs Ltd.,Healthcare,Healthcare,EQ,INE600L01024,nse_nifty500
+DRREDDY,DRREDDY.NS,Dr. Reddy's Laboratories Ltd.,Healthcare,Healthcare,EQ,INE089A01031,nse_nifty500
+DUMMYVEDL1,DUMMYVEDL1.NS,Dummy Vedanta Ltd. 1,Metals & Mining,Metals & Mining,EQ,DU1205A01025,nse_nifty500
+DUMMYVEDL2,DUMMYVEDL2.NS,Dummy Vedanta Ltd. 2,Power,Power,EQ,DU2205A01025,nse_nifty500
+DUMMYVEDL3,DUMMYVEDL3.NS,Dummy Vedanta Ltd. 3,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,DU3205A01025,nse_nifty500
+DUMMYVEDL4,DUMMYVEDL4.NS,Dummy Vedanta Ltd. 4,Metals & Mining,Metals & Mining,EQ,DU4205A01025,nse_nifty500
+EIDPARRY,EIDPARRY.NS,E.I.D. Parry (India) Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE126A01031,nse_nifty500
+EIHOTEL,EIHOTEL.NS,EIH Ltd.,Consumer Services,Consumer Services,EQ,INE230A01023,nse_nifty500
+EICHERMOT,EICHERMOT.NS,Eicher Motors Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE066A01021,nse_nifty500
+ELECON,ELECON.NS,Elecon Engineering Co. Ltd.,Capital Goods,Capital Goods,EQ,INE205B01031,nse_nifty500
+ELGIEQUIP,ELGIEQUIP.NS,Elgi Equipments Ltd.,Capital Goods,Capital Goods,EQ,INE285A01027,nse_nifty500
+EMAMILTD,EMAMILTD.NS,Emami Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE548C01032,nse_nifty500
+EMCURE,EMCURE.NS,Emcure Pharmaceuticals Ltd.,Healthcare,Healthcare,EQ,INE168P01015,nse_nifty500
+EMMVEE,EMMVEE.NS,Emmvee Photovoltaic Power Ltd.,Capital Goods,Capital Goods,EQ,INE1C6T01020,nse_nifty500
+ENDURANCE,ENDURANCE.NS,Endurance Technologies Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE913H01037,nse_nifty500
+ENGINERSIN,ENGINERSIN.NS,Engineers India Ltd.,Construction,Construction,EQ,INE510A01028,nse_nifty500
+ERIS,ERIS.NS,Eris Lifesciences Ltd.,Healthcare,Healthcare,EQ,INE406M01024,nse_nifty500
+ESCORTS,ESCORTS.NS,Escorts Kubota Ltd.,Capital Goods,Capital Goods,EQ,INE042A01014,nse_nifty500
+ETERNAL,ETERNAL.NS,Eternal Ltd.,Consumer Services,Consumer Services,EQ,INE758T01015,nse_nifty500
+EXIDEIND,EXIDEIND.NS,Exide Industries Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE302A01020,nse_nifty500
+NYKAA,NYKAA.NS,FSN E-Commerce Ventures Ltd.,Consumer Services,Consumer Services,EQ,INE388Y01029,nse_nifty500
+FEDERALBNK,FEDERALBNK.NS,Federal Bank Ltd.,Financial Services,Financial Services,EQ,INE171A01029,nse_nifty500
+FACT,FACT.NS,Fertilisers and Chemicals Travancore Ltd.,Chemicals,Chemicals,EQ,INE188A01015,nse_nifty500
+FINCABLES,FINCABLES.NS,Finolex Cables Ltd.,Capital Goods,Capital Goods,EQ,INE235A01022,nse_nifty500
+FSL,FSL.NS,Firstsource Solutions Ltd.,Services,Services,EQ,INE684F01012,nse_nifty500
+FIVESTAR,FIVESTAR.NS,Five-Star Business Finance Ltd.,Financial Services,Financial Services,EQ,INE128S01021,nse_nifty500
+FORCEMOT,FORCEMOT.NS,Force Motors Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE451A01017,nse_nifty500
+FORTIS,FORTIS.NS,Fortis Healthcare Ltd.,Healthcare,Healthcare,EQ,INE061F01013,nse_nifty500
+GAIL,GAIL.NS,GAIL (India) Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE129A01019,nse_nifty500
+GVT&D,GVT&D.NS,GE Vernova T&D India Ltd.,Capital Goods,Capital Goods,EQ,INE200A01026,nse_nifty500
+GMRAIRPORT,GMRAIRPORT.NS,GMR Airports Ltd.,Services,Services,EQ,INE776C01039,nse_nifty500
+GABRIEL,GABRIEL.NS,Gabriel India Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE524A01029,nse_nifty500
+GALLANTT,GALLANTT.NS,Gallantt Ispat Ltd.,Capital Goods,Capital Goods,EQ,INE297H01019,nse_nifty500
+GRSE,GRSE.NS,Garden Reach Shipbuilders & Engineers Ltd.,Capital Goods,Capital Goods,EQ,INE382Z01011,nse_nifty500
+GICRE,GICRE.NS,General Insurance Corporation of India,Financial Services,Financial Services,EQ,INE481Y01014,nse_nifty500
+GILLETTE,GILLETTE.NS,Gillette India Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE322A01010,nse_nifty500
+GLAND,GLAND.NS,Gland Pharma Ltd.,Healthcare,Healthcare,EQ,INE068V01023,nse_nifty500
+GLAXO,GLAXO.NS,Glaxosmithkline Pharmaceuticals Ltd.,Healthcare,Healthcare,EQ,INE159A01016,nse_nifty500
+GLENMARK,GLENMARK.NS,Glenmark Pharmaceuticals Ltd.,Healthcare,Healthcare,EQ,INE935A01035,nse_nifty500
+MEDANTA,MEDANTA.NS,Global Health Ltd.,Healthcare,Healthcare,EQ,INE474Q01031,nse_nifty500
+GODIGIT,GODIGIT.NS,Go Digit General Insurance Ltd.,Financial Services,Financial Services,EQ,INE03JT01014,nse_nifty500
+GPIL,GPIL.NS,Godawari Power & Ispat Ltd.,Capital Goods,Capital Goods,EQ,INE177H01039,nse_nifty500
+GODFRYPHLP,GODFRYPHLP.NS,Godfrey Phillips India Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE260B01028,nse_nifty500
+GODREJCP,GODREJCP.NS,Godrej Consumer Products Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE102D01028,nse_nifty500
+GODREJIND,GODREJIND.NS,Godrej Industries Ltd.,Diversified,Diversified,EQ,INE233A01035,nse_nifty500
+GODREJPROP,GODREJPROP.NS,Godrej Properties Ltd.,Realty,Realty,EQ,INE484J01027,nse_nifty500
+GRANULES,GRANULES.NS,Granules India Ltd.,Healthcare,Healthcare,EQ,INE101D01020,nse_nifty500
+GRAPHITE,GRAPHITE.NS,Graphite India Ltd.,Capital Goods,Capital Goods,EQ,INE371A01025,nse_nifty500
+GRASIM,GRASIM.NS,Grasim Industries Ltd.,Construction Materials,Construction Materials,EQ,INE047A01021,nse_nifty500
+GRAVITA,GRAVITA.NS,Gravita India Ltd.,Metals & Mining,Metals & Mining,EQ,INE024L01027,nse_nifty500
+GESHIP,GESHIP.NS,Great Eastern Shipping Co. Ltd.,Services,Services,EQ,INE017A01032,nse_nifty500
+FLUOROCHEM,FLUOROCHEM.NS,Gujarat Fluorochemicals Ltd.,Chemicals,Chemicals,EQ,INE09N301011,nse_nifty500
+GMDCLTD,GMDCLTD.NS,Gujarat Mineral Development Corporation Ltd.,Metals & Mining,Metals & Mining,EQ,INE131A01031,nse_nifty500
+GSPL,GSPL.NS,Gujarat State Petronet Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE246F01010,nse_nifty500
+HEG,HEG.NS,H.E.G. Ltd.,Capital Goods,Capital Goods,EQ,INE545A01024,nse_nifty500
+HBLENGINE,HBLENGINE.NS,HBL Engineering Ltd.,Capital Goods,Capital Goods,EQ,INE292B01021,nse_nifty500
+HCLTECH,HCLTECH.NS,HCL Technologies Ltd.,Information Technology,Information Technology,EQ,INE860A01027,nse_nifty500
+HDBFS,HDBFS.NS,HDB Financial Services Ltd.,Financial Services,Financial Services,EQ,INE756I01012,nse_nifty500
+HDFCAMC,HDFCAMC.NS,HDFC Asset Management Company Ltd.,Financial Services,Financial Services,EQ,INE127D01025,nse_nifty500
+HDFCBANK,HDFCBANK.NS,HDFC Bank Ltd.,Financial Services,Financial Services,EQ,INE040A01034,nse_nifty500
+HDFCLIFE,HDFCLIFE.NS,HDFC Life Insurance Company Ltd.,Financial Services,Financial Services,EQ,INE795G01014,nse_nifty500
+HFCL,HFCL.NS,HFCL Ltd.,Telecommunication,Telecommunication,EQ,INE548A01028,nse_nifty500
+HAVELLS,HAVELLS.NS,Havells India Ltd.,Consumer Durables,Consumer Durables,EQ,INE176B01034,nse_nifty500
+HEROMOTOCO,HEROMOTOCO.NS,Hero MotoCorp Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE158A01026,nse_nifty500
+HEXT,HEXT.NS,Hexaware Technologies Ltd.,Information Technology,Information Technology,EQ,INE093A01041,nse_nifty500
+HSCL,HSCL.NS,Himadri Speciality Chemical Ltd.,Chemicals,Chemicals,EQ,INE019C01026,nse_nifty500
+HINDALCO,HINDALCO.NS,Hindalco Industries Ltd.,Metals & Mining,Metals & Mining,EQ,INE038A01020,nse_nifty500
+HAL,HAL.NS,Hindustan Aeronautics Ltd.,Capital Goods,Capital Goods,EQ,INE066F01020,nse_nifty500
+HINDCOPPER,HINDCOPPER.NS,Hindustan Copper Ltd.,Metals & Mining,Metals & Mining,EQ,INE531E01026,nse_nifty500
+HINDPETRO,HINDPETRO.NS,Hindustan Petroleum Corporation Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE094A01015,nse_nifty500
+HINDUNILVR,HINDUNILVR.NS,Hindustan Unilever Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE030A01027,nse_nifty500
+HINDZINC,HINDZINC.NS,Hindustan Zinc Ltd.,Metals & Mining,Metals & Mining,EQ,INE267A01025,nse_nifty500
+POWERINDIA,POWERINDIA.NS,Hitachi Energy India Ltd.,Capital Goods,Capital Goods,EQ,INE07Y701011,nse_nifty500
+HOMEFIRST,HOMEFIRST.NS,Home First Finance Company India Ltd.,Financial Services,Financial Services,EQ,INE481N01025,nse_nifty500
+HONASA,HONASA.NS,Honasa Consumer Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE0J5401028,nse_nifty500
+HONAUT,HONAUT.NS,Honeywell Automation India Ltd.,Capital Goods,Capital Goods,EQ,INE671A01010,nse_nifty500
+HUDCO,HUDCO.NS,Housing & Urban Development Corporation Ltd.,Financial Services,Financial Services,EQ,INE031A01017,nse_nifty500
+HYUNDAI,HYUNDAI.NS,Hyundai Motor India Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE0V6F01027,nse_nifty500
+ICICIBANK,ICICIBANK.NS,ICICI Bank Ltd.,Financial Services,Financial Services,EQ,INE090A01021,nse_nifty500
+ICICIGI,ICICIGI.NS,ICICI Lombard General Insurance Company Ltd.,Financial Services,Financial Services,EQ,INE765G01017,nse_nifty500
+ICICIAMC,ICICIAMC.NS,ICICI Prudential Asset Management Company Ltd.,Financial Services,Financial Services,EQ,INE346A01027,nse_nifty500
+ICICIPRULI,ICICIPRULI.NS,ICICI Prudential Life Insurance Company Ltd.,Financial Services,Financial Services,EQ,INE726G01019,nse_nifty500
+IDBI,IDBI.NS,IDBI Bank Ltd.,Financial Services,Financial Services,EQ,INE008A01015,nse_nifty500
+IDFCFIRSTB,IDFCFIRSTB.NS,IDFC First Bank Ltd.,Financial Services,Financial Services,EQ,INE092T01019,nse_nifty500
+IFCI,IFCI.NS,IFCI Ltd.,Financial Services,Financial Services,EQ,INE039A01010,nse_nifty500
+IIFL,IIFL.NS,IIFL Finance Ltd.,Financial Services,Financial Services,EQ,INE530B01024,nse_nifty500
+IRB,IRB.NS,IRB Infrastructure Developers Ltd.,Construction,Construction,EQ,INE821I01022,nse_nifty500
+IRCON,IRCON.NS,IRCON International Ltd.,Construction,Construction,EQ,INE962Y01021,nse_nifty500
+ITCHOTELS,ITCHOTELS.NS,ITC Hotels Ltd.,Consumer Services,Consumer Services,EQ,INE379A01028,nse_nifty500
+ITC,ITC.NS,ITC Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE154A01025,nse_nifty500
+ITI,ITI.NS,ITI Ltd.,Telecommunication,Telecommunication,EQ,INE248A01017,nse_nifty500
+INDGN,INDGN.NS,Indegene Ltd.,Healthcare,Healthcare,EQ,INE065X01017,nse_nifty500
+INDIACEM,INDIACEM.NS,India Cements Ltd.,Construction Materials,Construction Materials,EQ,INE383A01012,nse_nifty500
+INDIAMART,INDIAMART.NS,Indiamart Intermesh Ltd.,Consumer Services,Consumer Services,EQ,INE933S01016,nse_nifty500
+INDIANB,INDIANB.NS,Indian Bank,Financial Services,Financial Services,EQ,INE562A01011,nse_nifty500
+IEX,IEX.NS,Indian Energy Exchange Ltd.,Financial Services,Financial Services,EQ,INE022Q01020,nse_nifty500
+INDHOTEL,INDHOTEL.NS,Indian Hotels Co. Ltd.,Consumer Services,Consumer Services,EQ,INE053A01029,nse_nifty500
+IOC,IOC.NS,Indian Oil Corporation Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE242A01010,nse_nifty500
+IOB,IOB.NS,Indian Overseas Bank,Financial Services,Financial Services,EQ,INE565A01014,nse_nifty500
+IRCTC,IRCTC.NS,Indian Railway Catering And Tourism Corporation Ltd.,Consumer Services,Consumer Services,EQ,INE335Y01020,nse_nifty500
+IRFC,IRFC.NS,Indian Railway Finance Corporation Ltd.,Financial Services,Financial Services,EQ,INE053F01010,nse_nifty500
+IREDA,IREDA.NS,Indian Renewable Energy Development Agency Ltd.,Financial Services,Financial Services,EQ,INE202E01016,nse_nifty500
+IGL,IGL.NS,Indraprastha Gas Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE203G01027,nse_nifty500
+INDUSTOWER,INDUSTOWER.NS,Indus Towers Ltd.,Telecommunication,Telecommunication,EQ,INE121J01017,nse_nifty500
+INDUSINDBK,INDUSINDBK.NS,IndusInd Bank Ltd.,Financial Services,Financial Services,EQ,INE095A01012,nse_nifty500
+NAUKRI,NAUKRI.NS,Info Edge (India) Ltd.,Consumer Services,Consumer Services,EQ,INE663F01032,nse_nifty500
+INFY,INFY.NS,Infosys Ltd.,Information Technology,Information Technology,EQ,INE009A01021,nse_nifty500
+INOXWIND,INOXWIND.NS,Inox Wind Ltd.,Capital Goods,Capital Goods,EQ,INE066P01011,nse_nifty500
+INTELLECT,INTELLECT.NS,Intellect Design Arena Ltd.,Information Technology,Information Technology,EQ,INE306R01017,nse_nifty500
+INDIGO,INDIGO.NS,InterGlobe Aviation Ltd.,Services,Services,EQ,INE646L01027,nse_nifty500
+IGIL,IGIL.NS,International Gemological Institute Ltd.,Services,Services,EQ,INE0Q9301021,nse_nifty500
+IKS,IKS.NS,Inventurus Knowledge Solutions Ltd.,Information Technology,Information Technology,EQ,INE115Q01022,nse_nifty500
+IPCALAB,IPCALAB.NS,Ipca Laboratories Ltd.,Healthcare,Healthcare,EQ,INE571A01038,nse_nifty500
+JBCHEPHARM,JBCHEPHARM.NS,J.B. Chemicals & Pharmaceuticals Ltd.,Healthcare,Healthcare,EQ,INE572A01036,nse_nifty500
+JKCEMENT,JKCEMENT.NS,J.K. Cement Ltd.,Construction Materials,Construction Materials,EQ,INE823G01014,nse_nifty500
+JBMA,JBMA.NS,JBM Auto Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE927D01051,nse_nifty500
+JKTYRE,JKTYRE.NS,JK Tyre & Industries Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE573A01042,nse_nifty500
+JMFINANCIL,JMFINANCIL.NS,JM Financial Ltd.,Financial Services,Financial Services,EQ,INE780C01023,nse_nifty500
+JSWCEMENT,JSWCEMENT.NS,JSW Cement Ltd.,Construction Materials,Construction Materials,EQ,INE718I01012,nse_nifty500
+JSWDULUX,JSWDULUX.NS,JSW Dulux Ltd.,Consumer Durables,Consumer Durables,EQ,INE133A01011,nse_nifty500
+JSWENERGY,JSWENERGY.NS,JSW Energy Ltd.,Power,Power,EQ,INE121E01018,nse_nifty500
+JSWINFRA,JSWINFRA.NS,JSW Infrastructure Ltd.,Services,Services,EQ,INE880J01026,nse_nifty500
+JSWSTEEL,JSWSTEEL.NS,JSW Steel Ltd.,Metals & Mining,Metals & Mining,EQ,INE019A01038,nse_nifty500
+JAINREC,JAINREC.NS,Jain Resource Recycling Ltd.,Metals & Mining,Metals & Mining,EQ,INE0YD401026,nse_nifty500
+JPPOWER,JPPOWER.NS,Jaiprakash Power Ventures Ltd.,Power,Power,EQ,INE351F01018,nse_nifty500
+J&KBANK,J&KBANK.NS,Jammu & Kashmir Bank Ltd.,Financial Services,Financial Services,EQ,INE168A01041,nse_nifty500
+JINDALSAW,JINDALSAW.NS,Jindal Saw Ltd.,Capital Goods,Capital Goods,EQ,INE324A01032,nse_nifty500
+JSL,JSL.NS,Jindal Stainless Ltd.,Metals & Mining,Metals & Mining,EQ,INE220G01021,nse_nifty500
+JINDALSTEL,JINDALSTEL.NS,Jindal Steel Ltd.,Metals & Mining,Metals & Mining,EQ,INE749A01030,nse_nifty500
+JIOFIN,JIOFIN.NS,Jio Financial Services Ltd.,Financial Services,Financial Services,EQ,INE758E01017,nse_nifty500
+JUBLFOOD,JUBLFOOD.NS,Jubilant Foodworks Ltd.,Consumer Services,Consumer Services,EQ,INE797F01020,nse_nifty500
+JUBLINGREA,JUBLINGREA.NS,Jubilant Ingrevia Ltd.,Chemicals,Chemicals,EQ,INE0BY001018,nse_nifty500
+JUBLPHARMA,JUBLPHARMA.NS,Jubilant Pharmova Ltd.,Healthcare,Healthcare,EQ,INE700A01033,nse_nifty500
+JWL,JWL.NS,Jupiter Wagons Ltd.,Capital Goods,Capital Goods,EQ,INE209L01016,nse_nifty500
+JYOTICNC,JYOTICNC.NS,Jyoti CNC Automation Ltd.,Capital Goods,Capital Goods,EQ,INE980O01024,nse_nifty500
+KPRMILL,KPRMILL.NS,K.P.R. Mill Ltd.,Textiles,Textiles,EQ,INE930H01031,nse_nifty500
+KEI,KEI.NS,KEI Industries Ltd.,Capital Goods,Capital Goods,EQ,INE878B01027,nse_nifty500
+KPITTECH,KPITTECH.NS,KPIT Technologies Ltd.,Information Technology,Information Technology,EQ,INE04I401011,nse_nifty500
+KAJARIACER,KAJARIACER.NS,Kajaria Ceramics Ltd.,Consumer Durables,Consumer Durables,EQ,INE217B01036,nse_nifty500
+KPIL,KPIL.NS,Kalpataru Projects International Ltd.,Construction,Construction,EQ,INE220B01022,nse_nifty500
+KALYANKJIL,KALYANKJIL.NS,Kalyan Jewellers India Ltd.,Consumer Durables,Consumer Durables,EQ,INE303R01014,nse_nifty500
+KARURVYSYA,KARURVYSYA.NS,Karur Vysya Bank Ltd.,Financial Services,Financial Services,EQ,INE036D01028,nse_nifty500
+KAYNES,KAYNES.NS,Kaynes Technology India Ltd.,Capital Goods,Capital Goods,EQ,INE918Z01012,nse_nifty500
+KEC,KEC.NS,Kec International Ltd.,Construction,Construction,EQ,INE389H01022,nse_nifty500
+KFINTECH,KFINTECH.NS,Kfin Technologies Ltd.,Financial Services,Financial Services,EQ,INE138Y01010,nse_nifty500
+KIRLOSENG,KIRLOSENG.NS,Kirloskar Oil Eng Ltd.,Capital Goods,Capital Goods,EQ,INE146L01010,nse_nifty500
+KOTAKBANK,KOTAKBANK.NS,Kotak Mahindra Bank Ltd.,Financial Services,Financial Services,EQ,INE237A01036,nse_nifty500
+KIMS,KIMS.NS,Krishna Institute of Medical Sciences Ltd.,Healthcare,Healthcare,EQ,INE967H01025,nse_nifty500
+LTF,LTF.NS,L&T Finance Ltd.,Financial Services,Financial Services,EQ,INE498L01015,nse_nifty500
+LTTS,LTTS.NS,L&T Technology Services Ltd.,Information Technology,Information Technology,EQ,INE010V01017,nse_nifty500
+LGEINDIA,LGEINDIA.NS,LG Electronics India Ltd.,Consumer Durables,Consumer Durables,EQ,INE324D01010,nse_nifty500
+LICHSGFIN,LICHSGFIN.NS,LIC Housing Finance Ltd.,Financial Services,Financial Services,EQ,INE115A01026,nse_nifty500
+LTFOODS,LTFOODS.NS,LT Foods Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE818H01020,nse_nifty500
+LTM,LTM.NS,LTM Ltd.,Information Technology,Information Technology,EQ,INE214T01019,nse_nifty500
+LT,LT.NS,Larsen & Toubro Ltd.,Construction,Construction,EQ,INE018A01030,nse_nifty500
+LATENTVIEW,LATENTVIEW.NS,Latent View Analytics Ltd.,Information Technology,Information Technology,EQ,INE0I7C01011,nse_nifty500
+LAURUSLABS,LAURUSLABS.NS,Laurus Labs Ltd.,Healthcare,Healthcare,EQ,INE947Q01028,nse_nifty500
+THELEELA,THELEELA.NS,Leela Palaces Hotels & Resorts Ltd.,Consumer Services,Consumer Services,EQ,INE0AQ201015,nse_nifty500
+LEMONTREE,LEMONTREE.NS,Lemon Tree Hotels Ltd.,Consumer Services,Consumer Services,EQ,INE970X01018,nse_nifty500
+LENSKART,LENSKART.NS,Lenskart Solutions Ltd.,Consumer Services,Consumer Services,EQ,INE956O01016,nse_nifty500
+LICI,LICI.NS,Life Insurance Corporation of India,Financial Services,Financial Services,EQ,INE0J1Y01017,nse_nifty500
+LINDEINDIA,LINDEINDIA.NS,Linde India Ltd.,Chemicals,Chemicals,EQ,INE473A01011,nse_nifty500
+LLOYDSME,LLOYDSME.NS,Lloyds Metals And Energy Ltd.,Metals & Mining,Metals & Mining,EQ,INE281B01032,nse_nifty500
+LODHA,LODHA.NS,Lodha Developers Ltd.,Realty,Realty,EQ,INE670K01029,nse_nifty500
+LUPIN,LUPIN.NS,Lupin Ltd.,Healthcare,Healthcare,EQ,INE326A01037,nse_nifty500
+MMTC,MMTC.NS,MMTC Ltd.,Services,Services,EQ,INE123F01029,nse_nifty500
+MRF,MRF.NS,MRF Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE883A01011,nse_nifty500
+MGL,MGL.NS,Mahanagar Gas Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE002S01010,nse_nifty500
+M&MFIN,M&MFIN.NS,Mahindra & Mahindra Financial Services Ltd.,Financial Services,Financial Services,EQ,INE774D01024,nse_nifty500
+M&M,M&M.NS,Mahindra & Mahindra Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE101A01026,nse_nifty500
+MANAPPURAM,MANAPPURAM.NS,Manappuram Finance Ltd.,Financial Services,Financial Services,EQ,INE522D01027,nse_nifty500
+MRPL,MRPL.NS,Mangalore Refinery & Petrochemicals Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE103A01014,nse_nifty500
+MANKIND,MANKIND.NS,Mankind Pharma Ltd.,Healthcare,Healthcare,EQ,INE634S01028,nse_nifty500
+MARICO,MARICO.NS,Marico Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE196A01026,nse_nifty500
+MARUTI,MARUTI.NS,Maruti Suzuki India Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE585B01010,nse_nifty500
+MFSL,MFSL.NS,Max Financial Services Ltd.,Financial Services,Financial Services,EQ,INE180A01020,nse_nifty500
+MAXHEALTH,MAXHEALTH.NS,Max Healthcare Institute Ltd.,Healthcare,Healthcare,EQ,INE027H01010,nse_nifty500
+MAZDOCK,MAZDOCK.NS,Mazagoan Dock Shipbuilders Ltd.,Capital Goods,Capital Goods,EQ,INE249Z01020,nse_nifty500
+MEESHO,MEESHO.NS,Meesho Ltd.,Consumer Services,Consumer Services,EQ,INE0VDM01015,nse_nifty500
+MINDACORP,MINDACORP.NS,Minda Corporation Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE842C01021,nse_nifty500
+MSUMI,MSUMI.NS,Motherson Sumi Wiring India Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE0FS801015,nse_nifty500
+MOTILALOFS,MOTILALOFS.NS,Motilal Oswal Financial Services Ltd.,Financial Services,Financial Services,EQ,INE338I01027,nse_nifty500
+MPHASIS,MPHASIS.NS,MphasiS Ltd.,Information Technology,Information Technology,EQ,INE356A01018,nse_nifty500
+MCX,MCX.NS,Multi Commodity Exchange of India Ltd.,Financial Services,Financial Services,EQ,INE745G01043,nse_nifty500
+MUTHOOTFIN,MUTHOOTFIN.NS,Muthoot Finance Ltd.,Financial Services,Financial Services,EQ,INE414G01012,nse_nifty500
+NATCOPHARM,NATCOPHARM.NS,NATCO Pharma Ltd.,Healthcare,Healthcare,EQ,INE987B01026,nse_nifty500
+NBCC,NBCC.NS,NBCC (India) Ltd.,Construction,Construction,EQ,INE095N01031,nse_nifty500
+NCC,NCC.NS,NCC Ltd.,Construction,Construction,EQ,INE868B01028,nse_nifty500
+NHPC,NHPC.NS,NHPC Ltd.,Power,Power,EQ,INE848E01016,nse_nifty500
+NLCINDIA,NLCINDIA.NS,NLC India Ltd.,Power,Power,EQ,INE589A01014,nse_nifty500
+NMDC,NMDC.NS,NMDC Ltd.,Metals & Mining,Metals & Mining,EQ,INE584A01023,nse_nifty500
+NSLNISP,NSLNISP.NS,NMDC Steel Ltd.,Metals & Mining,Metals & Mining,EQ,INE0NNS01018,nse_nifty500
+NTPCGREEN,NTPCGREEN.NS,NTPC Green Energy Ltd.,Power,Power,EQ,INE0ONG01011,nse_nifty500
+NTPC,NTPC.NS,NTPC Ltd.,Power,Power,EQ,INE733E01010,nse_nifty500
+NH,NH.NS,Narayana Hrudayalaya Ltd.,Healthcare,Healthcare,EQ,INE410P01011,nse_nifty500
+NATIONALUM,NATIONALUM.NS,National Aluminium Co. Ltd.,Metals & Mining,Metals & Mining,EQ,INE139A01034,nse_nifty500
+NAVA,NAVA.NS,Nava Ltd.,Power,Power,EQ,INE725A01030,nse_nifty500
+NAVINFLUOR,NAVINFLUOR.NS,Navin Fluorine International Ltd.,Chemicals,Chemicals,EQ,INE048G01026,nse_nifty500
+NESTLEIND,NESTLEIND.NS,Nestle India Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE239A01024,nse_nifty500
+NETWEB,NETWEB.NS,Netweb Technologies India Ltd.,Information Technology,Information Technology,EQ,INE0NT901020,nse_nifty500
+NEULANDLAB,NEULANDLAB.NS,Neuland Laboratories Ltd.,Healthcare,Healthcare,EQ,INE794A01010,nse_nifty500
+NEWGEN,NEWGEN.NS,Newgen Software Technologies Ltd.,Information Technology,Information Technology,EQ,INE619B01017,nse_nifty500
+NAM-INDIA,NAM-INDIA.NS,Nippon Life India Asset Management Ltd.,Financial Services,Financial Services,EQ,INE298J01013,nse_nifty500
+NIVABUPA,NIVABUPA.NS,Niva Bupa Health Insurance Company Ltd.,Financial Services,Financial Services,EQ,INE995S01015,nse_nifty500
+NUVAMA,NUVAMA.NS,Nuvama Wealth Management Ltd.,Financial Services,Financial Services,EQ,INE531F01023,nse_nifty500
+NUVOCO,NUVOCO.NS,Nuvoco Vistas Corporation Ltd.,Construction Materials,Construction Materials,EQ,INE118D01016,nse_nifty500
+OBEROIRLTY,OBEROIRLTY.NS,Oberoi Realty Ltd.,Realty,Realty,EQ,INE093I01010,nse_nifty500
+ONGC,ONGC.NS,Oil & Natural Gas Corporation Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE213A01029,nse_nifty500
+OIL,OIL.NS,Oil India Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE274J01014,nse_nifty500
+OLAELEC,OLAELEC.NS,Ola Electric Mobility Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE0LXG01040,nse_nifty500
+OLECTRA,OLECTRA.NS,Olectra Greentech Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE260D01016,nse_nifty500
+PAYTM,PAYTM.NS,One 97 Communications Ltd.,Financial Services,Financial Services,EQ,INE982J01020,nse_nifty500
+ONESOURCE,ONESOURCE.NS,Onesource Specialty Pharma Ltd.,Healthcare,Healthcare,EQ,INE013P01021,nse_nifty500
+OFSS,OFSS.NS,Oracle Financial Services Software Ltd.,Information Technology,Information Technology,EQ,INE881D01027,nse_nifty500
+POLICYBZR,POLICYBZR.NS,PB Fintech Ltd.,Financial Services,Financial Services,EQ,INE417T01026,nse_nifty500
+PCBL,PCBL.NS,PCBL Chemical Ltd.,Chemicals,Chemicals,EQ,INE602A01031,nse_nifty500
+PGEL,PGEL.NS,PG Electroplast Ltd.,Consumer Durables,Consumer Durables,EQ,INE457L01029,nse_nifty500
+PIIND,PIIND.NS,PI Industries Ltd.,Chemicals,Chemicals,EQ,INE603J01030,nse_nifty500
+PNBHOUSING,PNBHOUSING.NS,PNB Housing Finance Ltd.,Financial Services,Financial Services,EQ,INE572E01012,nse_nifty500
+PTCIL,PTCIL.NS,PTC Industries Ltd.,Capital Goods,Capital Goods,EQ,INE596F01018,nse_nifty500
+PVRINOX,PVRINOX.NS,PVR INOX Ltd.,Media Entertainment & Publication,Media Entertainment & Publication,EQ,INE191H01014,nse_nifty500
+PAGEIND,PAGEIND.NS,Page Industries Ltd.,Textiles,Textiles,EQ,INE761H01022,nse_nifty500
+PARADEEP,PARADEEP.NS,Paradeep Phosphates Ltd.,Chemicals,Chemicals,EQ,INE088F01024,nse_nifty500
+PATANJALI,PATANJALI.NS,Patanjali Foods Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE619A01035,nse_nifty500
+PERSISTENT,PERSISTENT.NS,Persistent Systems Ltd.,Information Technology,Information Technology,EQ,INE262H01021,nse_nifty500
+PETRONET,PETRONET.NS,Petronet LNG Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE347G01014,nse_nifty500
+PFIZER,PFIZER.NS,Pfizer Ltd.,Healthcare,Healthcare,EQ,INE182A01018,nse_nifty500
+PHOENIXLTD,PHOENIXLTD.NS,Phoenix Mills Ltd.,Realty,Realty,EQ,INE211B01039,nse_nifty500
+PWL,PWL.NS,Physicswallah Ltd.,Consumer Services,Consumer Services,EQ,INE0LP301011,nse_nifty500
+PIDILITIND,PIDILITIND.NS,Pidilite Industries Ltd.,Chemicals,Chemicals,EQ,INE318A01026,nse_nifty500
+PINELABS,PINELABS.NS,Pine Labs Ltd.,Financial Services,Financial Services,EQ,INE15B701018,nse_nifty500
+PIRAMALFIN,PIRAMALFIN.NS,Piramal Finance Ltd.,Financial Services,Financial Services,EQ,INE202B01038,nse_nifty500
+PPLPHARMA,PPLPHARMA.NS,Piramal Pharma Ltd.,Healthcare,Healthcare,EQ,INE0DK501011,nse_nifty500
+POLYMED,POLYMED.NS,Poly Medicure Ltd.,Healthcare,Healthcare,EQ,INE205C01021,nse_nifty500
+POLYCAB,POLYCAB.NS,Polycab India Ltd.,Capital Goods,Capital Goods,EQ,INE455K01017,nse_nifty500
+POONAWALLA,POONAWALLA.NS,Poonawalla Fincorp Ltd.,Financial Services,Financial Services,EQ,INE511C01022,nse_nifty500
+PFC,PFC.NS,Power Finance Corporation Ltd.,Financial Services,Financial Services,EQ,INE134E01011,nse_nifty500
+POWERGRID,POWERGRID.NS,Power Grid Corporation of India Ltd.,Power,Power,EQ,INE752E01010,nse_nifty500
+PREMIERENE,PREMIERENE.NS,Premier Energies Ltd.,Capital Goods,Capital Goods,EQ,INE0BS701011,nse_nifty500
+PRESTIGE,PRESTIGE.NS,Prestige Estates Projects Ltd.,Realty,Realty,EQ,INE811K01011,nse_nifty500
+PNB,PNB.NS,Punjab National Bank,Financial Services,Financial Services,EQ,INE160A01022,nse_nifty500
+RRKABEL,RRKABEL.NS,R R Kabel Ltd.,Capital Goods,Capital Goods,EQ,INE777K01022,nse_nifty500
+RBLBANK,RBLBANK.NS,RBL Bank Ltd.,Financial Services,Financial Services,EQ,INE976G01028,nse_nifty500
+RECLTD,RECLTD.NS,REC Ltd.,Financial Services,Financial Services,EQ,INE020B01018,nse_nifty500
+RHIM,RHIM.NS,RHI MAGNESITA INDIA LTD.,Capital Goods,Capital Goods,EQ,INE743M01012,nse_nifty500
+RITES,RITES.NS,RITES Ltd.,Construction,Construction,EQ,INE320J01015,nse_nifty500
+RADICO,RADICO.NS,Radico Khaitan Ltd,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE944F01028,nse_nifty500
+RVNL,RVNL.NS,Rail Vikas Nigam Ltd.,Construction,Construction,EQ,INE415G01027,nse_nifty500
+RAILTEL,RAILTEL.NS,Railtel Corporation Of India Ltd.,Telecommunication,Telecommunication,EQ,INE0DD101019,nse_nifty500
+RAINBOW,RAINBOW.NS,Rainbow Childrens Medicare Ltd.,Healthcare,Healthcare,EQ,INE961O01016,nse_nifty500
+RKFORGE,RKFORGE.NS,Ramkrishna Forgings Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE399G01023,nse_nifty500
+REDINGTON,REDINGTON.NS,Redington Ltd.,Services,Services,EQ,INE891D01026,nse_nifty500
+RELIANCE,RELIANCE.NS,Reliance Industries Ltd.,Oil Gas & Consumable Fuels,Oil Gas & Consumable Fuels,EQ,INE002A01018,nse_nifty500
+RPOWER,RPOWER.NS,Reliance Power Ltd.,Power,Power,EQ,INE614G01033,nse_nifty500
+SBFC,SBFC.NS,SBFC Finance Ltd.,Financial Services,Financial Services,EQ,INE423Y01016,nse_nifty500
+SBICARD,SBICARD.NS,SBI Cards and Payment Services Ltd.,Financial Services,Financial Services,EQ,INE018E01016,nse_nifty500
+SBILIFE,SBILIFE.NS,SBI Life Insurance Company Ltd.,Financial Services,Financial Services,EQ,INE123W01016,nse_nifty500
+SJVN,SJVN.NS,SJVN Ltd.,Power,Power,EQ,INE002L01015,nse_nifty500
+SRF,SRF.NS,SRF Ltd.,Chemicals,Chemicals,EQ,INE647A01010,nse_nifty500
+SAGILITY,SAGILITY.NS,Sagility Ltd.,Information Technology,Information Technology,EQ,INE0W2G01015,nse_nifty500
+SAILIFE,SAILIFE.NS,Sai Life Sciences Ltd.,Healthcare,Healthcare,EQ,INE570L01029,nse_nifty500
+SAMMAANCAP,SAMMAANCAP.NS,Sammaan Capital Ltd.,Financial Services,Financial Services,EQ,INE148I01020,nse_nifty500
+MOTHERSON,MOTHERSON.NS,Samvardhana Motherson International Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE775A01035,nse_nifty500
+SAPPHIRE,SAPPHIRE.NS,Sapphire Foods India Ltd.,Consumer Services,Consumer Services,EQ,INE806T01020,nse_nifty500
+SARDAEN,SARDAEN.NS,Sarda Energy and Minerals Ltd.,Metals & Mining,Metals & Mining,EQ,INE385C01021,nse_nifty500
+SAREGAMA,SAREGAMA.NS,Saregama India Ltd,Media Entertainment & Publication,Media Entertainment & Publication,EQ,INE979A01025,nse_nifty500
+SCHAEFFLER,SCHAEFFLER.NS,Schaeffler India Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE513A01022,nse_nifty500
+SCHNEIDER,SCHNEIDER.NS,Schneider Electric Infrastructure Ltd.,Capital Goods,Capital Goods,BE,INE839M01018,nse_nifty500
+SCI,SCI.NS,Shipping Corporation of India Ltd.,Services,Services,EQ,INE109A01011,nse_nifty500
+SHREECEM,SHREECEM.NS,Shree Cement Ltd.,Construction Materials,Construction Materials,EQ,INE070A01015,nse_nifty500
+SHRIRAMFIN,SHRIRAMFIN.NS,Shriram Finance Ltd.,Financial Services,Financial Services,EQ,INE721A01047,nse_nifty500
+SHYAMMETL,SHYAMMETL.NS,Shyam Metalics and Energy Ltd.,Capital Goods,Capital Goods,EQ,INE810G01011,nse_nifty500
+ENRIN,ENRIN.NS,Siemens Energy India Ltd.,Capital Goods,Capital Goods,EQ,INE1NPP01017,nse_nifty500
+SIEMENS,SIEMENS.NS,Siemens Ltd.,Capital Goods,Capital Goods,EQ,INE003A01024,nse_nifty500
+SIGNATURE,SIGNATURE.NS,Signatureglobal (India) Ltd.,Realty,Realty,EQ,INE903U01023,nse_nifty500
+SOBHA,SOBHA.NS,Sobha Ltd.,Realty,Realty,EQ,INE671H01015,nse_nifty500
+SOLARINDS,SOLARINDS.NS,Solar Industries India Ltd.,Chemicals,Chemicals,EQ,INE343H01029,nse_nifty500
+SONACOMS,SONACOMS.NS,Sona BLW Precision Forgings Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE073K01018,nse_nifty500
+SONATSOFTW,SONATSOFTW.NS,Sonata Software Ltd.,Information Technology,Information Technology,EQ,INE269A01021,nse_nifty500
+STARHEALTH,STARHEALTH.NS,Star Health and Allied Insurance Company Ltd.,Financial Services,Financial Services,EQ,INE575P01011,nse_nifty500
+SBIN,SBIN.NS,State Bank of India,Financial Services,Financial Services,EQ,INE062A01020,nse_nifty500
+SAIL,SAIL.NS,Steel Authority of India Ltd.,Metals & Mining,Metals & Mining,EQ,INE114A01011,nse_nifty500
+SUMICHEM,SUMICHEM.NS,Sumitomo Chemical India Ltd.,Chemicals,Chemicals,EQ,INE258G01013,nse_nifty500
+SUNPHARMA,SUNPHARMA.NS,Sun Pharmaceutical Industries Ltd.,Healthcare,Healthcare,EQ,INE044A01036,nse_nifty500
+SUNTV,SUNTV.NS,Sun TV Network Ltd.,Media Entertainment & Publication,Media Entertainment & Publication,EQ,INE424H01027,nse_nifty500
+SUNDARMFIN,SUNDARMFIN.NS,Sundaram Finance Ltd.,Financial Services,Financial Services,EQ,INE660A01013,nse_nifty500
+SUPREMEIND,SUPREMEIND.NS,Supreme Industries Ltd.,Capital Goods,Capital Goods,EQ,INE195A01028,nse_nifty500
+SPLPETRO,SPLPETRO.NS,Supreme Petrochem Ltd.,Chemicals,Chemicals,EQ,INE663A01033,nse_nifty500
+SUZLON,SUZLON.NS,Suzlon Energy Ltd.,Capital Goods,Capital Goods,EQ,INE040H01021,nse_nifty500
+SWANCORP,SWANCORP.NS,Swan Corp Ltd.,Chemicals,Chemicals,EQ,INE665A01038,nse_nifty500
+SWIGGY,SWIGGY.NS,Swiggy Ltd.,Consumer Services,Consumer Services,EQ,INE00H001014,nse_nifty500
+SYNGENE,SYNGENE.NS,Syngene International Ltd.,Healthcare,Healthcare,EQ,INE398R01022,nse_nifty500
+SYRMA,SYRMA.NS,Syrma SGS Technology Ltd.,Capital Goods,Capital Goods,EQ,INE0DYJ01015,nse_nifty500
+TBOTEK,TBOTEK.NS,TBO Tek Ltd.,Consumer Services,Consumer Services,EQ,INE673O01025,nse_nifty500
+TVSMOTOR,TVSMOTOR.NS,TVS Motor Company Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE494B01023,nse_nifty500
+TATACAP,TATACAP.NS,Tata Capital Ltd.,Financial Services,Financial Services,EQ,INE976I01016,nse_nifty500
+TATACHEM,TATACHEM.NS,Tata Chemicals Ltd.,Chemicals,Chemicals,EQ,INE092A01019,nse_nifty500
+TATACOMM,TATACOMM.NS,Tata Communications Ltd.,Telecommunication,Telecommunication,EQ,INE151A01013,nse_nifty500
+TCS,TCS.NS,Tata Consultancy Services Ltd.,Information Technology,Information Technology,EQ,INE467B01029,nse_nifty500
+TATACONSUM,TATACONSUM.NS,Tata Consumer Products Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE192A01025,nse_nifty500
+TATAELXSI,TATAELXSI.NS,Tata Elxsi Ltd.,Information Technology,Information Technology,EQ,INE670A01012,nse_nifty500
+TATAINVEST,TATAINVEST.NS,Tata Investment Corporation Ltd.,Financial Services,Financial Services,EQ,INE672A01026,nse_nifty500
+TMCV,TMCV.NS,Tata Motors Ltd.,Capital Goods,Capital Goods,EQ,INE1TAE01010,nse_nifty500
+TMPV,TMPV.NS,Tata Motors Passenger Vehicles Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE155A01022,nse_nifty500
+TATAPOWER,TATAPOWER.NS,Tata Power Co. Ltd.,Power,Power,EQ,INE245A01021,nse_nifty500
+TATASTEEL,TATASTEEL.NS,Tata Steel Ltd.,Metals & Mining,Metals & Mining,EQ,INE081A01020,nse_nifty500
+TATATECH,TATATECH.NS,Tata Technologies Ltd.,Information Technology,Information Technology,EQ,INE142M01025,nse_nifty500
+TTML,TTML.NS,Tata Teleservices (Maharashtra) Ltd.,Telecommunication,Telecommunication,EQ,INE517B01013,nse_nifty500
+TECHM,TECHM.NS,Tech Mahindra Ltd.,Information Technology,Information Technology,EQ,INE669C01036,nse_nifty500
+TECHNOE,TECHNOE.NS,Techno Electric & Engineering Company Ltd.,Construction,Construction,EQ,INE285K01026,nse_nifty500
+TEGA,TEGA.NS,Tega Industries Ltd.,Capital Goods,Capital Goods,EQ,INE011K01018,nse_nifty500
+TEJASNET,TEJASNET.NS,Tejas Networks Ltd.,Telecommunication,Telecommunication,EQ,INE010J01012,nse_nifty500
+TENNIND,TENNIND.NS,Tenneco Clean Air India Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE19RI01016,nse_nifty500
+NIACL,NIACL.NS,The New India Assurance Company Ltd.,Financial Services,Financial Services,EQ,INE470Y01017,nse_nifty500
+RAMCOCEM,RAMCOCEM.NS,The Ramco Cements Ltd.,Construction Materials,Construction Materials,EQ,INE331A01037,nse_nifty500
+THERMAX,THERMAX.NS,Thermax Ltd.,Capital Goods,Capital Goods,EQ,INE152A01029,nse_nifty500
+TIMKEN,TIMKEN.NS,Timken India Ltd.,Capital Goods,Capital Goods,EQ,INE325A01013,nse_nifty500
+TITAGARH,TITAGARH.NS,Titagarh Rail Systems Ltd.,Capital Goods,Capital Goods,EQ,INE615H01020,nse_nifty500
+TITAN,TITAN.NS,Titan Company Ltd.,Consumer Durables,Consumer Durables,EQ,INE280A01028,nse_nifty500
+TORNTPHARM,TORNTPHARM.NS,Torrent Pharmaceuticals Ltd.,Healthcare,Healthcare,EQ,INE685A01028,nse_nifty500
+TORNTPOWER,TORNTPOWER.NS,Torrent Power Ltd.,Power,Power,EQ,INE813H01021,nse_nifty500
+TARIL,TARIL.NS,Transformers And Rectifiers (India) Ltd.,Capital Goods,Capital Goods,EQ,INE763I01026,nse_nifty500
+TRAVELFOOD,TRAVELFOOD.NS,Travel Food Services Ltd.,Consumer Services,Consumer Services,EQ,INE103V01028,nse_nifty500
+TRENT,TRENT.NS,Trent Ltd.,Consumer Services,Consumer Services,EQ,INE849A01020,nse_nifty500
+TRIDENT,TRIDENT.NS,Trident Ltd.,Textiles,Textiles,EQ,INE064C01022,nse_nifty500
+TRITURBINE,TRITURBINE.NS,Triveni Turbine Ltd.,Capital Goods,Capital Goods,EQ,INE152M01016,nse_nifty500
+TIINDIA,TIINDIA.NS,Tube Investments of India Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE974X01010,nse_nifty500
+UCOBANK,UCOBANK.NS,UCO Bank,Financial Services,Financial Services,EQ,INE691A01018,nse_nifty500
+UNOMINDA,UNOMINDA.NS,UNO Minda Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE405E01023,nse_nifty500
+UPL,UPL.NS,UPL Ltd.,Chemicals,Chemicals,EQ,INE628A01036,nse_nifty500
+UTIAMC,UTIAMC.NS,UTI Asset Management Company Ltd.,Financial Services,Financial Services,EQ,INE094J01016,nse_nifty500
+ULTRACEMCO,ULTRACEMCO.NS,UltraTech Cement Ltd.,Construction Materials,Construction Materials,EQ,INE481G01011,nse_nifty500
+UNIONBANK,UNIONBANK.NS,Union Bank of India,Financial Services,Financial Services,EQ,INE692A01016,nse_nifty500
+UBL,UBL.NS,United Breweries Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE686F01025,nse_nifty500
+UNITDSPR,UNITDSPR.NS,United Spirits Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE854D01024,nse_nifty500
+URBANCO,URBANCO.NS,Urban Company Ltd.,Consumer Services,Consumer Services,EQ,INE0CAZ01013,nse_nifty500
+USHAMART,USHAMART.NS,Usha Martin Ltd.,Capital Goods,Capital Goods,EQ,INE228A01035,nse_nifty500
+VTL,VTL.NS,Vardhman Textiles Ltd.,Textiles,Textiles,EQ,INE825A01020,nse_nifty500
+VBL,VBL.NS,Varun Beverages Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE200M01039,nse_nifty500
+VEDL,VEDL.NS,Vedanta Ltd.,Metals & Mining,Metals & Mining,EQ,INE205A01025,nse_nifty500
+VIJAYA,VIJAYA.NS,Vijaya Diagnostic Centre Ltd.,Healthcare,Healthcare,EQ,INE043W01024,nse_nifty500
+VMM,VMM.NS,Vishal Mega Mart Ltd.,Consumer Services,Consumer Services,EQ,INE01EA01019,nse_nifty500
+IDEA,IDEA.NS,Vodafone Idea Ltd.,Telecommunication,Telecommunication,EQ,INE669E01016,nse_nifty500
+VOLTAS,VOLTAS.NS,Voltas Ltd.,Consumer Durables,Consumer Durables,EQ,INE226A01021,nse_nifty500
+WAAREEENER,WAAREEENER.NS,Waaree Energies Ltd.,Capital Goods,Capital Goods,EQ,INE377N01017,nse_nifty500
+WELCORP,WELCORP.NS,Welspun Corp Ltd.,Capital Goods,Capital Goods,EQ,INE191B01025,nse_nifty500
+WELSPUNLIV,WELSPUNLIV.NS,Welspun Living Ltd.,Textiles,Textiles,EQ,INE192B01031,nse_nifty500
+WHIRLPOOL,WHIRLPOOL.NS,Whirlpool of India Ltd.,Consumer Durables,Consumer Durables,EQ,INE716A01013,nse_nifty500
+WIPRO,WIPRO.NS,Wipro Ltd.,Information Technology,Information Technology,EQ,INE075A01022,nse_nifty500
+WOCKPHARMA,WOCKPHARMA.NS,Wockhardt Ltd.,Healthcare,Healthcare,EQ,INE049B01025,nse_nifty500
+YESBANK,YESBANK.NS,Yes Bank Ltd.,Financial Services,Financial Services,EQ,INE528G01035,nse_nifty500
+ZFCVINDIA,ZFCVINDIA.NS,ZF Commercial Vehicle Control Systems India Ltd.,Automobile and Auto Components,Automobile and Auto Components,EQ,INE342J01019,nse_nifty500
+ZEEL,ZEEL.NS,Zee Entertainment Enterprises Ltd.,Media Entertainment & Publication,Media Entertainment & Publication,EQ,INE256A01028,nse_nifty500
+ZENTEC,ZENTEC.NS,Zen Technologies Ltd.,Capital Goods,Capital Goods,EQ,INE251B01027,nse_nifty500
+ZENSARTECH,ZENSARTECH.NS,Zensar Technolgies Ltd.,Information Technology,Information Technology,EQ,INE520A01027,nse_nifty500
+ZYDUSLIFE,ZYDUSLIFE.NS,Zydus Lifesciences Ltd.,Healthcare,Healthcare,EQ,INE010B01027,nse_nifty500
+ZYDUSWELL,ZYDUSWELL.NS,Zydus Wellness Ltd.,Fast Moving Consumer Goods,Fast Moving Consumer Goods,EQ,INE768C01028,nse_nifty500
+ECLERX,ECLERX.NS,eClerx Services Ltd.,Services,Services,EQ,INE738I01010,nse_nifty500

@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import pickle
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -43,8 +44,10 @@ META_DRAWDOWN_PATH = CHECKPOINTS_DIR / "meta_drawdown_model.joblib"
 META_FEATURES_PATH = CHECKPOINTS_DIR / "meta_feature_cols.pkl"
 META_REPORT_PATH = CHECKPOINTS_DIR / "meta_walkforward_report.json"
 META_REPORT_PREVIOUS_PATH = CHECKPOINTS_DIR / "meta_walkforward_report.previous.json"
+META_REPORT_CANDIDATE_PATH = CHECKPOINTS_DIR / "meta_walkforward_report.candidate.json"
 META_DIRECTIONAL_PATH = CHECKPOINTS_DIR / "meta_directional_models.joblib"
 META_DIRECTIONAL_PREVIOUS_PATH = CHECKPOINTS_DIR / "meta_directional_models.previous.joblib"
+META_DIRECTIONAL_CANDIDATE_PATH = CHECKPOINTS_DIR / "meta_directional_models.candidate.joblib"
 XGB_SHAP_REPORT_PATH = CHECKPOINTS_DIR / "xgboost_shap_monitor.json"
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 FEATURE_DIR = PROJECT_DIR / "data" / "features"
@@ -136,6 +139,53 @@ def _merged_retrain_feature_store() -> Tuple[Dict[str, pd.DataFrame], Dict[str, 
         source_stats[str(FEATURE_DIR)] = {"files": file_count, "rows": row_count}
 
     return feature_matrices, source_stats
+
+
+def _normalize_market_scope(raw_scope: Optional[str]) -> str:
+    scope = str(raw_scope or "all").strip().lower()
+    aliases = {
+        "": "all",
+        "stocks": "us",
+        "equities": "us",
+        "us-stocks": "us",
+        "us_equities": "us",
+        "usa": "us",
+        "india": "nse",
+        "ind": "nse",
+        "nse-stocks": "nse",
+        "crypto-only": "crypto",
+    }
+    return aliases.get(scope, scope if scope in {"all", "us", "nse", "crypto"} else "all")
+
+
+def _market_bucket_for_symbol(symbol: str) -> str:
+    raw = str(symbol or "").strip().upper()
+    if raw.endswith(".NS"):
+        return "nse"
+    if "USDT" in raw or raw.endswith("-USD") or raw.endswith("USD"):
+        return "crypto"
+    return "us"
+
+
+def _symbol_matches_market_scope(symbol: str, market_scope: str) -> bool:
+    scope = _normalize_market_scope(market_scope)
+    if scope == "all":
+        return True
+    return _market_bucket_for_symbol(symbol) == scope
+
+
+def _filter_feature_matrices_for_market(
+    feature_matrices: Dict[str, pd.DataFrame],
+    market_scope: str,
+) -> Dict[str, pd.DataFrame]:
+    scope = _normalize_market_scope(market_scope)
+    if scope == "all":
+        return dict(feature_matrices)
+    return {
+        symbol: frame
+        for symbol, frame in feature_matrices.items()
+        if _symbol_matches_market_scope(symbol, scope)
+    }
 
 
 def _adaptive_horizon_days(frame: pd.DataFrame, idx: int, base_horizon_days: int) -> Tuple[int, float]:
@@ -252,6 +302,136 @@ def _triple_barrier_direction_label(frame: pd.DataFrame, idx: int, base_horizon_
     return 1
 
 
+def _estimate_risk_parameters_from_row(row: pd.Series) -> Dict[str, float]:
+    atr_pct = float(row.get("atr_pct", 0.02) or 0.02)
+    stop_loss_pct = float(np.clip(atr_pct * 100 * 1.3, 1.2, 6.0))
+    take_profit_pct = float(np.clip(stop_loss_pct * 2.2, stop_loss_pct + 0.8, 12.0))
+    return {
+        "stop_loss_pct": round(stop_loss_pct, 3),
+        "take_profit_pct": round(take_profit_pct, 3),
+        "risk_reward_ratio": round(take_profit_pct / max(stop_loss_pct, 0.1), 3),
+    }
+
+
+def _default_meta_build_workers() -> int:
+    raw = str(os.getenv("META_MODEL_BUILD_WORKERS", "")).strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except Exception:
+            return 1
+    if os.name == "nt":
+        return 1
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(8, cpu_count))
+
+
+def _build_meta_records_for_symbol(
+    symbol: str,
+    frame: pd.DataFrame,
+    market_scope: str,
+    min_frame: int,
+    warmup_rows: int,
+    horizon_days: int,
+) -> Dict[str, object]:
+    if not _symbol_matches_market_scope(symbol, market_scope):
+        return {"symbol": symbol, "records": [], "skipped_reason": "market_scope"}
+    if frame is None or frame.empty:
+        return {"symbol": symbol, "records": [], "skipped_reason": "empty_frame"}
+    if len(frame) < min_frame:
+        return {"symbol": symbol, "records": [], "skipped_reason": "short_frame"}
+
+    from core.signal_engine_v2 import MultiFactorScorer
+
+    scorer = MultiFactorScorer()
+    ordered = frame.sort_index()
+    records: List[Dict[str, object]] = []
+
+    for idx in range(warmup_rows, len(ordered) - 2):
+        row = ordered.iloc[idx]
+        signal_score = scorer.score(row)
+        direction = signal_score["direction"]
+        if direction == "neutral":
+            synthetic_direction = (
+                0.45 * float(row.get("alpha_signal", 0.0) or 0.0)
+                + 0.35 * float(row.get("event_alpha_signal", 0.0) or 0.0)
+                + 0.20 * float(row.get("momentum_composite", 0.0) or 0.0)
+            )
+            if synthetic_direction > 0.10:
+                direction = "buy"
+            elif synthetic_direction < -0.10:
+                direction = "sell"
+            else:
+                continue
+            signal_score["direction"] = direction
+            signal_score["confidence"] = max(
+                float(signal_score.get("confidence", 0.0) or 0.0),
+                min(0.58, abs(synthetic_direction) * 1.75),
+            )
+            signal_score["conviction_score"] = max(
+                float(signal_score.get("conviction_score", 0.0) or 0.0),
+                round(min(6.6, abs(synthetic_direction) * 12.0), 1),
+            )
+
+        adaptive_days, horizon_multiplier = _adaptive_horizon_days(ordered, idx, horizon_days)
+        future_window = ordered.iloc[idx + 1 : idx + 1 + adaptive_days]
+        if future_window.empty:
+            continue
+
+        entry_close = float(row.get("close", 0.0) or 0.0)
+        if entry_close <= 0:
+            continue
+
+        risk_parameters = _estimate_risk_parameters_from_row(row)
+        path_stats = _triple_barrier_path_stats(
+            direction,
+            entry_close,
+            future_window,
+            stop_loss_pct=float(risk_parameters["stop_loss_pct"]),
+            take_profit_pct=float(risk_parameters["take_profit_pct"]),
+        )
+        edge_ratio = path_stats["edge_pct"] / max(path_stats["drawdown_pct"], 0.35)
+        label_min_edge = float(os.getenv("META_MODEL_LABEL_MIN_EDGE_PCT", "0.18"))
+        label_min_ratio = float(os.getenv("META_MODEL_LABEL_MIN_EDGE_RATIO", "0.08"))
+        path_take_label = int(
+            path_stats["edge_pct"] > label_min_edge
+            and edge_ratio > label_min_ratio
+            and path_stats["hit"] == 1
+        )
+        feature_signal = {
+            "signal": direction,
+            "confidence": signal_score["confidence"],
+            "conviction_score": signal_score["conviction_score"],
+            "regime_multiplier": signal_score["regime_multiplier"],
+            "regime": signal_score["regime"],
+            "factor_scores": signal_score["factor_scores"],
+            "risk_parameters": risk_parameters,
+            "model_agreement": 0.0,
+            "xgb_alignment": "",
+        }
+        feature_values = MetaFeatureBuilder.build(symbol, feature_signal, row)
+        feature_values.update(
+            {
+                "symbol": symbol,
+                "timestamp": pd.Timestamp(ordered.index[idx]),
+                "market_bucket": _market_bucket_for_symbol(symbol),
+                "direction_label": "long" if direction == "buy" else "short",
+                "adaptive_horizon_days": adaptive_days,
+                "adaptive_horizon_multiplier": horizon_multiplier,
+                "path_take_label": path_take_label,
+                "edge_pct": path_stats["edge_pct"],
+                "drawdown_pct": path_stats["drawdown_pct"],
+                "edge_ratio": round(float(edge_ratio), 4),
+                "hit": path_stats["hit"],
+                "barrier": path_stats["barrier"],
+            }
+        )
+        records.append(feature_values)
+
+    skipped_reason = "" if records else "no_training_rows"
+    return {"symbol": symbol, "records": records, "skipped_reason": skipped_reason}
+
+
 @dataclass
 class DirectionalMetaArtifacts:
     classifier: object
@@ -328,6 +508,13 @@ class MetaFeatureBuilder:
         "short_spread_widening_edge",
         "short_book_pressure_reversal_edge",
         "short_earnings_miss_propagation_edge",
+        "cross_sectional_candidate_count",
+        "cross_sectional_selection_rank_pct",
+        "cross_sectional_conviction_rank_pct",
+        "cross_sectional_sentiment_rank_pct",
+        "cross_sectional_momentum_rank_pct",
+        "cross_sectional_volatility_rank_pct",
+        "cross_sectional_score_rank_pct",
         "is_nse_symbol",
         "meta_year_norm",
         "meta_month_sin",
@@ -526,6 +713,8 @@ class TrainedMetaModel:
     MIN_MEAN_COVERAGE_PCT = 1.0
     MIN_MEAN_TAKEN_EDGE_PCT = 0.10
     MIN_MEAN_HIT_RATE_PCT = 45.0
+    MIN_MEAN_EDGE_DRAW_RATIO = 0.25
+    MIN_VALID_WALKFORWARD_FOLDS = 2
 
     @classmethod
     def _gate_min_precision(cls) -> float:
@@ -546,6 +735,16 @@ class TrainedMetaModel:
     def _gate_min_hit_rate_pct(cls) -> float:
         v = os.getenv("META_MODEL_GATE_MIN_HIT_RATE_PCT", "")
         return float(v) if v.strip() else cls.MIN_MEAN_HIT_RATE_PCT
+
+    @classmethod
+    def _gate_min_edge_draw_ratio(cls) -> float:
+        v = os.getenv("META_MODEL_GATE_MIN_EDGE_DRAW_RATIO", "")
+        return float(v) if v.strip() else cls.MIN_MEAN_EDGE_DRAW_RATIO
+
+    @classmethod
+    def _gate_min_valid_folds(cls) -> int:
+        v = os.getenv("META_MODEL_GATE_MIN_VALID_FOLDS", "")
+        return int(v) if v.strip() else cls.MIN_VALID_WALKFORWARD_FOLDS
 
     def __init__(
         self,
@@ -578,6 +777,8 @@ class TrainedMetaModel:
         summary = walk_forward.get("summary", {}) if isinstance(walk_forward, dict) else {}
         if not summary:
             return False
+        if int(walk_forward.get("valid_fold_count", 0) or 0) < cls._gate_min_valid_folds():
+            return False
         if float(summary.get("mean_precision", 0.0) or 0.0) < cls._gate_min_precision():
             return False
         if float(summary.get("mean_coverage_pct", 0.0) or 0.0) < cls._gate_min_coverage_pct():
@@ -585,6 +786,8 @@ class TrainedMetaModel:
         if float(summary.get("mean_taken_edge_pct", 0.0) or 0.0) < cls._gate_min_taken_edge_pct():
             return False
         if float(summary.get("mean_taken_hit_rate_pct", 0.0) or 0.0) < cls._gate_min_hit_rate_pct():
+            return False
+        if float(summary.get("mean_taken_edge_draw_ratio", 0.0) or 0.0) < cls._gate_min_edge_draw_ratio():
             return False
         return True
 
@@ -599,6 +802,8 @@ class TrainedMetaModel:
             return reasons
         if status in {"pending", "pending_walkforward_retrain"}:
             reasons.append("walkforward_pending")
+        if int(walk_forward.get("valid_fold_count", 0) or 0) < cls._gate_min_valid_folds():
+            reasons.append("insufficient_valid_folds")
         if float(summary.get("mean_precision", 0.0) or 0.0) < cls._gate_min_precision():
             reasons.append("precision_below_gate")
         if float(summary.get("mean_coverage_pct", 0.0) or 0.0) < cls._gate_min_coverage_pct():
@@ -607,7 +812,32 @@ class TrainedMetaModel:
             reasons.append("edge_below_gate")
         if float(summary.get("mean_taken_hit_rate_pct", 0.0) or 0.0) < cls._gate_min_hit_rate_pct():
             reasons.append("hit_rate_below_gate")
+        if float(summary.get("mean_taken_edge_draw_ratio", 0.0) or 0.0) < cls._gate_min_edge_draw_ratio():
+            reasons.append("edge_draw_ratio_below_gate")
         return reasons
+
+    @classmethod
+    def _report_score(cls, report: Optional[Dict]) -> float:
+        if not isinstance(report, dict):
+            return float("-inf")
+        walk_forward = report.get("walk_forward", {}) if isinstance(report.get("walk_forward", {}), dict) else {}
+        summary = walk_forward.get("summary", {}) if isinstance(walk_forward.get("summary", {}), dict) else {}
+        if not summary:
+            return float("-inf")
+        precision = float(summary.get("mean_precision", 0.0) or 0.0)
+        hit_rate = float(summary.get("mean_taken_hit_rate_pct", 0.0) or 0.0) / 100.0
+        edge = float(summary.get("mean_taken_edge_pct", 0.0) or 0.0)
+        edge_draw = float(summary.get("mean_taken_edge_draw_ratio", 0.0) or 0.0)
+        coverage = float(summary.get("mean_coverage_pct", 0.0) or 0.0)
+        valid_folds = float(walk_forward.get("valid_fold_count", 0.0) or 0.0)
+        return (
+            precision * 100.0
+            + hit_rate * 40.0
+            + edge * 8.0
+            + edge_draw * 20.0
+            + min(coverage, 8.0) * 0.5
+            + valid_folds * 2.0
+        )
 
     @classmethod
     def inspect_runtime_status(cls) -> Dict[str, object]:
@@ -728,7 +958,7 @@ class TrainedMetaModel:
                         )
                     feature_columns = list(range(40))
                     deployment_rules = report.get("deployment_rules", {}) if isinstance(report, dict) else {}
-                    return cls(_resolved_bundles=bundles, _feature_columns=feature_columns, _deployment_rules=deployment_rules)
+                    return cls(bundles, feature_columns)
             except Exception as e:
                 pass
             
@@ -748,19 +978,19 @@ class TrainedMetaModel:
                     decision_threshold=float(
                         os.getenv(
                             "META_MODEL_RUNTIME_THRESHOLD",
-                            str(rules.get("decision_threshold", 0.52) or 0.52),
+                            str(bundle_payload.get("decision_threshold", rules.get("decision_threshold", 0.52)) or 0.52),
                         )
                     ),
                     min_expected_edge_pct=float(
                         os.getenv(
                             "META_MODEL_RUNTIME_MIN_EDGE_PCT",
-                            str(rules.get("min_expected_edge_pct", 0.18) or 0.18),
+                            str(bundle_payload.get("min_expected_edge_pct", rules.get("min_expected_edge_pct", 0.18)) or 0.18),
                         )
                     ),
                     min_edge_ratio=float(
                         os.getenv(
                             "META_MODEL_RUNTIME_MIN_EDGE_RATIO",
-                            str(rules.get("min_edge_ratio", 0.08) or 0.08),
+                            str(bundle_payload.get("min_edge_ratio", rules.get("min_edge_ratio", 0.08)) or 0.08),
                         )
                     ),
                     direction=direction,
@@ -1059,27 +1289,46 @@ class MetaModelTrainer:
         take_threshold: float = 0.52,
         walk_forward_folds: int = 4,
         min_train_days: int = 180,
+        market_scope: str = "all",
     ):
         self.horizon_days = horizon_days
         self.take_threshold = take_threshold
         self.walk_forward_folds = walk_forward_folds
         self.min_train_days = min_train_days
+        self.market_scope = _normalize_market_scope(market_scope)
 
     def _estimate_risk_parameters(self, row: pd.Series) -> Dict[str, float]:
-        atr_pct = float(row.get("atr_pct", 0.02) or 0.02)
-        stop_loss_pct = float(np.clip(atr_pct * 100 * 1.3, 1.2, 6.0))
-        take_profit_pct = float(np.clip(stop_loss_pct * 2.2, stop_loss_pct + 0.8, 12.0))
-        return {
-            "stop_loss_pct": round(stop_loss_pct, 3),
-            "take_profit_pct": round(take_profit_pct, 3),
-            "risk_reward_ratio": round(take_profit_pct / max(stop_loss_pct, 0.1), 3),
-        }
+        return _estimate_risk_parameters_from_row(row)
 
     def _sample_weights(self, edge_pct: pd.Series, drawdown_pct: pd.Series, take_label: pd.Series) -> np.ndarray:
         edge_component = np.clip(np.abs(edge_pct.to_numpy(dtype=float)) / 3.0, 0.5, 3.0)
         draw_component = 1.0 / np.clip(drawdown_pct.to_numpy(dtype=float), 0.5, 8.0)
         label_component = np.where(take_label.to_numpy(dtype=int) == 1, 1.4, 1.0)
         return edge_component * (0.7 + draw_component) * label_component
+
+    def _dataset_span(self, dataset: pd.DataFrame) -> Dict[str, object]:
+        if dataset.empty or "timestamp" not in dataset.columns:
+            return {
+                "rows": int(len(dataset)),
+                "min_timestamp": None,
+                "max_timestamp": None,
+                "symbols": 0,
+                "market_counts": {},
+            }
+        timestamps = pd.to_datetime(dataset["timestamp"], errors="coerce").dropna()
+        market_counts: Dict[str, int] = {}
+        if "market_bucket" in dataset.columns:
+            market_counts = {
+                str(k): int(v)
+                for k, v in dataset["market_bucket"].fillna("unknown").astype(str).value_counts().to_dict().items()
+            }
+        return {
+            "rows": int(len(dataset)),
+            "min_timestamp": str(timestamps.min()) if not timestamps.empty else None,
+            "max_timestamp": str(timestamps.max()) if not timestamps.empty else None,
+            "symbols": int(dataset["symbol"].nunique()) if "symbol" in dataset.columns else 0,
+            "market_counts": market_counts,
+        }
 
     def _select_decision_rule(
         self,
@@ -1113,6 +1362,8 @@ class MetaModelTrainer:
         cov_min = float(os.getenv("META_MODEL_MIN_COVERAGE_PCT", "0.8"))
         cov_max = float(os.getenv("META_MODEL_MAX_COVERAGE_PCT", "60"))
         rule_mode = os.getenv("META_MODEL_RULE_OBJECTIVE", "precision").strip().lower()
+        min_precision_floor = float(os.getenv("META_MODEL_MIN_PRECISION_FLOOR", "0.42"))
+        min_realized_edge_draw_ratio = float(os.getenv("META_MODEL_MIN_EDGE_DRAW_RATIO_FLOOR", "0.30"))
 
         for threshold in threshold_grid:
             for min_edge in min_edge_grid:
@@ -1128,23 +1379,26 @@ class MetaModelTrainer:
                         continue
                     avg_edge = float(realized_edge[mask].mean())
                     avg_draw = float(realized_draw[mask].mean())
+                    edge_draw_ratio = float(avg_edge / max(avg_draw, 0.35))
+                    edge_surplus = float(avg_edge - (0.55 * avg_draw))
                     hit_rate = float(hit_rate_array[mask].mean() * 100.0)
                     precision_take = float(y_take[mask].mean()) if count > 0 else 0.0
                     if rule_mode == "legacy":
                         objective = avg_edge - (0.32 * avg_draw) + ((hit_rate - 50.0) * 0.02)
                     else:
-                        # Precision floor: skip rules below this (lowered from 0.60 — was blocking all configs on current data)
-                        min_precision_floor = float(os.getenv(
-                            "META_MODEL_MIN_PRECISION_FLOOR", "0.38"))
                         if precision_take < min_precision_floor:
                             continue
+                        if edge_draw_ratio < min_realized_edge_draw_ratio:
+                            continue
                         # Coverage bonus — enough to prevent precision-only overfitting
-                        coverage_bonus = max(0.0, min(coverage, 8.0)) * 0.12
+                        coverage_bonus = max(0.0, min(coverage, 6.0)) * 0.18
                         objective = (
-                            55.0 * precision_take
-                            + 0.18 * hit_rate
-                            + 0.12 * float(np.clip(avg_edge, -3.0, 6.0))
-                            - 0.10 * float(np.clip(avg_draw, 0.0, 12.0))
+                            46.0 * precision_take
+                            + 0.22 * hit_rate
+                            + 4.0 * float(np.clip(edge_draw_ratio, -1.0, 3.0))
+                            + 0.75 * float(np.clip(edge_surplus, -4.0, 6.0))
+                            + 0.18 * float(np.clip(avg_edge, -3.0, 6.0))
+                            - 0.18 * float(np.clip(avg_draw, 0.0, 12.0))
                             + coverage_bonus
                         )
                     if objective > best["objective"]:
@@ -1157,6 +1411,50 @@ class MetaModelTrainer:
 
         best.pop("objective", None)
         return best
+
+    def _resolve_walk_forward_windows(self, dates: List[pd.Timestamp]) -> Dict[str, object]:
+        requested_folds = max(1, int(self.walk_forward_folds))
+        min_test_days = max(10, int(os.getenv("META_MODEL_MIN_TEST_DAYS", "15") or 15))
+        if len(dates) < (self.min_train_days + min_test_days):
+            return {
+                "requested_folds": requested_folds,
+                "valid_fold_count": 0,
+                "test_span": 0,
+                "min_test_days": min_test_days,
+                "windows": [],
+                "notes": ["insufficient_dates_for_min_test_span"],
+            }
+
+        windows: List[Dict[str, int]] = []
+        train_end = int(self.min_train_days)
+        notes: List[str] = []
+        while len(windows) < requested_folds and (len(dates) - train_end) >= min_test_days:
+            remaining_days = len(dates) - train_end
+            remaining_folds = max(1, requested_folds - len(windows))
+            current_span = max(min_test_days, remaining_days // remaining_folds)
+            test_end = min(len(dates), train_end + current_span)
+            if (test_end - train_end) < min_test_days:
+                break
+            windows.append(
+                {
+                    "fold_number": len(windows) + 1,
+                    "train_end": train_end,
+                    "test_end": test_end,
+                }
+            )
+            train_end = test_end
+
+        if len(windows) < requested_folds:
+            notes.append("requested_folds_reduced_by_date_budget")
+
+        return {
+            "requested_folds": requested_folds,
+            "valid_fold_count": len(windows),
+            "test_span": int(windows[0]["test_end"] - windows[0]["train_end"]) if windows else 0,
+            "min_test_days": min_test_days,
+            "windows": windows,
+            "notes": notes,
+        }
 
     def _bundle_take_probability(self, bundle: DirectionalMetaArtifacts, X: pd.DataFrame) -> np.ndarray:
         raw_prob = bundle.classifier.predict_proba(X)[:, 1]
@@ -1286,9 +1584,6 @@ class MetaModelTrainer:
         )
 
     def build_training_dataset(self, feature_matrices: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-        from core.signal_engine_v2 import MultiFactorScorer
-
-        scorer = MultiFactorScorer()
         records = []
         min_frame = max(
             int(os.getenv("META_MODEL_MIN_FRAME_ROWS", "72") or 72),
@@ -1297,102 +1592,169 @@ class MetaModelTrainer:
         warmup_rows = max(28, int(os.getenv("META_MODEL_WARMUP_ROWS", "42") or 42))
         fm_items = list(feature_matrices.items())
         meta_log_every = max(80, int(os.getenv("RETRAIN_META_LOG_EVERY", "250") or 250))
+        worker_count = _default_meta_build_workers()
+        skip_counts: Dict[str, int] = {}
 
-        for fi, (symbol, frame) in enumerate(fm_items):
-            if frame is None or frame.empty or len(frame) < min_frame:
-                continue
-
-            ordered = frame.sort_index()
-            for idx in range(warmup_rows, len(ordered) - 2):
-                row = ordered.iloc[idx]
-                signal_score = scorer.score(row)
-                direction = signal_score["direction"]
-                if direction == "neutral":
-                    synthetic_direction = (
-                        0.45 * float(row.get("alpha_signal", 0.0) or 0.0)
-                        + 0.35 * float(row.get("event_alpha_signal", 0.0) or 0.0)
-                        + 0.20 * float(row.get("momentum_composite", 0.0) or 0.0)
-                    )
-                    if synthetic_direction > 0.10:
-                        direction = "buy"
-                    elif synthetic_direction < -0.10:
-                        direction = "sell"
-                    else:
-                        continue
-                    signal_score["direction"] = direction
-                    signal_score["confidence"] = max(
-                        float(signal_score.get("confidence", 0.0) or 0.0),
-                        min(0.58, abs(synthetic_direction) * 1.75),
-                    )
-                    signal_score["conviction_score"] = max(
-                        float(signal_score.get("conviction_score", 0.0) or 0.0),
-                        round(min(6.6, abs(synthetic_direction) * 12.0), 1),
-                    )
-
-                horizon_days, horizon_multiplier = _adaptive_horizon_days(ordered, idx, self.horizon_days)
-                future_window = ordered.iloc[idx + 1 : idx + 1 + horizon_days]
-                if future_window.empty:
-                    continue
-
-                entry_close = float(row.get("close", 0.0) or 0.0)
-                if entry_close <= 0:
-                    continue
-
-                risk_parameters = self._estimate_risk_parameters(row)
-                path_stats = _triple_barrier_path_stats(
-                    direction,
-                    entry_close,
-                    future_window,
-                    stop_loss_pct=float(risk_parameters["stop_loss_pct"]),
-                    take_profit_pct=float(risk_parameters["take_profit_pct"]),
-                )
-                feature_signal = {
-                    "signal": direction,
-                    "confidence": signal_score["confidence"],
-                    "conviction_score": signal_score["conviction_score"],
-                    "regime_multiplier": signal_score["regime_multiplier"],
-                    "regime": signal_score["regime"],
-                    "factor_scores": signal_score["factor_scores"],
-                    "risk_parameters": risk_parameters,
-                    "model_agreement": 0.0,
-                    "xgb_alignment": "",
+        if worker_count > 1 and len(fm_items) >= max(12, worker_count * 2):
+            logger.info(
+                "Meta dataset build: using %s workers across %s symbol frames",
+                worker_count,
+                len(fm_items),
+            )
+            with ProcessPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(
+                        _build_meta_records_for_symbol,
+                        symbol,
+                        frame,
+                        self.market_scope,
+                        min_frame,
+                        warmup_rows,
+                        self.horizon_days,
+                    ): symbol
+                    for symbol, frame in fm_items
                 }
-                feature_values = MetaFeatureBuilder.build(symbol, feature_signal, row)
-
-                edge_ratio = path_stats["edge_pct"] / max(path_stats["drawdown_pct"], 0.35)
-                label_min_edge = float(os.getenv("META_MODEL_LABEL_MIN_EDGE_PCT", "0.18"))
-                label_min_ratio = float(os.getenv("META_MODEL_LABEL_MIN_EDGE_RATIO", "0.08"))
-                take_label = int(
-                    path_stats["edge_pct"] > label_min_edge
-                    and edge_ratio > label_min_ratio
-                    and path_stats["hit"] == 1
+                for idx, future in enumerate(as_completed(futures), start=1):
+                    payload = future.result()
+                    records.extend(payload.get("records", []))
+                    reason = str(payload.get("skipped_reason") or "").strip()
+                    if reason:
+                        skip_counts[reason] = skip_counts.get(reason, 0) + 1
+                    if idx % meta_log_every == 0 or idx == len(futures):
+                        logger.info(
+                            "Meta dataset build: %s / %s symbol jobs complete (%s training rows so far)",
+                            idx,
+                            len(futures),
+                            len(records),
+                        )
+        else:
+            for fi, (symbol, frame) in enumerate(fm_items, start=1):
+                payload = _build_meta_records_for_symbol(
+                    symbol=symbol,
+                    frame=frame,
+                    market_scope=self.market_scope,
+                    min_frame=min_frame,
+                    warmup_rows=warmup_rows,
+                    horizon_days=self.horizon_days,
                 )
-                feature_values.update(
-                    {
-                        "symbol": symbol,
-                        "timestamp": pd.Timestamp(ordered.index[idx]),
-                        "direction_label": "long" if direction == "buy" else "short",
-                        "adaptive_horizon_days": horizon_days,
-                        "adaptive_horizon_multiplier": horizon_multiplier,
-                        "take_label": take_label,
-                        "edge_pct": path_stats["edge_pct"],
-                        "drawdown_pct": path_stats["drawdown_pct"],
-                        "edge_ratio": round(float(edge_ratio), 4),
-                        "hit": path_stats["hit"],
-                        "barrier": path_stats["barrier"],
-                    }
-                )
-                records.append(feature_values)
-            if (fi + 1) % meta_log_every == 0:
-                logger.info("Meta dataset build: %s / %s symbols (%s training rows so far)", fi + 1, len(fm_items), len(records))
+                records.extend(payload.get("records", []))
+                reason = str(payload.get("skipped_reason") or "").strip()
+                if reason:
+                    skip_counts[reason] = skip_counts.get(reason, 0) + 1
+                if fi % meta_log_every == 0:
+                    logger.info("Meta dataset build: %s / %s symbols (%s training rows so far)", fi, len(fm_items), len(records))
 
         if not records:
             return pd.DataFrame()
 
+        if skip_counts:
+            logger.info("Meta dataset build skip summary: %s", skip_counts)
         logger.info("Meta dataset build: assembling %s rows...", len(records))
         dataset = pd.DataFrame(records)
         dataset = dataset.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+        dataset = self._apply_cross_sectional_context(dataset)
         logger.info("Meta dataset ready: %s rows", len(dataset))
+        return dataset
+
+    def _apply_cross_sectional_context(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        if dataset.empty:
+            return dataset
+
+        dataset = dataset.copy()
+        dataset["market_bucket"] = dataset["market_bucket"].fillna("us").astype(str)
+        group_keys = ["timestamp", "market_bucket", "direction_label"]
+        group_size = dataset.groupby(group_keys)["symbol"].transform("count").astype(float)
+        dataset["cross_sectional_candidate_count"] = group_size
+
+        def _numeric_series(column: str) -> pd.Series:
+            if column in dataset.columns:
+                return pd.to_numeric(dataset[column], errors="coerce").fillna(0.0)
+            return pd.Series(0.0, index=dataset.index, dtype=float)
+
+        directional_alpha = (
+            0.50 * _numeric_series("alpha_signal")
+            + 0.35 * _numeric_series("event_alpha_signal")
+            + 0.15 * _numeric_series("earnings_propagation_signal")
+        )
+        long_mask = dataset["direction_label"].eq("long")
+        directional_alpha = directional_alpha.where(long_mask, -directional_alpha)
+        directional_momentum = (
+            0.55 * _numeric_series("momentum_20d")
+            + 0.25 * _numeric_series("momentum_60d")
+            + 0.20 * _numeric_series("price_acceleration")
+        )
+        directional_momentum = directional_momentum.where(long_mask, -directional_momentum)
+        directional_sentiment = (
+            0.45 * _numeric_series("sentiment_velocity")
+            + 0.30 * _numeric_series("weighted_sentiment_zscore")
+            + 0.25 * _numeric_series("earnings_tone_signal")
+        )
+        directional_sentiment = directional_sentiment.where(long_mask, -directional_sentiment)
+        directional_volatility = (
+            -0.60 * _numeric_series("realized_vol_21d")
+            -0.25 * _numeric_series("vol_regime_ratio")
+            +0.15 * _numeric_series("vol_ratio_20")
+        )
+        directional_volatility = directional_volatility.where(long_mask, -directional_volatility)
+
+        dataset["__directional_alpha"] = directional_alpha
+        dataset["__directional_momentum"] = directional_momentum
+        dataset["__directional_sentiment"] = directional_sentiment
+        dataset["__directional_volatility"] = directional_volatility
+        dataset["cross_sectional_selection_rank_pct"] = dataset.groupby(group_keys)["__directional_alpha"].rank(
+            pct=True,
+            method="average",
+        )
+        dataset["cross_sectional_conviction_rank_pct"] = dataset.groupby(group_keys)["conviction_score"].rank(
+            pct=True,
+            method="average",
+        )
+        dataset["cross_sectional_sentiment_rank_pct"] = dataset.groupby(group_keys)["__directional_sentiment"].rank(
+            pct=True,
+            method="average",
+        )
+        dataset["cross_sectional_momentum_rank_pct"] = dataset.groupby(group_keys)["__directional_momentum"].rank(
+            pct=True,
+            method="average",
+        )
+        dataset["cross_sectional_volatility_rank_pct"] = dataset.groupby(group_keys)["__directional_volatility"].rank(
+            pct=True,
+            method="average",
+        )
+
+        dataset["__cross_sectional_score"] = (
+            0.34 * dataset["cross_sectional_selection_rank_pct"]
+            + 0.22 * dataset["cross_sectional_momentum_rank_pct"]
+            + 0.18 * dataset["cross_sectional_sentiment_rank_pct"]
+            + 0.14 * dataset["cross_sectional_conviction_rank_pct"]
+            + 0.12 * dataset["cross_sectional_volatility_rank_pct"]
+        )
+        dataset["cross_sectional_score_rank_pct"] = dataset.groupby(group_keys)["__cross_sectional_score"].rank(
+            pct=True,
+            method="average",
+        )
+
+        top_pct = float(os.getenv("META_MODEL_CROSS_SECTIONAL_LABEL_PCT", "0.18") or 0.18)
+        top_pct = float(np.clip(top_pct, 0.02, 0.50))
+        min_candidates = max(3, int(os.getenv("META_MODEL_CROSS_SECTIONAL_MIN_CANDIDATES", "6") or 6))
+        top_cutoff = 1.0 - top_pct
+        small_group_mask = dataset["cross_sectional_candidate_count"] < float(min_candidates)
+        selected_rank_mask = dataset["cross_sectional_score_rank_pct"] >= top_cutoff
+        dataset["take_label"] = (
+            dataset["path_take_label"].astype(int).eq(1)
+            & (small_group_mask | selected_rank_mask)
+        ).astype(int)
+
+        dataset = dataset.drop(
+            columns=[
+                "__directional_alpha",
+                "__directional_momentum",
+                "__directional_sentiment",
+                "__directional_volatility",
+                "__cross_sectional_score",
+            ],
+            errors="ignore",
+        )
         return dataset
 
     def walk_forward_validate(self, dataset: pd.DataFrame) -> Dict:
@@ -1400,27 +1762,31 @@ class MetaModelTrainer:
             return {"status": "failed", "reason": "no_data"}
 
         dates = sorted(pd.to_datetime(dataset["timestamp"]).drop_duplicates().tolist())
-        if len(dates) < (self.min_train_days + 20):
+        plan = self._resolve_walk_forward_windows(dates)
+        if not plan["windows"]:
             return {"status": "failed", "reason": "insufficient_dates"}
 
-        test_span = max(20, len(dates) // (self.walk_forward_folds + 2))
         folds = []
+        skipped_folds: List[Dict[str, object]] = []
         logger.info(
-            "Meta walk-forward: %s unique dates, %s folds, test_span=%s days (no per-fold logs = CPU-bound fits)...",
+            "Meta walk-forward: %s unique dates, requested_folds=%s, valid_folds=%s, test_span=%s days, min_test_days=%s",
             len(dates),
-            self.walk_forward_folds,
-            test_span,
+            plan["requested_folds"],
+            plan["valid_fold_count"],
+            plan["test_span"],
+            plan["min_test_days"],
         )
-        for fold in range(self.walk_forward_folds):
-            train_end = len(dates) - (self.walk_forward_folds - fold) * test_span
-            test_end = min(len(dates), train_end + test_span)
-            if train_end < self.min_train_days or test_end <= train_end:
-                continue
+        if plan.get("notes"):
+            logger.info("Meta walk-forward planning notes: %s", plan["notes"])
+        for window in plan["windows"]:
+            fold_number = int(window["fold_number"])
+            train_end = int(window["train_end"])
+            test_end = int(window["test_end"])
 
             logger.info(
                 "Meta walk-forward fold %s/%s: train_end_idx=%s test_end_idx=%s (fitting long+short bundles)...",
-                fold + 1,
-                self.walk_forward_folds,
+                fold_number,
+                plan["valid_fold_count"],
                 train_end,
                 test_end,
             )
@@ -1429,6 +1795,7 @@ class MetaModelTrainer:
             train_df = dataset[dataset["timestamp"].isin(train_dates)]
             test_df = dataset[dataset["timestamp"].isin(test_dates)]
             if train_df.empty or test_df.empty:
+                skipped_folds.append({"fold": fold_number, "reason": "empty_train_or_test"})
                 continue
             all_true = []
             all_pred = []
@@ -1440,7 +1807,19 @@ class MetaModelTrainer:
                 train_dir = train_df[train_df[mask_column] > 0.5]
                 test_dir = test_df[test_df[mask_column] > 0.5]
                 bundle = self._fit_direction_bundle(train_dir, direction)
-                if bundle is None or test_dir.empty:
+                if bundle is None:
+                    direction_summaries[direction] = {
+                        "train_rows": int(len(train_dir)),
+                        "test_rows": int(len(test_dir)),
+                        "status": "skipped_bundle_unavailable",
+                    }
+                    continue
+                if test_dir.empty:
+                    direction_summaries[direction] = {
+                        "train_rows": int(len(train_dir)),
+                        "test_rows": 0,
+                        "status": "skipped_empty_test_direction",
+                    }
                     continue
 
                 X_test = test_dir[MetaFeatureBuilder.FEATURE_COLUMNS].fillna(0.0)
@@ -1460,6 +1839,8 @@ class MetaModelTrainer:
                 all_true.extend(test_dir["take_label"].astype(int).tolist())
                 all_pred.extend(pred_take.astype(int).tolist())
                 direction_summaries[direction] = {
+                    "status": "ok",
+                    "train_rows": int(len(train_dir)),
                     "test_rows": int(len(test_dir)),
                     "coverage_pct": round(float(pred_take.mean() * 100.0), 2),
                     "decision_threshold": round(float(bundle.decision_threshold), 4),
@@ -1468,13 +1849,15 @@ class MetaModelTrainer:
                 }
 
             if not all_true:
+                skipped_folds.append({"fold": fold_number, "reason": "no_direction_predictions", "directions": direction_summaries})
                 continue
 
             all_true_arr = np.asarray(all_true, dtype=int)
             all_pred_arr = np.asarray(all_pred, dtype=int)
+            edge_draw_ratio = float(np.mean(taken_edges) / max(float(np.mean(taken_drawdown)) if taken_drawdown else 0.35, 0.35))
             folds.append(
                 {
-                    "fold": fold + 1,
+                    "fold": fold_number,
                     "train_rows": int(len(train_df)),
                     "test_rows": int(len(all_true_arr)),
                     "accuracy": round(float(accuracy_score(all_true_arr, all_pred_arr)), 4),
@@ -1483,17 +1866,32 @@ class MetaModelTrainer:
                     "coverage_pct": round(float(all_pred_arr.mean() * 100.0), 2),
                     "taken_avg_edge_pct": round(float(np.mean(taken_edges)) if taken_edges else 0.0, 3),
                     "taken_avg_drawdown_pct": round(float(np.mean(taken_drawdown)) if taken_drawdown else 0.0, 3),
+                    "taken_edge_draw_ratio": round(edge_draw_ratio if taken_edges and taken_drawdown else 0.0, 3),
                     "taken_hit_rate_pct": round(float(np.mean(np.asarray(taken_edges) > 0) * 100.0) if taken_edges else 0.0, 2),
                     "directions": direction_summaries,
                 }
             )
 
         if not folds:
-            return {"status": "failed", "reason": "no_valid_folds"}
+            return {
+                "status": "failed",
+                "reason": "no_valid_folds",
+                "requested_fold_count": int(plan["requested_folds"]),
+                "valid_fold_count": 0,
+                "skipped_folds": skipped_folds,
+                "notes": plan.get("notes", []),
+            }
 
         summary = pd.DataFrame(folds)
         return {
             "status": "ok",
+            "requested_fold_count": int(plan["requested_folds"]),
+            "valid_fold_count": int(len(folds)),
+            "planned_fold_count": int(plan["valid_fold_count"]),
+            "test_span_days": int(plan["test_span"]),
+            "min_test_days": int(plan["min_test_days"]),
+            "skipped_folds": skipped_folds,
+            "notes": plan.get("notes", []),
             "folds": folds,
             "summary": {
                 "mean_accuracy": round(float(summary["accuracy"].mean()), 4),
@@ -1502,6 +1900,7 @@ class MetaModelTrainer:
                 "mean_coverage_pct": round(float(summary["coverage_pct"].mean()), 2),
                 "mean_taken_edge_pct": round(float(summary["taken_avg_edge_pct"].mean()), 3),
                 "mean_taken_drawdown_pct": round(float(summary["taken_avg_drawdown_pct"].mean()), 3),
+                "mean_taken_edge_draw_ratio": round(float(summary["taken_edge_draw_ratio"].mean()), 3),
                 "mean_taken_hit_rate_pct": round(float(summary["taken_hit_rate_pct"].mean()), 2),
             },
         }
@@ -1515,6 +1914,15 @@ class MetaModelTrainer:
             raise ValueError("Meta labels do not contain both classes")
 
         walk_forward = self.walk_forward_validate(dataset)
+        valid_fold_count = int((walk_forward or {}).get("valid_fold_count", 0) or 0)
+        if walk_forward.get("status") != "ok":
+            logger.warning("Meta model walk-forward failed: %s", walk_forward)
+        elif valid_fold_count < TrainedMetaModel._gate_min_valid_folds():
+            logger.warning(
+                "Meta model walk-forward produced only %s valid folds (gate requires %s). Current checkpoint will train but runtime should fall back if prior validated artifacts exist.",
+                valid_fold_count,
+                TrainedMetaModel._gate_min_valid_folds(),
+            )
         logger.info("Meta model: walk-forward done; fitting final deployment bundles (long + short)...")
         bundles: Dict[str, DirectionalMetaArtifacts] = {}
         deployment_rules: Dict[str, Dict[str, float]] = {}
@@ -1533,38 +1941,27 @@ class MetaModelTrainer:
         if not bundles:
             raise ValueError("Failed to train any directional meta bundles")
 
-        if META_DIRECTIONAL_PATH.exists():
-            try:
-                META_DIRECTIONAL_PREVIOUS_PATH.write_bytes(META_DIRECTIONAL_PATH.read_bytes())
-            except Exception:
-                pass
-        if META_REPORT_PATH.exists():
-            try:
-                META_REPORT_PREVIOUS_PATH.write_bytes(META_REPORT_PATH.read_bytes())
-            except Exception:
-                pass
-
-        joblib.dump(
-            {
-                "bundles": {
-                    direction: {
-                        "classifier": bundle.classifier,
-                        "calibrator": bundle.calibrator,
-                        "edge_model": bundle.edge_model,
-                        "drawdown_model": bundle.drawdown_model,
-                    }
-                    for direction, bundle in bundles.items()
-                },
-                "feature_columns": MetaFeatureBuilder.FEATURE_COLUMNS,
+        directional_payload = {
+            "bundles": {
+                direction: {
+                    "classifier": bundle.classifier,
+                    "calibrator": bundle.calibrator,
+                    "edge_model": bundle.edge_model,
+                    "drawdown_model": bundle.drawdown_model,
+                    "decision_threshold": float(bundle.decision_threshold),
+                    "min_expected_edge_pct": float(bundle.min_expected_edge_pct),
+                    "min_edge_ratio": float(bundle.min_edge_ratio),
+                    "direction": bundle.direction,
+                }
+                for direction, bundle in bundles.items()
             },
-            META_DIRECTIONAL_PATH,
-        )
-        with open(META_FEATURES_PATH, "wb") as f:
-            pickle.dump(MetaFeatureBuilder.FEATURE_COLUMNS, f)
-
+            "feature_columns": MetaFeatureBuilder.FEATURE_COLUMNS,
+        }
         report = {
             "status": "ok",
+            "created_at": pd.Timestamp.utcnow().isoformat(),
             "rows": int(len(dataset)),
+            "path_positive_labels": int(dataset["path_take_label"].sum()) if "path_take_label" in dataset.columns else 0,
             "positive_labels": int(dataset["take_label"].sum()),
             "feature_count": len(MetaFeatureBuilder.FEATURE_COLUMNS),
             "direction_rows": {
@@ -1573,20 +1970,129 @@ class MetaModelTrainer:
             },
             "deployment_rules": deployment_rules,
             "walk_forward": walk_forward,
+            "data_span": self._dataset_span(dataset),
             "training_config": {
+                "market_scope": self.market_scope,
                 "rule_objective": os.getenv("META_MODEL_RULE_OBJECTIVE", "precision"),
                 "horizon_days": self.horizon_days,
                 "walk_forward_folds": self.walk_forward_folds,
+                "gate_min_valid_folds": TrainedMetaModel._gate_min_valid_folds(),
                 "min_train_days": self.min_train_days,
                 "min_frame_rows_env": os.getenv("META_MODEL_MIN_FRAME_ROWS", ""),
                 "warmup_rows_env": os.getenv("META_MODEL_WARMUP_ROWS", ""),
+                "cross_sectional_label_pct": os.getenv("META_MODEL_CROSS_SECTIONAL_LABEL_PCT", "0.18"),
+                "cross_sectional_min_candidates": os.getenv("META_MODEL_CROSS_SECTIONAL_MIN_CANDIDATES", "6"),
+                "meta_model_build_workers": _default_meta_build_workers(),
             },
         }
+
+        def _load_report(path: Path) -> Optional[Dict]:
+            if not path.exists():
+                return None
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+
+        def _save_candidate(reason: str, reasons: Optional[List[str]] = None) -> Dict:
+            candidate_report = dict(report)
+            candidate_report["status"] = reason
+            candidate_report["quality_gate"] = {
+                "deployed": False,
+                "rejection_reasons": reasons or [],
+                "candidate_model_path": str(META_DIRECTIONAL_CANDIDATE_PATH),
+                "candidate_report_path": str(META_REPORT_CANDIDATE_PATH),
+            }
+            joblib.dump(directional_payload, META_DIRECTIONAL_CANDIDATE_PATH)
+            META_REPORT_CANDIDATE_PATH.write_text(json.dumps(candidate_report, indent=2))
+            return candidate_report
+
+        report_score = TrainedMetaModel._report_score(report)
+        current_report = _load_report(META_REPORT_PATH)
+        previous_report = _load_report(META_REPORT_PREVIOUS_PATH)
+        current_is_accepted = bool(
+            current_report
+            and META_DIRECTIONAL_PATH.exists()
+            and TrainedMetaModel._report_is_acceptable(current_report)
+        )
+        previous_is_accepted = bool(
+            previous_report
+            and META_DIRECTIONAL_PREVIOUS_PATH.exists()
+            and TrainedMetaModel._report_is_acceptable(previous_report)
+        )
+
+        if not TrainedMetaModel._report_is_acceptable(report):
+            reasons = TrainedMetaModel._report_rejection_reasons(report)
+            candidate_report = _save_candidate("candidate_rejected_by_gate", reasons)
+            logger.warning(
+                "Meta model candidate rejected by quality gate (%s). Production checkpoint preserved; candidate saved to %s",
+                ", ".join(reasons) or "unknown",
+                META_REPORT_CANDIDATE_PATH,
+            )
+            return candidate_report
+
+        accepted_baselines: List[Tuple[str, float]] = []
+        if current_is_accepted:
+            accepted_baselines.append(("current", TrainedMetaModel._report_score(current_report)))
+        if previous_is_accepted:
+            accepted_baselines.append(("previous", TrainedMetaModel._report_score(previous_report)))
+        if accepted_baselines:
+            baseline_label, baseline_score = max(accepted_baselines, key=lambda item: item[1])
+            if report_score < baseline_score:
+                candidate_report = _save_candidate("candidate_regression", [])
+                candidate_report["quality_gate"] = {
+                    **candidate_report.get("quality_gate", {}),
+                    "walk_forward_accepted": True,
+                    "deployed": False,
+                    "new_score": round(float(report_score), 4),
+                    "best_existing_label": baseline_label,
+                    "best_existing_score": round(float(baseline_score), 4),
+                }
+                META_REPORT_CANDIDATE_PATH.write_text(json.dumps(candidate_report, indent=2))
+                logger.warning(
+                    "Meta model candidate passed walk-forward but scored below %s checkpoint (new=%.3f existing=%.3f). Production checkpoint preserved.",
+                    baseline_label,
+                    report_score,
+                    baseline_score,
+                )
+                return candidate_report
+
+        if current_is_accepted:
+            try:
+                META_DIRECTIONAL_PREVIOUS_PATH.write_bytes(META_DIRECTIONAL_PATH.read_bytes())
+            except Exception:
+                pass
+            try:
+                META_REPORT_PREVIOUS_PATH.write_bytes(META_REPORT_PATH.read_bytes())
+            except Exception:
+                pass
+        elif not previous_is_accepted:
+            if META_DIRECTIONAL_PATH.exists():
+                try:
+                    META_DIRECTIONAL_PREVIOUS_PATH.write_bytes(META_DIRECTIONAL_PATH.read_bytes())
+                except Exception:
+                    pass
+            if META_REPORT_PATH.exists():
+                try:
+                    META_REPORT_PREVIOUS_PATH.write_bytes(META_REPORT_PATH.read_bytes())
+                except Exception:
+                    pass
+
+        report["quality_gate"] = {
+            "walk_forward_accepted": True,
+            "deployed": True,
+            "score": round(float(report_score), 4),
+            "rejection_reasons": [],
+        }
+        joblib.dump(directional_payload, META_DIRECTIONAL_PATH)
+        with open(META_FEATURES_PATH, "wb") as f:
+            pickle.dump(MetaFeatureBuilder.FEATURE_COLUMNS, f)
         META_REPORT_PATH.write_text(json.dumps(report, indent=2))
         logger.info(
             "Meta model trained: "
             f"{report['rows']} rows | {report['positive_labels']} positive labels | "
-            f"{report['feature_count']} features | bundles {','.join(sorted(bundles.keys()))}"
+            f"{report['feature_count']} features | bundles {','.join(sorted(bundles.keys()))} | "
+            f"quality score {report_score:.3f}"
         )
         return report
 
@@ -1599,13 +2105,16 @@ class InstitutionalTrainingPipeline:
         meta_take_threshold: float = 0.52,
         meta_walk_forward_folds: int = 6,
         meta_min_train_days: int = 180,
+        market_scope: str = "all",
     ):
+        self.market_scope = _normalize_market_scope(market_scope)
         self.xgb_retrainer = EventAwareXGBoostRetrainer(horizon=xgb_horizon)
         self.meta_trainer = MetaModelTrainer(
             horizon_days=meta_horizon,
             take_threshold=meta_take_threshold,
             walk_forward_folds=meta_walk_forward_folds,
             min_train_days=meta_min_train_days,
+            market_scope=self.market_scope,
         )
 
     def train_all(self, feature_matrices: Dict[str, pd.DataFrame], run_optuna: bool = False) -> Dict:
@@ -1643,9 +2152,31 @@ class InstitutionalTrainingPipeline:
                 stats.get("rows", 0),
             )
 
+        effective_feature_matrices = _filter_feature_matrices_for_market(
+            effective_feature_matrices,
+            self.market_scope,
+        )
+        if not effective_feature_matrices:
+            raise ValueError(f"No feature matrices matched market_scope={self.market_scope}")
+
         n_sym = len(effective_feature_matrices)
-        logger.info("Institutional pipeline: phase 1/2 XGBoost (%s feature matrices)...", n_sym)
-        xgb_report = self.xgb_retrainer.retrain(effective_feature_matrices, run_optuna=run_optuna)
+        logger.info(
+            "Institutional pipeline: market scope %s (%s feature matrices after filter)",
+            self.market_scope,
+            n_sym,
+        )
+        skip_xgb_retrain = str(os.getenv("SKIP_XGB_RETRAIN", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        if skip_xgb_retrain:
+            logger.info("Institutional pipeline: phase 1/2 XGBoost skipped via SKIP_XGB_RETRAIN=1")
+            xgb_report: Dict[str, object] = {"status": "skipped", "reason": "SKIP_XGB_RETRAIN=1"}
+            if XGB_REPORT_PATH.exists():
+                try:
+                    xgb_report["previous_report"] = json.loads(XGB_REPORT_PATH.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    xgb_report["previous_report_load_error"] = str(exc)
+        else:
+            logger.info("Institutional pipeline: phase 1/2 XGBoost (%s feature matrices)...", n_sym)
+            xgb_report = self.xgb_retrainer.retrain(effective_feature_matrices, run_optuna=run_optuna)
         logger.info("Institutional pipeline: phase 2/2 meta model...")
         meta_report = self.meta_trainer.train(effective_feature_matrices)
         return {

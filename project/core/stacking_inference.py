@@ -78,6 +78,11 @@ class StackingInferenceEngine:
         self._available = False
         self._last_missing_check: float = 0.0   # throttle re-checks when unavailable
         self._logged_missing: set = set()        # only log each missing file once
+        self._status: Dict[str, Any] = {
+            "available": False,
+            "mode": "missing",
+            "missing_files": list(_BASE_FILES.values()) + [_META_FILE],
+        }
 
     # ---------------------------------------------------------------- loading
 
@@ -92,6 +97,10 @@ class StackingInferenceEngine:
         if self._file_mtime(_META_FILE) != self._mtimes.get(_META_FILE, 0.0):
             return True
         return False
+
+    def describe_status(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._status)
 
     def load(self, *, force: bool = False) -> bool:
         """Returns True if at least one base model is available."""
@@ -157,6 +166,22 @@ class StackingInferenceEngine:
             self._base = new_base
             self._meta = new_meta
             self._available = len(new_base) > 0
+            missing_files = [
+                fname
+                for fname in list(_BASE_FILES.values()) + [_META_FILE]
+                if not (self.checkpoints_dir / fname).exists()
+            ]
+            mode = "binary_bundle"
+            if len(new_base) == 0:
+                mode = "missing"
+            self._status = {
+                "available": self._available,
+                "mode": mode,
+                "models_loaded": sorted(list(new_base.keys())),
+                "meta_loaded": new_meta is not None,
+                "missing_files": missing_files,
+                "checkpoints_dir": str(self.checkpoints_dir),
+            }
             return self._available
 
     # ------------------------------------------------------ feature alignment

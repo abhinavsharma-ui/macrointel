@@ -9,9 +9,20 @@ Usage:
     from pipeline.universe import get_sector, get_universe
 """
 
+import json
+import logging
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
+
+try:
+    from zoneinfo import ZoneInfo
+    _EASTERN_TZ = ZoneInfo("America/New_York")
+except Exception:
+    _EASTERN_TZ = timezone(timedelta(hours=-5))
+
+logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
 # NSE Universe — 200 symbols
@@ -209,7 +220,19 @@ def _read_symbol_file(path_value: str) -> List[str]:
     if not path.exists():
         return []
     try:
-        return _parse_symbol_blob(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+        if path.suffix.lower() == ".json":
+            payload = json.loads(raw)
+            if isinstance(payload, list):
+                return _dedupe_symbols(payload)
+            if isinstance(payload, dict):
+                for key in ("symbols", "universe", "tickers", "data"):
+                    value = payload.get(key)
+                    if isinstance(value, list):
+                        return _dedupe_symbols(value)
+                return []
+            return []
+        return _parse_symbol_blob(raw)
     except Exception:
         return []
 
@@ -225,11 +248,92 @@ def _env_symbols(*env_names: str) -> List[str]:
 
 _DEFAULT_US_OFFICIAL_PATH = "data/universe_us_official.txt"
 _DEFAULT_NSE_OFFICIAL_PATH = "data/universe_nse_official.txt"
+_DEFAULT_BYBIT_OFFICIAL_PATH = "data/crypto_symbols_bybit_official.txt"
 
 
 def _official_file_enabled() -> bool:
     raw = os.getenv("OFFICIAL_UNIVERSE_LOAD", "1")
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_crypto_symbol(symbol: str) -> bool:
+    token = str(symbol or "").strip().upper()
+    return token.endswith(("USDT", "USDC", "BUSD"))
+
+
+def _normalize_universe_mode(mode: str) -> str:
+    mode_key = str(mode or "").strip().lower()
+    if mode_key == "normal":
+        return "us"
+    return mode_key
+
+
+def _load_screened_universe() -> List[str]:
+    """
+    Load today's screened universe from screener/output/YYYY-MM-DD/.
+
+    Default behavior is intentionally narrow: only the US screener output is
+    used unless SCREENED_UNIVERSE_GROUPS is set explicitly. That keeps
+    UNIVERSE_MODE=screened from silently mixing India or crypto symbols into a
+    US-only paper run.
+    """
+    import csv
+
+    today = datetime.now(_EASTERN_TZ).strftime("%Y-%m-%d")
+    # screener/ sits one level above project/
+    screener_output = Path(__file__).resolve().parents[2] / "screener" / "output" / today
+
+    if not screener_output.exists():
+        return []
+
+    file_map = {
+        "us_stocks": lambda t: t,
+        "indian_stocks": lambda t: t if t.endswith(".NS") else t + ".NS",
+        "crypto": lambda t: t,
+    }
+    requested_groups = [
+        group.strip().lower()
+        for group in os.getenv("SCREENED_UNIVERSE_GROUPS", "us_stocks").replace(";", ",").split(",")
+        if group.strip()
+    ] or ["us_stocks"]
+
+    symbols: List[str] = []
+    for prefix in requested_groups:
+        transform = file_map.get(prefix)
+        if transform is None:
+            continue
+        matches = sorted(screener_output.glob(f"{prefix}_top*.csv"))
+        if not matches:
+            continue
+        csv_path = matches[-1]
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    ticker = str(row.get("ticker", "")).strip()
+                    if ticker:
+                        symbols.append(transform(ticker))
+        except Exception:
+            pass
+
+    universe = _dedupe_symbols(symbols)
+    if not universe:
+        logger.warning(
+            "UNIVERSE_MODE=screened but no screener output was available for groups=%s on %s",
+            ",".join(requested_groups),
+            today,
+        )
+    return universe
+
+
+def _filter_symbols_for_mode(values: List[str], mode: str) -> List[str]:
+    mode_key = _normalize_universe_mode(mode)
+    symbols = _dedupe_symbols(values)
+    if mode_key in {"nse", "daytrade_nse", "throughput_nse"}:
+        return [symbol for symbol in symbols if symbol.endswith(".NS")]
+    if mode_key in {"us", "daytrade_us", "throughput_us"}:
+        return [symbol for symbol in symbols if not symbol.endswith(".NS") and not _is_crypto_symbol(symbol)]
+    return symbols
 
 
 def _resolve_project_path(rel: str) -> str:
@@ -249,13 +353,13 @@ def _resolve_project_path(rel: str) -> str:
     return rel
 
 
-def _extra_universe_symbols(mode: str) -> List[str]:
-    mode_key = str(mode or "").lower()
+def _extra_universe_symbols(mode: str, include_official: bool = True) -> List[str]:
+    mode_key = _normalize_universe_mode(mode)
     extras: List[str] = []
     extras.extend(_env_symbols("UNIVERSE_EXTRA_SYMBOLS"))
     extras.extend(_read_symbol_file(os.getenv("UNIVERSE_EXTRA_FILE", "")))
 
-    load_official = _official_file_enabled()
+    load_official = include_official and _official_file_enabled()
 
     if mode_key in {"full", "us", "daytrade", "daytrade_us", "throughput", "throughput_us"}:
         extras.extend(_env_symbols("US_UNIVERSE_EXTRA_SYMBOLS"))
@@ -276,6 +380,13 @@ def _extra_universe_symbols(mode: str) -> List[str]:
         extras.extend(_read_symbol_file(os.getenv("DAY_TRADE_EXTRA_FILE", "")))
 
     return _dedupe_symbols(extras)
+
+
+def _configured_universe_symbols(mode: str) -> List[str]:
+    configured = _read_symbol_file(os.getenv("UNIVERSE_FILE_PATH", ""))
+    if not configured:
+        return []
+    return _filter_symbols_for_mode(configured, mode)
 
 # ─────────────────────────────────────────────────────────────
 # Sector mapping
@@ -337,34 +448,66 @@ def get_universe(mode: str = "core") -> list:
           'us'    — US only
           'nse'   — NSE only
     """
-    if mode == "core":
+    mode_key = _normalize_universe_mode(mode)
+
+    if mode_key == "crypto":
+        universe = _read_symbol_file(_resolve_project_path(_DEFAULT_BYBIT_OFFICIAL_PATH))
+        return _dedupe_symbols(universe)
+
+    # -- Screened mode: load today's pre-market screener output --------------
+    if mode_key == "screened":
+        screened = _load_screened_universe()
+        if len(screened) < 10:
+            logger.warning(
+                "Screened universe has %d symbols (< 10) -- falling back to "
+                "get_universe('us') to prevent empty run.",
+                len(screened),
+            )
+            return get_universe("us")
+        return screened
+
+    configured_override = _configured_universe_symbols(mode_key)
+    include_official_extras = not bool(configured_override)
+    official_us_symbols: List[str] = []
+    if mode_key == "us" and _official_file_enabled():
+        official_us_symbols = _read_symbol_file(
+            _resolve_project_path(os.getenv("US_UNIVERSE_OFFICIAL_FILE", _DEFAULT_US_OFFICIAL_PATH))
+        )
+        if official_us_symbols:
+            include_official_extras = False
+
+    if mode_key == "core":
         universe = CORE_SYMBOLS
-    elif mode == "full":
+    elif configured_override:
+        universe = configured_override
+    elif mode_key == "full":
         universe = ALL_SYMBOLS
-    elif mode == "us":
-        universe = US_SYMBOLS
-    elif mode == "nse":
+    elif mode_key == "us":
+        universe = official_us_symbols or US_SYMBOLS
+    elif mode_key == "nse":
         universe = NSE_SYMBOLS
-    elif mode == "daytrade":
+    elif mode_key == "daytrade":
         universe = DAY_TRADE_EXPANDED_SYMBOLS if _expanded_day_trade_enabled() else DAY_TRADE_SYMBOLS
-    elif mode == "daytrade_us":
+    elif mode_key == "daytrade_us":
         universe = DAY_TRADE_US_SYMBOLS
-    elif mode == "daytrade_nse":
+    elif mode_key == "daytrade_nse":
         universe = DAY_TRADE_NSE_SYMBOLS
-    elif mode == "throughput":
+    elif mode_key == "throughput":
         universe = _dedupe_symbols(ALL_SYMBOLS + DAY_TRADE_EXPANDED_SYMBOLS + LEADER_SYMBOLS)
-    elif mode == "throughput_us":
+    elif mode_key == "throughput_us":
         universe = _dedupe_symbols(
             US_SYMBOLS + DAY_TRADE_US_SYMBOLS + [symbol for symbol in LEADER_SYMBOLS if not symbol.endswith(".NS")]
         )
-    elif mode == "throughput_nse":
+    elif mode_key == "throughput_nse":
         universe = _dedupe_symbols(
             NSE_SYMBOLS + DAY_TRADE_NSE_SYMBOLS + [symbol for symbol in LEADER_SYMBOLS if symbol.endswith(".NS")]
         )
     else:
         universe = CORE_SYMBOLS
 
-    universe = _dedupe_symbols(list(universe) + _extra_universe_symbols(mode))
+    universe = _dedupe_symbols(
+        list(universe) + _extra_universe_symbols(mode_key, include_official=include_official_extras)
+    )
 
     try:
         limit = int(float(os.getenv("UNIVERSE_LIMIT", "0") or 0))
@@ -573,69 +716,14 @@ COMPANY_NAME_OVERRIDES = {
 
 
 def get_market(symbol: str) -> str:
-    if symbol.upper().endswith(("USDT", "USDC", "BUSD")):
-        return "crypto"
-    return "nse" if symbol.endswith(".NS") else "us"
+    if symbol.upper().endswith(('USDT', 'USDC', 'BUSD')):
+        return 'crypto'
+    return 'nse' if symbol.endswith('.NS') else 'us'
 
 
 def get_company_name(symbol: str) -> str:
     override = COMPANY_NAME_OVERRIDES.get(symbol)
     if override:
         return override
-    base = symbol.replace(".NS", "").replace("^", "").replace("-", " ").strip()
+    base = symbol.replace('.NS', '').replace('^', '').replace('-', ' ').strip()
     return base.title() if base else symbol
-
-
-def get_symbol_aliases(symbol: str) -> List[str]:
-    company_name = get_company_name(symbol)
-    sector = get_sector(symbol)
-    raw = symbol.replace(".NS", "").replace("^", "").strip()
-    aliases = [
-        company_name,
-        raw,
-        raw.replace("-", " "),
-        company_name.replace("&", "and"),
-        f"{company_name} stock",
-    ]
-    if symbol.endswith(".NS"):
-        aliases.extend(
-            [
-                f"{company_name} ltd",
-                f"{company_name} limited",
-                f"{company_name} india",
-            ]
-        )
-    if sector and sector != "Other":
-        aliases.extend(
-            [
-                f"{company_name} {sector}",
-                f"{raw} {sector}",
-        ]
-    )
-    if symbol.upper().endswith(("USDT", "USDC", "BUSD")):
-        base_asset = raw
-        for suffix in ("USDT", "USDC", "BUSD"):
-            if base_asset.endswith(suffix):
-                base_asset = base_asset[: -len(suffix)]
-                break
-        if base_asset:
-            aliases.extend(
-                [
-                    base_asset,
-                    f"{base_asset} token",
-                    f"{company_name} token",
-                    f"{base_asset} coin",
-                ]
-            )
-    seen = set()
-    deduped: List[str] = []
-    for alias in aliases:
-        normalized = " ".join(str(alias).split()).strip()
-        if not normalized:
-            continue
-        key = normalized.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(normalized)
-    return deduped

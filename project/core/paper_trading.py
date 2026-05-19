@@ -17,7 +17,7 @@ import json
 import hashlib
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List
 from dataclasses import dataclass, field
 from enum import Enum
@@ -27,6 +27,16 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+try:
+    from zoneinfo import ZoneInfo
+    _EASTERN_TZ = ZoneInfo("America/New_York")
+except Exception:
+    _EASTERN_TZ = timezone(timedelta(hours=-5))
+
+
+def _eastern_date_str() -> str:
+    return datetime.now(_EASTERN_TZ).strftime("%Y-%m-%d")
 
 
 class OrderSide(str, Enum):
@@ -100,7 +110,7 @@ class VirtualBroker:
         max_position_pct: float = 0.10,   # Max 10% per position
         max_drawdown_pct: float = 0.20,   # Kill switch at 20% portfolio drawdown
         max_daily_loss_pct: float = 0.02,
-        max_consecutive_losses: int = 3,
+        max_consecutive_losses: int = 8,
         market: str = "US",
         session_guardrails_enabled: bool = True,
     ):
@@ -116,9 +126,14 @@ class VirtualBroker:
         self.positions: Dict[str, Position] = {}
         self.orders: List[Order] = []
         self.trade_log: List[Dict] = []
+        self._start_time = datetime.now(timezone.utc)
+        self._consecutive_loss_warmup = timedelta(minutes=10)
+        self._kill_switch_cooldown = timedelta(hours=2)
+        self._consecutive_losses = 0
         self._kill_switch_activated = False
         self._kill_switch_reason = ""
         self._kill_switch_day = ""
+        self._kill_switch_activated_at: Optional[datetime] = None
         self._peak_portfolio_value = initial_capital
         self._state_path = Path(os.getenv("PAPER_BROKER_STATE_PATH", "data/paper_broker_state.json"))
         self._realism_enabled = os.getenv("PAPER_EXECUTION_REALISM_ENABLED", "1").strip().lower() not in {"0", "false", "off"}
@@ -159,6 +174,48 @@ class VirtualBroker:
             return float(value)
         except Exception:
             return float(default)
+
+    def _is_consecutive_loss_warmup_active(self) -> bool:
+        return datetime.now(timezone.utc) - self._start_time < self._consecutive_loss_warmup
+
+    def _set_kill_switch(
+        self,
+        *,
+        activated: bool,
+        reason: str = "",
+        day: str = "",
+        activated_at: Optional[datetime] = None,
+    ) -> None:
+        self._kill_switch_activated = bool(activated)
+        self._kill_switch_reason = str(reason or "")
+        self._kill_switch_day = str(day or "")
+        self._kill_switch_activated_at = activated_at if self._kill_switch_activated else None
+
+    def _reset_consecutive_loss_guardrail(self, reset_reason: str) -> None:
+        was_active = self._kill_switch_activated and self._kill_switch_reason == "consecutive losses"
+        self._consecutive_losses = 0
+        if was_active:
+            logger.warning(reset_reason)
+            self._set_kill_switch(activated=False)
+
+    def _record_closed_trade_result(self, realized_pnl: float, closing_fill: bool) -> None:
+        if not closing_fill:
+            return
+        if realized_pnl < -1e-9:
+            self._consecutive_losses += 1
+        else:
+            self._consecutive_losses = 0
+
+    def _persist_if_state_changed(self, previous_state: tuple) -> None:
+        current_state = (
+            self._kill_switch_activated,
+            self._kill_switch_reason,
+            self._kill_switch_day,
+            self._kill_switch_activated_at.isoformat() if self._kill_switch_activated_at else None,
+            self._consecutive_losses,
+        )
+        if current_state != previous_state:
+            self._persist_state()
 
     # ── Order execution ───────────────────────────────────────
 
@@ -223,7 +280,9 @@ class VirtualBroker:
         order.filled_at = datetime.now(timezone.utc)
         order.status = OrderStatus.FILLED
 
+        closing_fill = self._is_closing_fill(order)
         realized_pnl = self._update_position(order)
+        self._record_closed_trade_result(realized_pnl, closing_fill)
         self._update_cash(order, fill_price, commission)
         self.orders.append(order)
 
@@ -253,6 +312,7 @@ class VirtualBroker:
         self.trade_log.append(trade_record)
         self._refresh_session_risk_controls()
         self._persist_state()
+        self._append_daily_trade_csv(trade_record)
 
         logger.info(
             f"FILL: {order.side.upper()} {order.quantity}/{requested_quantity}x {order.symbol} "
@@ -260,6 +320,53 @@ class VirtualBroker:
         )
 
         return {"status": "filled", "trade": trade_record}
+
+    def _append_daily_trade_csv(self, trade_record: Dict) -> None:
+        """Append each fill to logs/paper_trades_YYYY-MM-DD.csv for audit trail.
+
+        Columns: timestamp, symbol, side, qty, fill_price, pnl_running
+        pnl_running = portfolio_value - initial_capital (running total P&L)
+        """
+        try:
+            log_dir = Path(os.getenv("PAPER_TRADE_LOG_DIR", "logs"))
+            if not log_dir.is_absolute():
+                # Resolve relative to the project/ directory (parent of core/).
+                log_dir = Path(__file__).resolve().parent.parent / log_dir
+            log_dir.mkdir(parents=True, exist_ok=True)
+            date_str = _eastern_date_str()
+            csv_path = log_dir / f"paper_trades_{date_str}.csv"
+            new_file = not csv_path.exists()
+            pnl_running = float(trade_record.get("portfolio_value", self.initial_capital)) - float(self.initial_capital)
+            with open(csv_path, "a", encoding="utf-8", newline="") as fh:
+                if new_file:
+                    fh.write("timestamp,symbol,side,qty,fill_price,pnl_running\n")
+                side_val = trade_record.get("side", "")
+                if hasattr(side_val, "value"):
+                    side_val = side_val.value
+                filled_at = trade_record.get("filled_at", "")
+                if isinstance(filled_at, datetime):
+                    ts_dt = filled_at if filled_at.tzinfo else filled_at.replace(tzinfo=timezone.utc)
+                    ts_str = ts_dt.astimezone(_EASTERN_TZ).isoformat()
+                elif isinstance(filled_at, str) and filled_at:
+                    try:
+                        ts_dt = datetime.fromisoformat(filled_at)
+                        if ts_dt.tzinfo is None:
+                            ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+                        ts_str = ts_dt.astimezone(_EASTERN_TZ).isoformat()
+                    except ValueError:
+                        ts_str = filled_at
+                else:
+                    ts_str = datetime.now(_EASTERN_TZ).isoformat()
+                fh.write(
+                    f"{ts_str},"
+                    f"{trade_record.get('symbol', '')},"
+                    f"{side_val},"
+                    f"{trade_record.get('quantity', 0)},"
+                    f"{trade_record.get('fill_price', 0)},"
+                    f"{round(pnl_running, 4)}\n"
+                )
+        except Exception as exc:
+            logger.debug(f"paper_trades CSV append failed: {exc}")
 
     def update_prices(self, prices: Dict[str, float]) -> Dict:
         """
@@ -284,9 +391,12 @@ class VirtualBroker:
         current_drawdown = (pv - self._peak_portfolio_value) / self._peak_portfolio_value
 
         if current_drawdown <= -self.max_drawdown_pct and not self._kill_switch_activated:
-            self._kill_switch_activated = True
-            self._kill_switch_reason = "max drawdown breached"
-            self._kill_switch_day = datetime.now(timezone.utc).date().isoformat()
+            self._set_kill_switch(
+                activated=True,
+                reason="max drawdown breached",
+                day=datetime.now(timezone.utc).date().isoformat(),
+                activated_at=datetime.now(timezone.utc),
+            )
             logger.critical(
                 f"⚠️  KILL SWITCH ACTIVATED: Portfolio drawdown {current_drawdown:.1%} "
                 f"exceeds limit {-self.max_drawdown_pct:.1%}"
@@ -473,7 +583,11 @@ class VirtualBroker:
             "session": f"today • {closed_trades} closed paper trades",
             "lifetime": f"lifetime • {closed_trades} closed paper trades",
         }
-        win_rate_pct = round((wins / max(closed_trades, 1)) * 100.0, 1) if closed_trades else 0.0
+        # Exclude breakeven trades from the win-rate denominator so that
+        # a large number of flat/zero-PnL closes (e.g. 63 breakevens) does
+        # not dilute the rate toward 0%. Win rate = wins / (wins + losses).
+        decisive_trades = wins + losses
+        win_rate_pct = round((wins / max(decisive_trades, 1)) * 100.0, 1) if decisive_trades else 0.0
         return {
             "basis": basis,
             "label": labels.get(basis, f"{closed_trades} closed paper trades"),
@@ -504,58 +618,96 @@ class VirtualBroker:
 
         daily_realized_pnl = float(sum(todays_closed_trades))
         daily_loss_pct = max(0.0, -daily_realized_pnl / max(self.initial_capital, 1.0))
-        consecutive_losses = 0
-        for pnl in reversed(todays_closed_trades):
-            if pnl < 0:
-                consecutive_losses += 1
-            else:
-                break
-        return daily_realized_pnl, daily_loss_pct, consecutive_losses
+        return daily_realized_pnl, daily_loss_pct, int(self._consecutive_losses)
 
     def _maybe_reset_session_kill_switch(self):
+        previous_state = (
+            self._kill_switch_activated,
+            self._kill_switch_reason,
+            self._kill_switch_day,
+            self._kill_switch_activated_at.isoformat() if self._kill_switch_activated_at else None,
+            self._consecutive_losses,
+        )
         if not self._kill_switch_activated:
             return
         if self._kill_switch_reason not in {"daily loss limit", "consecutive losses"}:
             return
         if not self.session_guardrails_enabled:
-            self._kill_switch_activated = False
-            self._kill_switch_reason = ""
-            self._kill_switch_day = ""
+            self._set_kill_switch(activated=False)
+            self._consecutive_losses = 0
+            self._persist_if_state_changed(previous_state)
             return
-        today_key = datetime.now(timezone.utc).date().isoformat()
-        if self._kill_switch_day != today_key:
-            self._kill_switch_activated = False
-            self._kill_switch_reason = ""
-            self._kill_switch_day = ""
+        now = datetime.now(timezone.utc)
+        if self._kill_switch_reason == "consecutive losses":
+            activated_at = self._kill_switch_activated_at or now
+            if now - activated_at >= self._kill_switch_cooldown:
+                self._reset_consecutive_loss_guardrail(
+                    "Consecutive-loss kill switch auto-reset after 2 hour cooldown"
+                )
+                self._persist_if_state_changed(previous_state)
+                return
+            if self._is_consecutive_loss_warmup_active():
+                self._set_kill_switch(activated=False)
+                self._persist_if_state_changed(previous_state)
+                return
+        today_key = now.date().isoformat()
+        if self._kill_switch_reason == "daily loss limit" and self._kill_switch_day != today_key:
+            self._set_kill_switch(activated=False)
+        self._persist_if_state_changed(previous_state)
 
     def _refresh_session_risk_controls(self):
+        previous_state = (
+            self._kill_switch_activated,
+            self._kill_switch_reason,
+            self._kill_switch_day,
+            self._kill_switch_activated_at.isoformat() if self._kill_switch_activated_at else None,
+            self._consecutive_losses,
+        )
         if self._kill_switch_activated and self._kill_switch_reason == "max drawdown breached":
             return
         if not self.session_guardrails_enabled:
             if self._kill_switch_reason in {"daily loss limit", "consecutive losses"}:
-                self._kill_switch_activated = False
-                self._kill_switch_reason = ""
-                self._kill_switch_day = ""
+                self._set_kill_switch(activated=False)
+                self._consecutive_losses = 0
+            self._persist_if_state_changed(previous_state)
             return
         _, daily_loss_pct, consecutive_losses = self._session_risk_snapshot()
         today_key = datetime.now(timezone.utc).date().isoformat()
         if daily_loss_pct >= self.max_daily_loss_pct:
-            self._kill_switch_activated = True
-            self._kill_switch_reason = "daily loss limit"
-            self._kill_switch_day = today_key
+            if not (self._kill_switch_activated and self._kill_switch_reason == "daily loss limit"):
+                self._set_kill_switch(
+                    activated=True,
+                    reason="daily loss limit",
+                    day=today_key,
+                    activated_at=datetime.now(timezone.utc),
+                )
         elif consecutive_losses >= self.max_consecutive_losses:
-            self._kill_switch_activated = True
-            self._kill_switch_reason = "consecutive losses"
-            self._kill_switch_day = today_key
+            if self._is_consecutive_loss_warmup_active():
+                if self._kill_switch_reason == "consecutive losses":
+                    self._set_kill_switch(activated=False)
+            elif not (self._kill_switch_activated and self._kill_switch_reason == "consecutive losses"):
+                self._set_kill_switch(
+                    activated=True,
+                    reason="consecutive losses",
+                    day=today_key,
+                    activated_at=datetime.now(timezone.utc),
+                )
         elif (
             self._kill_switch_reason in {"daily loss limit", "consecutive losses"}
-            and self._kill_switch_day == today_key
-            and daily_loss_pct < self.max_daily_loss_pct
-            and consecutive_losses < self.max_consecutive_losses
+            and (
+                (
+                    self._kill_switch_reason == "daily loss limit"
+                    and self._kill_switch_day == today_key
+                    and daily_loss_pct < self.max_daily_loss_pct
+                )
+                or (
+                    self._kill_switch_reason == "consecutive losses"
+                    and consecutive_losses < self.max_consecutive_losses
+                )
+            )
         ):
-            self._kill_switch_activated = False
-            self._kill_switch_reason = ""
-            self._kill_switch_day = ""
+            self._set_kill_switch(activated=False)
+        self._persist_if_state_changed(previous_state)
 
     # ── Internal helpers ──────────────────────────────────────
 
@@ -898,6 +1050,14 @@ class VirtualBroker:
             )
         return realized_pnl
 
+    def _is_closing_fill(self, order: Order) -> bool:
+        position_key = self._order_position_key(order)
+        pos = self.positions.get(position_key)
+        if pos is None or abs(getattr(pos, "quantity", 0.0) or 0.0) < 1e-9:
+            return False
+        qty = order.quantity if order.side == OrderSide.BUY else -order.quantity
+        return (pos.quantity > 0) != (qty > 0)
+
     def _update_cash(self, order: Order, fill_price: float, commission: float):
         """Update cash balance after trade."""
         trade_value = abs(order.quantity) * fill_price
@@ -914,11 +1074,14 @@ class VirtualBroker:
             "max_drawdown_pct": self.max_drawdown_pct,
             "max_daily_loss_pct": self.max_daily_loss_pct,
             "max_consecutive_losses": self.max_consecutive_losses,
+            "consecutive_losses": self._consecutive_losses,
             "market": self.market,
             "session_guardrails_enabled": self.session_guardrails_enabled,
             "kill_switch_active": self._kill_switch_activated,
+            "kill_switch_activated": self._kill_switch_activated,
             "kill_switch_reason": self._kill_switch_reason,
             "kill_switch_day": self._kill_switch_day,
+            "kill_switch_activated_at": self._kill_switch_activated_at.isoformat() if self._kill_switch_activated_at else None,
             "peak_portfolio_value": self._peak_portfolio_value,
             "positions": {
                 position_key: {
@@ -973,13 +1136,25 @@ class VirtualBroker:
             self.max_drawdown_pct = float(payload.get("max_drawdown_pct", self.max_drawdown_pct))
             self.max_daily_loss_pct = float(payload.get("max_daily_loss_pct", self.max_daily_loss_pct))
             self.max_consecutive_losses = int(payload.get("max_consecutive_losses", self.max_consecutive_losses))
+            self._consecutive_losses = int(
+                payload.get(
+                    "consecutive_losses",
+                    self._rebuild_consecutive_losses_from_trade_log(payload.get("trade_log") or []),
+                )
+            )
             self.market = payload.get("market", self.market)
             self.session_guardrails_enabled = bool(
                 payload.get("session_guardrails_enabled", self.session_guardrails_enabled)
             )
-            self._kill_switch_activated = bool(payload.get("kill_switch_active", self._kill_switch_activated))
+            self._kill_switch_activated = bool(
+                payload.get("kill_switch_activated", payload.get("kill_switch_active", self._kill_switch_activated))
+            )
             self._kill_switch_reason = str(payload.get("kill_switch_reason", self._kill_switch_reason) or "")
             self._kill_switch_day = str(payload.get("kill_switch_day", self._kill_switch_day) or "")
+            activated_at_raw = payload.get("kill_switch_activated_at")
+            self._kill_switch_activated_at = (
+                datetime.fromisoformat(activated_at_raw) if activated_at_raw else None
+            )
             self._peak_portfolio_value = float(payload.get("peak_portfolio_value", self._peak_portfolio_value))
 
             self.positions = {}
@@ -1028,3 +1203,16 @@ class VirtualBroker:
         except Exception as exc:
             logger.warning(f"Paper broker state load failed: {exc}")
 
+    @staticmethod
+    def _rebuild_consecutive_losses_from_trade_log(trade_log: List[Dict]) -> int:
+        consecutive_losses = 0
+        for trade in reversed(list(trade_log or [])):
+            if not trade.get("filled_at"):
+                continue
+            realized_pnl = float(trade.get("realized_pnl", 0.0) or 0.0)
+            if realized_pnl < -1e-9:
+                consecutive_losses += 1
+                continue
+            if abs(realized_pnl) >= 1e-9:
+                break
+        return consecutive_losses
