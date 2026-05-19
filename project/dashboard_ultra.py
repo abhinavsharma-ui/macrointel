@@ -46,6 +46,11 @@ SIGNALS = [
     BASE / "reports/fixed_return_live_paper.json",
     BASE / "project/reports/fixed_return_live_paper.json",
 ]
+SCORES = [
+    ROOT / "reports/fixed_return_daily_scores.json",
+    BASE / "reports/fixed_return_daily_scores.json",
+    BASE / "project/reports/fixed_return_daily_scores.json",
+]
 TRADES = list(
     dict.fromkeys(
         Path(p).resolve()
@@ -279,6 +284,77 @@ def signal_payload():
     return {
         "signal_date": str(data.get("signal_date") or date.today().isoformat()) if isinstance(data, dict) else date.today().isoformat(),
         "signals": rows,
+    }
+
+
+def _open_symbol_set() -> set:
+    raw = read_json(OPEN, [])
+    if isinstance(raw, dict):
+        raw = raw.get("positions", [])
+        raw = list(raw.values()) if isinstance(raw, dict) else raw
+    if not isinstance(raw, list):
+        raw = []
+    out = set()
+    for pos in raw:
+        if not isinstance(pos, dict):
+            continue
+        if str(pos.get("status", "open")).lower() not in {"open", "active"}:
+            continue
+        sym = str(pos.get("symbol") or "").strip().upper()
+        if sym:
+            out.add(sym)
+    return out
+
+
+def diagnostic_examples(limit: int = 10) -> dict:
+    scores = read_json(SCORES, {})
+    rows = scores.get("scores", []) if isinstance(scores, dict) else []
+    source = "score_cache" if rows else "daily_signals"
+    if not rows:
+        data = read_json(SIGNALS, {})
+        rows = data.get("signals", []) if isinstance(data, dict) else []
+        scores = data if isinstance(data, dict) else {}
+
+    try:
+        scripts_dir = str(ROOT / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import fixed_return_daily_signals as sig
+
+        threshold = float(scores.get("threshold") or sig.SIG_THRESHOLD)
+        is_allowed = sig.is_allowed_symbol
+    except Exception:
+        threshold = float(scores.get("threshold") or 0.61)
+        is_allowed = lambda symbol: True
+
+    open_symbols = _open_symbol_set()
+    examples = []
+    for index, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            continue
+        sym = str(row.get("symbol") or "").strip().upper()
+        if not sym or sym in open_symbols or not is_allowed(sym):
+            continue
+        probability = num(row.get("probability"))
+        if probability < threshold:
+            continue
+        entry = num(row.get("entry_price") or row.get("price") or row.get("close"))
+        examples.append(
+            {
+                "symbol": sym,
+                "probability": round(probability, 6),
+                "rank": int(row.get("ml_rank") or row.get("rank") or index),
+                "entry_price": round(entry, 4),
+                "source": source,
+            }
+        )
+    examples = sorted(examples, key=lambda item: item["probability"], reverse=True)[: max(1, limit)]
+    return {
+        "ok": True,
+        "source": source,
+        "threshold": threshold,
+        "open_symbols": sorted(open_symbols),
+        "examples": examples,
     }
 
 
@@ -1321,10 +1397,20 @@ def api_symbol_diagnostic():
             refresh=bool(data.get("refresh", True)),
             run_llm_filter=bool(data.get("run_llm", True)),
             history_days=int(data.get("history_days") or 950),
+            force_llm=bool(data.get("force_llm", False)),
         )
         return jsonify(payload), 200 if payload.get("ok") else 400
     except Exception as exc:
         return jsonify({"ok": False, "symbol": symbol, "error": str(exc)}), 500
+
+
+@app.route("/api/symbol_diagnostic_examples")
+def api_symbol_diagnostic_examples():
+    try:
+        limit = int(request.args.get("limit") or 10)
+        return jsonify(diagnostic_examples(limit=limit))
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 HTML = r"""
@@ -1372,8 +1458,8 @@ tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--hover))}
 .swatch{width:20px;height:20px;border-radius:999px;border:1px solid var(--line);cursor:pointer;background:var(--sw);box-shadow:inset 0 0 0 2px rgba(255,255,255,.10);transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease}
 .swatch:hover{transform:translateY(-1px)}
 .swatch.active{border-color:var(--ink);box-shadow:0 0 0 3px color-mix(in srgb,var(--sw) 28%,transparent),0 0 18px color-mix(in srgb,var(--sw) 34%,transparent)}
-.symbolSearch{display:grid;gap:10px}.searchRow{display:grid;grid-template-columns:minmax(120px,220px) auto auto 1fr;gap:8px;align-items:center}.searchInput{height:36px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--ink);font:800 14px ui-monospace,SFMono-Regular,Consolas,monospace;padding:0 11px;text-transform:uppercase}.checkLabel{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:750}.diagHero{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.diagCell{background:color-mix(in srgb,var(--accent) 6%,var(--panel2));border:1px solid color-mix(in srgb,var(--accent) 16%,var(--soft));border-radius:8px;padding:10px}.diagCell strong{display:block;font:800 18px ui-monospace,SFMono-Regular,Consolas,monospace;margin-top:5px}.gateGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.gatePill{border:1px solid var(--soft);border-radius:8px;padding:8px;background:var(--panel2)}.gatePill b{display:block;font:800 11px ui-monospace,SFMono-Regular,Consolas,monospace}.gatePill span{display:block;color:var(--muted);font-size:11px;margin-top:4px;overflow:hidden;text-overflow:ellipsis}.diagText{line-height:1.45;color:var(--muted);word-break:break-word}
-@media(max-width:1200px){.diagHero,.gateGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.searchRow{grid-template-columns:1fr auto auto}}@media(max-width:720px){.diagHero,.gateGrid,.searchRow{grid-template-columns:1fr}}
+.symbolSearch{display:grid;gap:10px}.searchRow{display:grid;grid-template-columns:minmax(120px,220px) auto auto auto 1fr;gap:8px;align-items:center}.searchInput{height:36px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--ink);font:800 14px ui-monospace,SFMono-Regular,Consolas,monospace;padding:0 11px;text-transform:uppercase}.checkLabel{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:750}.exampleGrid{display:flex;gap:8px;flex-wrap:wrap}.exampleBtn{border:1px solid var(--soft);background:var(--panel2);color:var(--ink);border-radius:999px;padding:6px 9px;font:800 11px ui-monospace,SFMono-Regular,Consolas,monospace;cursor:pointer}.exampleBtn:hover{border-color:var(--accent2)}.diagHero{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.diagCell{background:color-mix(in srgb,var(--accent) 6%,var(--panel2));border:1px solid color-mix(in srgb,var(--accent) 16%,var(--soft));border-radius:8px;padding:10px}.diagCell strong{display:block;font:800 18px ui-monospace,SFMono-Regular,Consolas,monospace;margin-top:5px}.gateGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.gatePill{border:1px solid var(--soft);border-radius:8px;padding:8px;background:var(--panel2)}.gatePill b{display:block;font:800 11px ui-monospace,SFMono-Regular,Consolas,monospace}.gatePill span{display:block;color:var(--muted);font-size:11px;margin-top:4px;overflow:hidden;text-overflow:ellipsis}.diagText{line-height:1.45;color:var(--muted);word-break:break-word}
+@media(max-width:1200px){.diagHero,.gateGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.searchRow{grid-template-columns:1fr auto auto auto}}@media(max-width:720px){.diagHero,.gateGrid,.searchRow{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -1396,7 +1482,7 @@ tr:hover td{background:color-mix(in srgb,var(--accent) 7%,var(--hover))}
 <div class="card kpi"><div class="label">Win Rate</div><div class="value" id="wr">--</div><div class="sub" id="tc">backtest 60.6%</div></div>
 <div class="card kpi"><div class="label">Drawdown</div><div class="value" id="dd">0%</div><div class="sub">from peak</div></div>
 </div>
-<div class="card symbolSearch" style="margin-bottom:12px"><div class="titleRow"><div><div class="title">Stock Diagnostic</div><div class="sub">single-symbol model, gates and LLM judgment</div></div><div class="badge" id="diagBadge">idle</div></div><div class="searchRow"><input class="searchInput" id="diagSymbol" placeholder="AAPL" autocomplete="off"><button class="softBtn" id="diagRun" type="button" onclick="runSymbolDiagnostic()">RUN CHECK</button><label class="checkLabel"><input id="diagLlm" type="checkbox" checked> LLM</label><span class="sub" id="diagStatus">ready</span></div><div id="diagResult" class="diagText">No symbol checked yet.</div></div>
+<div class="card symbolSearch" style="margin-bottom:12px"><div class="titleRow"><div><div class="title">Stock Diagnostic</div><div class="sub">single-symbol model, gates and LLM judgment</div></div><div class="badge" id="diagBadge">idle</div></div><div class="searchRow"><input class="searchInput" id="diagSymbol" placeholder="AAPL" autocomplete="off"><button class="softBtn" id="diagRun" type="button" onclick="runSymbolDiagnostic()">RUN CHECK</button><label class="checkLabel"><input id="diagLlm" type="checkbox" checked> LLM</label><label class="checkLabel"><input id="diagForceLlm" type="checkbox"> Force LLM</label><span class="sub" id="diagStatus">ready</span></div><div class="exampleGrid" id="diagExamples"></div><div id="diagResult" class="diagText">No symbol checked yet.</div></div>
 <div class="grid mainGrid" style="margin-bottom:12px">
 <div class="card"><div class="titleRow"><div><div class="title">Cumulative P&L</div><div class="sub">realized profit curve</div></div><div class="badge" id="pnlBadge">--</div></div><div class="chartBox"><canvas id="pnlChart"></canvas></div></div>
 <div class="card"><div class="titleRow"><div><div class="title">Portfolio Value</div><div class="sub">paper equity path</div></div><div class="badge" id="portBadge">--</div></div><div class="chartBox"><canvas id="portChart"></canvas></div></div>
@@ -1489,9 +1575,15 @@ function dot(on,bad=false){return `<span class="statusDot ${bad?'bad':on?'on':'w
 function renderAlerts(id,rows){$(id).innerHTML=rows.length?rows.map(a=>`<div class="alertItem ${a.level||''}"><b>${a.scope}</b> ${a.text}</div>`).join(''):'<div class="alertItem good">No active flags</div>'}
 function renderSymbolDiagnostic(d){
  if(!d||!d.ok){$('diagResult').innerHTML=`<div class="alertItem danger">${esc(d&&d.error?d.error:'diagnostic failed')}</div>`;$('diagBadge').textContent='failed';return}
- const sig=d.signal||{}, rank=d.rank||{}, llm=d.llm||{}, feature=d.feature||{}, source=d.source||{};
+ const sig=d.signal||{}, rank=d.rank||{}, llm=d.llm||{}, feature=d.feature||{}, source=d.source||{}, fc=d.friend_context||{};
  const verdict=d.verdict||'--', ok=!!d.would_trade;
- $('diagBadge').textContent=ok?'allowed':'blocked';
+ $('diagBadge').textContent=ok?'allowed':(llm.research_only?'research':'blocked');
+ const mlMargin=fc.ml_margin==null?'--':(Number(fc.ml_margin)>0?'+':'')+Number(fc.ml_margin).toFixed(3);
+ const topGap=fc.top_n_margin==null?'--':(Number(fc.top_n_margin)>0?'+':'')+Number(fc.top_n_margin).toFixed(3);
+ const tech=fc.technical_snapshot||{};
+ const techBits=Object.keys(tech).slice(0,7).map(k=>`${k}: ${tech[k]}`).join(' | ')||'technical snapshot unavailable';
+ const llmLabel=llm.forced?'Research LLM':llm.ran?'LLM':'LLM';
+ const riskPlan=(fc.target_pct||'--')+'% PT / '+(fc.stop_pct||'--')+'% SL / '+(fc.hold_days||'--')+'d';
  $('diagResult').innerHTML=[
   `<div class=diagHero>`,
   `<div class=diagCell><div class=label>Verdict</div><strong class="${ok?'green':'red'}">${esc(verdict)}</strong></div>`,
@@ -1502,17 +1594,28 @@ function renderSymbolDiagnostic(d){
   `</div>`,
   `<div class=gateGrid>${(d.gates||[]).map(g=>`<div class=gatePill><b class="${g.passed?'green':'red'}">${g.passed?'PASS':'FAIL'} ${esc(g.name)}</b><span>${esc(g.value!=null?g.value+' - '+(g.detail||''):g.detail||'')}</span></div>`).join('')}</div>`,
   `<div class=stackRows>`,
-  `${kv([['threshold',(d.model||{}).threshold,'blue'],['top N',(d.model||{}).top_n,'blue'],['top N cutoff',rank.top_n_cutoff_probability==null?'--':Number(rank.top_n_cutoff_probability).toFixed(3),'amber'],['feature rows',feature.rows||0,'blue'],['feature date',feature.feature_date||'--','blue'],['LLM',llm.ran?(llm.decision||llm.status||'ran'):(llm.status||'not run'),llm.decision==='skip'?'red':llm.ran?'green':'amber']])}`,
+  `${kv([['threshold',(d.model||{}).threshold,'blue'],['ML margin',mlMargin,Number(fc.ml_margin||0)>=0?'green':'red'],['top N',(d.model||{}).top_n,'blue'],['top N cutoff',rank.top_n_cutoff_probability==null?'--':Number(rank.top_n_cutoff_probability).toFixed(3),'amber'],['top N gap',topGap,Number(fc.top_n_margin||0)>=0?'green':'amber'],['rank source',rank.exact_full_rescore?'cron score cache':(rank.method||'saved report'),'blue'],['size',fc.position_size_pct==null?'--':fc.position_size_pct+'%','blue'],['risk plan',riskPlan,'blue'],['feature rows',feature.rows||0,'blue'],['feature date',feature.feature_date||'--','blue'],['LLM',llm.ran?(llm.decision||llm.status||'ran'):(llm.status||'not run'),llm.decision==='skip'?'red':llm.ran?'green':'amber']])}`,
   `</div>`,
-  `<div class="alertItem ${llm.decision==='skip'?'danger':llm.ran?'good':'warn'}"><b>LLM</b> ${esc(llm.reason||llm.status||'no LLM decision')}</div>`
+  `<div class="alertItem ${ok?'good':llm.research_only?'warn':'warn'}"><b>System read</b> ${esc((fc.notes||[]).join(' | ')||fc.pipeline_stage||'--')}</div>`,
+  `<div class="alertItem"><b>Portable fields</b> ${esc(techBits)}</div>`,
+  `<div class="alertItem ${llm.decision==='skip'?'danger':llm.ran?'good':'warn'}"><b>${llmLabel}</b> ${esc(llm.reason||llm.status||'no LLM decision')}</div>`
  ].join('');
+}
+function pickDiagSymbol(sym){$('diagSymbol').value=sym;$('diagStatus').textContent='loaded example '+sym}
+async function loadDiagnosticExamples(){
+ try{
+  const d=await (await fetch('/api/symbol_diagnostic_examples?limit=8&ts='+Date.now())).json();
+  const rows=(d.examples||[]);
+  $('diagExamples').innerHTML=rows.length?rows.map(x=>`<button class=exampleBtn type=button onclick="pickDiagSymbol('${esc(x.symbol)}')">${esc(x.symbol)} ${Number(x.probability||0).toFixed(3)}</button>`).join(''):'<span class=sub>No non-open ML-pass examples found</span>';
+ }catch(e){$('diagExamples').innerHTML='<span class=sub>examples unavailable</span>'}
 }
 async function runSymbolDiagnostic(){
  const sym=($('diagSymbol').value||'').trim().toUpperCase();
  if(!sym){$('diagStatus').textContent='enter a symbol';return}
  const btn=$('diagRun'); btn.disabled=true; btn.textContent='RUNNING...'; $('diagBadge').textContent='working'; $('diagStatus').textContent='fetching and scoring '+sym; $('diagResult').innerHTML='<div class=empty>Running full diagnostic...</div>';
  try{
-  const r=await fetch('/api/symbol_diagnostic',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym,refresh:true,run_llm:$('diagLlm').checked})});
+  const force=$('diagForceLlm').checked;
+  const r=await fetch('/api/symbol_diagnostic',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym,refresh:true,run_llm:$('diagLlm').checked||force,force_llm:force})});
   const d=await r.json(); renderSymbolDiagnostic(d); $('diagStatus').textContent=r.ok?'done':'failed';
  }catch(e){
   renderSymbolDiagnostic({ok:false,error:String(e)}); $('diagStatus').textContent='failed';
@@ -1521,6 +1624,7 @@ async function runSymbolDiagnostic(){
  }
 }
 if($('diagSymbol')){$('diagSymbol').addEventListener('keydown',e=>{if(e.key==='Enter')runSymbolDiagnostic()})}
+if($('diagExamples'))loadDiagnosticExamples();
 async function loadOperator(){
  const o=await (await fetch('/api/operator?ts='+Date.now())).json(); const c=o.clock||{}, e=o.engine||{}, f=o.filters||{}, r=o.risk||{}, real=o.reality||{}, sh=o.nse_shadow||{};
  $('operatorSummary').innerHTML=(o.summary||[]).map(x=>`<span class=badge>${x}</span>`).join('');

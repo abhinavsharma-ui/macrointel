@@ -77,8 +77,9 @@ SIG_REGIME_SOFT_HALF      = os.getenv("SIG_REGIME_SOFT_HALF", "0") != "0"
 
 LLM_MODEL = os.getenv("LLM_FILTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
 RAW_LLM_API_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEY","").split(",") if k.strip()]
-LLM_RESERVE_LAST_KEY_FOR_SEARCH = os.getenv("LLM_RESERVE_LAST_KEY_FOR_SEARCH", "1") != "0"
-LLM_SEARCH_API_KEYS = RAW_LLM_API_KEYS[-1:] if RAW_LLM_API_KEYS else []
+LLM_RESERVE_LAST_KEY_FOR_SEARCH = os.getenv("LLM_RESERVE_LAST_KEY_FOR_SEARCH", "0") == "1"
+LLM_SEARCH_USE_ALL_KEYS = os.getenv("LLM_SEARCH_USE_ALL_KEYS", "1") != "0"
+LLM_SEARCH_API_KEYS = list(reversed(RAW_LLM_API_KEYS)) if LLM_SEARCH_USE_ALL_KEYS else RAW_LLM_API_KEYS[-1:]
 LLM_API_KEYS = RAW_LLM_API_KEYS[:-1] if LLM_RESERVE_LAST_KEY_FOR_SEARCH and len(RAW_LLM_API_KEYS) > 1 else RAW_LLM_API_KEYS
 _llm_key_index = 0
 _llm_dead_key_indices = set()

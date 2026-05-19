@@ -27,6 +27,11 @@ os.chdir(ROOT)
 import fixed_return_daily_signals as sig  # noqa: E402
 from intraday_universe_refresh import fetch_live_prices, recompute_core_features, update_feature_file  # noqa: E402
 
+_SEARCH_LLM_KEY_INDEX = 0
+_SEARCH_LLM_DEAD_INDICES: set[int] = set()
+_SEARCH_LLM_DEAD_AT: dict[int, float] = {}
+_SEARCH_LLM_KEY_COUNT = 0
+
 
 def norm_symbol(value: str) -> str:
     return Path(str(value).strip()).stem.replace("_US", "").replace(".US", "").upper()
@@ -363,6 +368,7 @@ def earnings_calendar_gate(symbol: str) -> dict:
 
 
 def run_llm(symbol: str, signal: dict, row: dict, signal_date: str) -> dict:
+    global _SEARCH_LLM_KEY_INDEX, _SEARCH_LLM_DEAD_INDICES, _SEARCH_LLM_DEAD_AT, _SEARCH_LLM_KEY_COUNT
     if not sig.LLM_FILTER_ENABLED:
         return {"ran": False, "status": "disabled"}
     search_keys = list(getattr(sig, "LLM_SEARCH_API_KEYS", []) or [])
@@ -371,6 +377,19 @@ def run_llm(symbol: str, signal: dict, row: dict, signal_date: str) -> dict:
         search_keys = raw[-1:] if raw else []
     if not search_keys:
         return {"ran": False, "status": "keys_missing"}
+    if _SEARCH_LLM_KEY_COUNT != len(search_keys):
+        _SEARCH_LLM_KEY_INDEX = 0
+        _SEARCH_LLM_DEAD_INDICES = set()
+        _SEARCH_LLM_DEAD_AT = {}
+        _SEARCH_LLM_KEY_COUNT = len(search_keys)
+    else:
+        ttl = num(os.getenv("SYMBOL_DIAG_DEAD_KEY_TTL_SECONDS", "1800"), 1800.0)
+        if ttl > 0:
+            now = time.time()
+            expired = {idx for idx, marked_at in _SEARCH_LLM_DEAD_AT.items() if now - marked_at >= ttl}
+            if expired:
+                _SEARCH_LLM_DEAD_INDICES = _SEARCH_LLM_DEAD_INDICES - expired
+                _SEARCH_LLM_DEAD_AT = {idx: ts for idx, ts in _SEARCH_LLM_DEAD_AT.items() if idx not in expired}
     spy_pct, qqq_pct = sig.market_context_pct()
     sector = sig.get_sector(symbol) or ""
     headlines = sig.fetch_news(symbol, signal_date)
@@ -386,12 +405,20 @@ def run_llm(symbol: str, signal: dict, row: dict, signal_date: str) -> dict:
     old_index = getattr(sig, "_llm_key_index", 0)
     old_dead = set(getattr(sig, "_llm_dead_key_indices", set()))
     old_sleep = os.environ.get("LLM_TOOL_SLEEP_SECONDS")
+    dead_after = set(_SEARCH_LLM_DEAD_INDICES)
     try:
         sig.LLM_API_KEYS = search_keys
-        sig._llm_key_index = 0
-        sig._llm_dead_key_indices = set()
+        sig._llm_key_index = _SEARCH_LLM_KEY_INDEX
+        sig._llm_dead_key_indices = set(_SEARCH_LLM_DEAD_INDICES)
         os.environ["LLM_TOOL_SLEEP_SECONDS"] = os.getenv("SYMBOL_DIAG_LLM_TOOL_SLEEP_SECONDS", "0.35")
         decisions = sig.call_llm_filter([candidate], spy_pct, qqq_pct, 1)
+        dead_after = set(getattr(sig, "_llm_dead_key_indices", set()))
+        _SEARCH_LLM_KEY_INDEX = getattr(sig, "_llm_key_index", 0)
+        now = time.time()
+        for idx in dead_after:
+            _SEARCH_LLM_DEAD_AT.setdefault(idx, now)
+        _SEARCH_LLM_DEAD_AT = {idx: ts for idx, ts in _SEARCH_LLM_DEAD_AT.items() if idx in dead_after}
+        _SEARCH_LLM_DEAD_INDICES = set(dead_after)
         sig._save_news_cache()
         sig._save_sector_cache()
     finally:
@@ -404,9 +431,10 @@ def run_llm(symbol: str, signal: dict, row: dict, signal_date: str) -> dict:
             os.environ["LLM_TOOL_SLEEP_SECONDS"] = old_sleep
     decision = decisions.get(symbol) or decisions.get(symbol.upper()) or {}
     if not decision:
+        status = "search_llm_keys_exhausted_or_rate_limited" if len(dead_after) >= len(search_keys) else "no_structured_decision"
         return {
             "ran": True,
-            "status": "no_structured_decision",
+            "status": status,
             "duration_seconds": round(time.time() - started, 2),
             "candidate": candidate,
         }
@@ -419,6 +447,75 @@ def run_llm(symbol: str, signal: dict, row: dict, signal_date: str) -> dict:
         "confidence": str(decision.get("confidence", "medium")).lower().strip(),
         "raw": decision,
         "candidate": candidate,
+    }
+
+
+def portable_context(symbol: str, signal: dict, row: dict, rank: dict, gates: list[dict], sector: str) -> dict:
+    gate_map = {str(g.get("name")): bool(g.get("passed")) for g in gates}
+    failed = [str(g.get("name")) for g in gates if not g.get("passed")]
+    threshold = sig.SIG_THRESHOLD
+    probability = num(signal.get("probability"))
+    cutoff = rank.get("top_n_cutoff_probability")
+    top_n_gap = None if cutoff is None else round(probability - num(cutoff), 6)
+    target_pct = sig.PROFIT_TARGET_PCT
+    stop_pct = sig.STOP_LOSS_PCT
+
+    tech_keys = [
+        "pct_today",
+        "rsi_14",
+        "trend_10d",
+        "pct_from_52w_high",
+        "return_5d",
+        "return_10d",
+        "return_20d",
+        "adv20_dollar_vol",
+        "iv_pct",
+        "put_call_ratio",
+        "short_pct_of_float",
+    ]
+    technical = {}
+    for key in tech_keys:
+        if key in row and row.get(key) is not None:
+            technical[key] = round(num(row.get(key)), 4)
+
+    if not failed:
+        pipeline_stage = "passes_all_pre_trade_gates"
+    elif "ml_threshold" in failed or "top_n" in failed:
+        pipeline_stage = "research_candidate_only"
+    else:
+        pipeline_stage = "hard_blocked_before_llm"
+
+    notes = [
+        f"ML probability {probability:.3f} vs threshold {threshold:.3f}",
+        f"Target {target_pct:.2f}% / stop {stop_pct:.2f}% / hold {sig.HOLD_DAYS} business days",
+    ]
+    if top_n_gap is not None:
+        notes.append(f"Gap to latest top-N cutoff {top_n_gap:+.3f}")
+    if sector:
+        notes.append(f"Sector: {sector}")
+    if failed:
+        notes.append("Failed gates: " + ", ".join(failed))
+
+    return {
+        "symbol": symbol,
+        "pipeline_stage": pipeline_stage,
+        "passes_ml_threshold": gate_map.get("ml_threshold", False),
+        "passes_top_n": gate_map.get("top_n", False),
+        "failed_gates": failed,
+        "ml_threshold": threshold,
+        "ml_margin": round(probability - threshold, 6),
+        "top_n_cutoff_probability": cutoff,
+        "top_n_margin": top_n_gap,
+        "rank_method": rank.get("method"),
+        "rank_exact_full_rescore": bool(rank.get("exact_full_rescore")),
+        "position_size_pct": round(num(signal.get("position_pct")) * 100.0, 4),
+        "target_pct": target_pct,
+        "stop_pct": stop_pct,
+        "reward_to_risk": round(target_pct / stop_pct, 3) if stop_pct else None,
+        "hold_days": sig.HOLD_DAYS,
+        "sector": sector,
+        "technical_snapshot": technical,
+        "notes": notes,
     }
 
 
@@ -442,7 +539,13 @@ def final_verdict(gates: list[dict], llm: dict) -> tuple[str, bool]:
     return "allowed_before_llm", True
 
 
-def diagnose_symbol(symbol: str, refresh: bool = True, run_llm_filter: bool = True, history_days: int = 950) -> dict:
+def diagnose_symbol(
+    symbol: str,
+    refresh: bool = True,
+    run_llm_filter: bool = True,
+    history_days: int = 950,
+    force_llm: bool = False,
+) -> dict:
     symbol = norm_symbol(symbol)
     if not symbol or not symbol.replace(".", "").isalnum():
         return {"ok": False, "error": "invalid symbol"}
@@ -511,17 +614,25 @@ def diagnose_symbol(symbol: str, refresh: bool = True, run_llm_filter: bool = Tr
         "sector", "ml_threshold", "top_n", "earnings_features", "earnings_calendar",
     }
     pre_llm_failed = [g["name"] for g in gates if g["name"] in pre_llm_gate_names and not g.get("passed")]
-    should_run_llm = run_llm_filter and not pre_llm_failed
-    llm = (
-        run_llm(symbol, signal, row, signal_date)
-        if should_run_llm
-        else {
+    force_ignored = [name for name in pre_llm_failed if name in {"ml_threshold", "top_n"}]
+    force_blockers = [name for name in pre_llm_failed if name not in {"ml_threshold", "top_n"}]
+    should_run_llm = run_llm_filter and (not pre_llm_failed or (force_llm and not force_blockers))
+    if should_run_llm:
+        llm = run_llm(symbol, signal, row, signal_date)
+        llm["forced"] = bool(force_llm and force_ignored)
+        llm["research_only"] = bool(force_llm and force_ignored)
+        llm["ignored_failed_gates"] = force_ignored
+        llm["blocking_failed_gates"] = force_blockers
+    else:
+        llm = {
             "ran": False,
             "status": "not_run_actual_pipeline_failed_" + (pre_llm_failed[0] if pre_llm_failed else "llm_disabled"),
             "failed_pre_llm_gates": pre_llm_failed,
+            "force_llm_requested": bool(force_llm),
+            "blocking_failed_gates": force_blockers,
         }
-    )
     verdict, would_trade = final_verdict(gates, llm)
+    friend_context = portable_context(symbol, signal, row, rank, gates, sector)
 
     payload = {
         "ok": True,
@@ -544,6 +655,7 @@ def diagnose_symbol(symbol: str, refresh: bool = True, run_llm_filter: bool = Tr
         "rank": rank,
         "gates": gates,
         "pre_llm_failed_gates": pre_llm_failed,
+        "friend_context": friend_context,
         "earnings_features": earnings_features,
         "earnings_calendar": earnings_calendar,
         "llm": llm,
@@ -572,6 +684,7 @@ def main() -> int:
     parser.add_argument("symbol")
     parser.add_argument("--no-refresh", action="store_true")
     parser.add_argument("--no-llm", action="store_true")
+    parser.add_argument("--force-llm", action="store_true", help="Run LLM for research even when ML/top-N gates fail.")
     parser.add_argument("--history-days", type=int, default=950)
     args = parser.parse_args()
     result = diagnose_symbol(
@@ -579,6 +692,7 @@ def main() -> int:
         refresh=not args.no_refresh,
         run_llm_filter=not args.no_llm,
         history_days=args.history_days,
+        force_llm=args.force_llm,
     )
     print(json.dumps(result, indent=2))
     return 0 if result.get("ok") else 1
