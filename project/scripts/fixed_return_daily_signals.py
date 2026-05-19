@@ -58,6 +58,11 @@ SECTOR_METADATA_CANDIDATES = [
     Path("data/symbol_sectors.csv"),
 ]
 SECTOR_CACHE_PATH = Path("data/sector_cache.json")
+SYMBOL_BLOCKLIST_FILES = [
+    Path(os.getenv("SIG_SYMBOL_BLOCKLIST", "data/blocklist.txt")),
+    Path(os.getenv("SIG_ETF_BLOCKLIST", "data/etf_blocklist.txt")),
+    Path(os.getenv("SIG_LEVERAGED_ETF_BLACKLIST", "data/leveraged_etf_blacklist.txt")),
+]
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 LLM_FILTER_ENABLED = os.getenv("LLM_FILTER_ENABLED", "1") != "0"
@@ -87,6 +92,30 @@ _sector_cache = None
 _sector_cache_dirty = False
 _news_cache = None
 _news_cache_dirty = False
+_blocked_symbols = None
+
+
+def _load_blocked_symbols():
+    global _blocked_symbols
+    if _blocked_symbols is not None:
+        return _blocked_symbols
+    blocked = set()
+    for path in SYMBOL_BLOCKLIST_FILES:
+        try:
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                raw = line.split("#", 1)[0].strip()
+                if raw:
+                    blocked.add(norm_sym(raw))
+        except Exception as exc:
+            print(f"WARN blocklist read failed {path}: {exc}", flush=True)
+    _blocked_symbols = blocked
+    return _blocked_symbols
+
+
+def is_allowed_symbol(symbol):
+    return norm_sym(symbol) not in _load_blocked_symbols()
 
 
 def _load_metadata_sectors():
@@ -730,7 +759,7 @@ def allowed_symbols():
     if RUNTIME_STATE.exists():
         try:
             j = json.load(open(RUNTIME_STATE))
-            base = {str(k).upper() for k in (j.get("signal_store") or {}).keys()}
+            base = {norm_sym(k) for k in (j.get("signal_store") or {}).keys() if is_allowed_symbol(k)}
         except Exception:
             base = set()
     eff_min_adv = MIN_ADV * (1.0 - ADV_CUT)
@@ -743,6 +772,8 @@ def allowed_symbols():
         sym = norm_sym(p.name)
         if sym.endswith((".NS", ".BO", ".NSE", ".BSE")):
             continue
+        if not is_allowed_symbol(sym):
+            continue
         try:
             df = read_feature_file(p)
             if df is None:
@@ -754,7 +785,7 @@ def allowed_symbols():
                 rows.append((adv, sym))
         except Exception:
             continue
-    expanded = {s for _, s in sorted(rows, reverse=True)[:EXPANDED_CAP]}
+    expanded = {s for _, s in sorted(rows, reverse=True)[:EXPANDED_CAP] if is_allowed_symbol(s)}
     return (base | expanded) if base else expanded
 
 def spy_vol():
@@ -984,6 +1015,8 @@ def latest_rows(features, allowed):
                 continue
         except NameError:
             pass
+        if allowed and sym not in allowed:
+            continue
         if price < MIN_PRICE or adv < MIN_ADV:
             continue
         if EXCLUDE_SECTORS_LOWER:
