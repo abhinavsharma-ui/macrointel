@@ -484,23 +484,63 @@ class OptionsBacktester:
         """
         Synthetic option price via Black-Scholes when the contract isn't
         in the chain on check_date. Uses entry IV (held constant) as sigma.
-        This lets us apply exit rules even between chain snapshots.
+
+        Inlines the BSM formula directly to avoid circular-import issues with
+        options/__init__.py importing backtester at startup.
         """
+        dte = (pd.Timestamp(trade.expiry_date) - check_date).days
         try:
-            dte = (pd.Timestamp(trade.expiry_date) - check_date).days
+            from scipy.stats import norm as _norm
+
             if dte <= 0:
-                return 0.0
+                if trade.option_type == "call":
+                    return max(0.0, current_stock - trade.strike)
+                return max(0.0, trade.strike - current_stock)
+
+            s_price = float(current_stock)
+            strike = float(trade.strike)
+            time_to_expiry = dte / 365.0
+            risk_free = 0.053
             sigma = max(trade.iv_at_entry / 100.0, 0.05)
-            result = price_option(
-                S=current_stock,
-                K=trade.strike,
-                T=dte,
-                sigma=sigma,
-                option_type=trade.option_type,
+
+            d1 = (
+                np.log(s_price / strike)
+                + (risk_free + 0.5 * sigma ** 2) * time_to_expiry
+            ) / (sigma * np.sqrt(time_to_expiry))
+            d2 = d1 - sigma * np.sqrt(time_to_expiry)
+
+            if trade.option_type == "call":
+                price = (
+                    s_price * _norm.cdf(d1)
+                    - strike * np.exp(-risk_free * time_to_expiry) * _norm.cdf(d2)
+                )
+            else:
+                price = (
+                    strike * np.exp(-risk_free * time_to_expiry) * _norm.cdf(-d2)
+                    - s_price * _norm.cdf(-d1)
+                )
+
+            return float(max(price, 0.0))
+        except Exception as exc:
+            logger.warning(
+                "BSM inline failed for %s %s K=%s: %s",
+                trade.symbol,
+                trade.option_type,
+                trade.strike,
+                exc,
             )
-            return result.price
-        except Exception:
-            return None
+            sigma = max(trade.iv_at_entry / 100.0, 0.05)
+            try:
+                result = price_option(
+                    S=current_stock,
+                    K=trade.strike,
+                    T=max(dte, 0),
+                    sigma=sigma,
+                    option_type=trade.option_type,
+                )
+                return result.price
+            except Exception:
+                return None
 
     def _evaluate_exit(
         self,
