@@ -438,7 +438,7 @@ TOOLS = [
     {"type":"function","function":{"name":"check_price_momentum","description":"Return 10-day trend (up/down/flat), RSI-14, pct from 52w high/low. Gates G3 and G6.","parameters":{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}}},
     {"type":"function","function":{"name":"check_sector_performance","description":"Return 5-day return of sector ETF. Gate G4: >-2% required.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"sector":{"type":"string"}},"required":["symbol","sector"]}}},
     {"type":"function","function":{"name":"analyze_news_risk","description":"Classify headlines: HARD_STOP / ELEVATED / NEUTRAL / POSITIVE_CATALYST. Gate G5: no HARD_STOP.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"headlines":{"type":"array","items":{"type":"string"}}},"required":["symbol","headlines"]}}},
-    {"type":"function","function":{"name":"assess_trade_setup","description":"Holistic setup score 0-100. <40 lean SKIP, 40-65 REDUCE_HALF, >65 PROCEED.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"probability":{"type":"number"},"pct_today":{"type":"number"},"spy_pct":{"type":"number"},"qqq_pct":{"type":"number"},"sector":{"type":"string"}},"required":["symbol","probability"]}}},
+    {"type":"function","function":{"name":"assess_trade_setup","description":"Holistic setup score 0-100. <40 lean SKIP, 40-55 lean REDUCE_HALF, >55 lean PROCEED. Lean is advisory — gate failures override it.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"probability":{"type":"number"},"pct_today":{"type":"number"},"spy_pct":{"type":"number"},"qqq_pct":{"type":"number"},"sector":{"type":"string"}},"required":["symbol","probability"]}}},
     {"type":"function","function":{"name":"check_catalyst_events","description":"Return pre-news catalyst evidence for SYMBOL: insider clusters, 8-Ks, 13D activist filings, biotech trial diffs, gov contracts, unusual options volume. Returns event_count and pre_news_score (0..1). High pre_news_score (>=0.5) means informed money is positioning ahead of a catalyst — strong buy signal.","parameters":{"type":"object","properties":{"symbol":{"type":"string"},"days":{"type":"integer","default":30}},"required":["symbol"]}}},
 ]
 _per_symbol_iv = {}  # symbol -> iv_pct; populated by check_options_iv
@@ -538,7 +538,8 @@ def _handle_tool_call(name, args):
         if sp<-1: score-=10
         if qp<-1: score-=10
         score=max(0,min(100,score))
-        return _j.dumps({"score":round(score,1),"status":"ok"})
+        lean="SKIP" if score<40 else ("REDUCE_HALF" if score<55 else "PROCEED")
+        return _j.dumps({"score":round(score,1),"lean":lean,"status":"ok"})
     elif name == "check_catalyst_events":
         import sys as _sys
         if "/home/abhinavsharma1359/macrointel-catalyst" not in _sys.path:
@@ -561,23 +562,25 @@ def _build_llm_user_message(candidates, spy_pct, qqq_pct, num_signals):
     return "\n".join(lines)
 
 
-def _call_llm_filter_single(candidates, spy_pct, qqq_pct, num_signals):
+def _call_llm_filter_single(candidates, spy_pct, qqq_pct, num_signals, preferred_key_idx=0):
     if not LLM_API_KEYS:
         print("LLM FILTER: key not set; skipping",flush=True); return {}
     try:
         import requests as _req, json as _j
     except ImportError:
         return {}
+    # Rotate key order so parallel workers each prefer a different key
+    _key_order = LLM_API_KEYS[preferred_key_idx:] + LLM_API_KEYS[:preferred_key_idx]
     try:
         messages=[{"role":"system","content":LLM_SYSTEM_PROMPT},{"role":"user","content":_build_llm_user_message(candidates,spy_pct,qqq_pct,num_signals)}]
-        headers={"Authorization":f"Bearer {LLM_API_KEYS[0]}","Content-Type":"application/json","HTTP-Referer":"https://macro-intelligence.local","X-Title":"MacroIntelligence"}
+        headers={"Authorization":f"Bearer {_key_order[0]}","Content-Type":"application/json","HTTP-Referer":"https://macro-intelligence.local","X-Title":"MacroIntelligence"}
         tool_calls_made=0
         for _round in range(14):
             body={"model":LLM_MODEL,"messages":messages,"tools":TOOLS,"tool_choice":"required" if tool_calls_made<7 else "auto","temperature":0.1}
             _models_to_try = [body["model"]] + [m for m in LLM_FALLBACK_MODELS if m != body["model"]]
             resp = None
             for _try_model in _models_to_try:
-                for _ki, _key in enumerate(LLM_API_KEYS):
+                for _ki, _key in enumerate(_key_order):
                     try:
                         body["model"] = _try_model
                         headers["Authorization"] = f"Bearer {_key}"
@@ -645,33 +648,63 @@ def _call_llm_filter_single(candidates, spy_pct, qqq_pct, num_signals):
 
 
 
+LLM_PARALLEL_WORKERS = max(1, min(int(os.getenv("LLM_PARALLEL_WORKERS", "8")), len(LLM_API_KEYS) if LLM_API_KEYS else 1))
+
+
 def call_llm_filter(candidates, spy_pct=0.0, qqq_pct=0.0, num_signals=5):
-    """Process each candidate individually to avoid hitting round limits."""
-    all_decisions = {}
-    for cand in candidates:
+    """Process candidates in parallel, one worker per Groq API key."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not candidates:
+        return {}
+
+    n_keys = max(1, len(LLM_API_KEYS))
+    workers = min(LLM_PARALLEL_WORKERS, len(candidates))
+    print(f"LLM FILTER: {len(candidates)} candidates, {workers} parallel workers, {n_keys} keys", flush=True)
+
+    def _eval_one(idx_cand):
+        idx, cand = idx_cand
         sym = cand["symbol"]
-        print(f"LLM FILTER: evaluating {sym}", flush=True)
-        result = _call_llm_filter_single([cand], spy_pct=spy_pct, qqq_pct=qqq_pct, num_signals=num_signals)
-        all_decisions.update(result)
+        key_idx = idx % n_keys
+        print(f"LLM FILTER: evaluating {sym} [worker {idx}, key {key_idx}]", flush=True)
+        return _call_llm_filter_single(
+            [cand], spy_pct=spy_pct, qqq_pct=qqq_pct,
+            num_signals=num_signals, preferred_key_idx=key_idx,
+        )
+
+    all_decisions = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_eval_one, (i, c)): c["symbol"] for i, c in enumerate(candidates)}
+        for fut in as_completed(futures):
+            sym = futures[fut]
+            try:
+                result = fut.result()
+                all_decisions.update(result)
+            except Exception as e:
+                print(f"LLM FILTER: worker for {sym} raised {e}; defaulting to proceed", flush=True)
     return all_decisions
+
+LLM_REDUCE_MULT = float(os.getenv("LLM_REDUCE_MULT", "0.75"))
+
 
 def _apply_llm_decisions(signals, decisions):
     out = []
     for s in signals:
         sym = s["symbol"]
         d = decisions.get(sym) or decisions.get(sym.upper()) or {}
-        decision = str(d.get("decision", "reduce_half")).lower().strip()
+        # Default to "proceed" — missing/failed LLM response should not penalise sizing
+        decision = str(d.get("decision", "proceed")).lower().strip()
         reason = str(d.get("reason", "")).strip()[:120]
         confidence = str(d.get("confidence", "medium")).lower().strip()
         if decision == "skip":
             print(f"LLM {sym}: skip [{confidence}] — {reason}", flush=True)
             continue
         if decision == "reduce_half":
-            s["position_pct"] = round(s["position_pct"] / 2.0, 6)
+            s["position_pct"] = round(s["position_pct"] * LLM_REDUCE_MULT, 6)
             s["llm_decision"] = "reduce_half"
             s["llm_reason"] = reason
             s["llm_confidence"] = confidence
-            print(f"LLM {sym}: reduce_half [{confidence}] — {reason}", flush=True)
+            print(f"LLM {sym}: reduce_half x{LLM_REDUCE_MULT} [{confidence}] — {reason}", flush=True)
             out.append(s)
             continue
         s["llm_decision"] = "proceed"
@@ -1054,6 +1087,10 @@ def main():
     allowed = allowed_symbols()
     vol, regime, mult = spy_vol()
     live = latest_rows(features, allowed)
+
+    # Inject SPY realized vol so model can use it as a feature (if retrained with it)
+    if "spy_realized_vol_pct" in features:
+        live["spy_realized_vol_pct"] = vol
 
     X = live[features].replace([np.inf, -np.inf], np.nan).fillna(0).astype("float32")
     proba = model.predict_proba(X)
