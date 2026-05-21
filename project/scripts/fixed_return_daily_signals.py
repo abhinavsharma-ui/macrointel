@@ -581,12 +581,16 @@ def _call_llm_filter_single(candidates, spy_pct, qqq_pct, num_signals, preferred
             resp = None
             for _try_model in _models_to_try:
                 for _ki, _key in enumerate(_key_order):
+                    if _is_key_bad(_key):
+                        print(f"  skipping key[{_ki}] (rate-limited, {_BAD_KEY_TTL}s cooldown)", flush=True)
+                        continue
                     try:
                         body["model"] = _try_model
                         headers["Authorization"] = f"Bearer {_key}"
                         resp=_req.post("https://openrouter.ai/api/v1/chat/completions",headers=headers,json=body,timeout=60)
                         if resp.status_code == 429:
-                            print(f"  429 on {_try_model} key[{_ki}], trying next key", flush=True)
+                            print(f"  429 on {_try_model} key[{_ki}], marking bad for {_BAD_KEY_TTL}s", flush=True)
+                            _mark_key_bad(_key)
                             resp = None
                             continue
                         resp.raise_for_status()
@@ -649,6 +653,27 @@ def _call_llm_filter_single(candidates, spy_pct, qqq_pct, num_signals, preferred
 
 
 LLM_PARALLEL_WORKERS = max(1, min(int(os.getenv("LLM_PARALLEL_WORKERS", "8")), len(LLM_API_KEYS) if LLM_API_KEYS else 1))
+
+# Shared bad-key registry — workers mark 429'd keys so other workers skip them immediately
+import threading as _threading
+import time as _time
+_bad_keys_lock = _threading.Lock()
+_bad_keys: dict = {}  # key -> expiry timestamp
+_BAD_KEY_TTL = 60  # seconds before a rate-limited key is retried
+
+def _mark_key_bad(key: str) -> None:
+    with _bad_keys_lock:
+        _bad_keys[key] = _time.monotonic() + _BAD_KEY_TTL
+
+def _is_key_bad(key: str) -> bool:
+    with _bad_keys_lock:
+        expiry = _bad_keys.get(key)
+        if expiry is None:
+            return False
+        if _time.monotonic() > expiry:
+            del _bad_keys[key]
+            return False
+        return True
 
 
 def call_llm_filter(candidates, spy_pct=0.0, qqq_pct=0.0, num_signals=5):
