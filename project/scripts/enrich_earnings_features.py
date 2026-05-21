@@ -95,6 +95,11 @@ def compute_rolling(grp: pd.DataFrame) -> pd.DataFrame:
 
 log("Computing rolling features per symbol...")
 df = df.groupby("symbol", group_keys=False).apply(compute_rolling)
+# pandas may promote groupby key to index — restore it as a column
+if "symbol" not in df.columns:
+    df = df.reset_index()
+else:
+    df = df.reset_index(drop=True)
 log(f"  beat_rate_8q non-null: {df.beat_rate_8q.notna().sum()}")
 log(f"  consistent_beaters: {(df.consistent_beater==1).sum()} events")
 
@@ -149,6 +154,10 @@ def add_hist_move(grp):
     return grp
 
 df = df.groupby("symbol", group_keys=False).apply(add_hist_move)
+if "symbol" not in df.columns:
+    df = df.reset_index()
+else:
+    df = df.reset_index(drop=True)
 
 # ── Save ───────────────────────────────────────────────────────────────────────
 FEATURES_CSV.parent.mkdir(parents=True, exist_ok=True)
